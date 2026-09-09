@@ -3626,7 +3626,8 @@ void AscifyAction::PragmaDirective(
     nvidiaSampleHelperUnsupportedMacroUse = true;
     llvm::errs()
         << "Ascify NVIDIA sample-helper closure: unproven hash pragma '"
-        << pragmaOperation << "' keeps all helper edits\n";
+        << pragmaOperation << "' keeps all helper edits at "
+        << fileLocation.printToString(sourceManager) << ": " << line << "\n";
   }
 }
 
