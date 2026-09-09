@@ -51,6 +51,12 @@ run_check "static kernel proof M0 contract" \
   sh tests/rewrite/check_static_kernel_proof_m0.sh
 run_check "row-wise ascify-clang wrapper Python unit tests" \
   "$python" -I -B tests/rewrite/test_generate_rowwise_cce.py -q
+run_check "explicit FP16 input profile and FP64 rejection" \
+  "$python" -B tests/softmax_rmsnorm_950/scripts/test_prepare_fp16_input_profile.py -q
+run_check "RMSNorm full1000 input identities" \
+  "$python" -B tests/softmax_rmsnorm_950/tools/test_prepare_rmsnorm_full1000.py -q
+run_check "RMSNorm 64-bit stores and complete chunked host oracle" \
+  "$python" -B tests/softmax_rmsnorm_950/tools/test_rmsnorm_full1000_host.py -q
 
 if [ -z "${ASCIFY_BINARY:-}" ]; then
   echo "[release-check] translated fixtures skipped (ASCIFY_BINARY is unset)"

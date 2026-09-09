@@ -265,6 +265,7 @@ INCLUDE_DIRS=(
   "${CANN_ROOT}/compiler/tikcpp/tikcfw/impl"
   "${CANN_ROOT}/compiler/tikcpp/tikcfw/interface"
   "${CANN_ROOT}/x86_64-linux/asc/include"
+  "${CANN_ROOT}/aarch64-linux/asc/include"
 )
 
 INCLUDE_FLAGS=()
