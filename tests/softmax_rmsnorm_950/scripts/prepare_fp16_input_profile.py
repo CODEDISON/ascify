@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Prepare explicit FP16 workload inputs without defining device FP64 helpers.
+"""Prepare explicit FP16 inputs without defining device FP64 arithmetic helpers.
 
 This changes conversion inputs, never converter output.  It accepts only the
-versioned OneFlow fixture bytes and replaces six double specializations with
-deleted declarations, so an actual call remains a compile-time error.
+versioned OneFlow fixture bytes and replaces five double arithmetic
+specializations with deleted declarations, so actual arithmetic calls remain
+compile-time errors. The original Inf<double> constant is retained for the
+recipe's float/double infinity-family proof; it adds no FP64 arithmetic.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from pathlib import Path
 import shutil
 
 
-PROFILE_ID = "oneflow-fp16-no-device-fp64-v1"
+PROFILE_ID = "oneflow-fp16-no-device-fp64-arithmetic-v2"
 UPSTREAM_COMMIT = "25c8978c1c8b1371ef6aa4187dae4495bd233c35"
 DEFAULT_INPUT_ROOT = Path(__file__).resolve().parents[3] / "tests/fixtures/oneflow"
 FIXTURE_SHA256 = {
@@ -30,7 +32,6 @@ FIXTURE_SHA256 = {
 # Full-file hashes above prevent a changed source from inheriting the profile.
 SPECIALIZATIONS = {
     "oneflow/core/cuda/softmax.cuh": (
-        ("Inf", "", "CUDART_INF"),
         ("Exp", "double x", "exp(x)"),
         ("Div", "double a, double b", "a / b"),
         ("Log", "double x", "log(x)"),
@@ -55,7 +56,7 @@ def specialization_edit(name: str, parameters: str, expression: str) -> tuple[st
     original = declaration + " {\n  return " + expression + ";\n}\n"
     replacement = (
         declaration + " = delete;"
-        "  // Ascify FP16 input profile excludes device FP64.\n"
+        "  // Ascify FP16 input profile excludes device FP64 arithmetic.\n"
     )
     return original, replacement
 
@@ -107,8 +108,9 @@ def prepare_profile(input_root: Path, output_root: Path) -> dict:
         "intended_workload": "FP16 input/output, FP32 accumulation",
         "source_upstream_commit": UPSTREAM_COMMIT,
         "rms_norm_fixture_note": "Preserves the existing rows_per_access tail fix byte-for-byte.",
-        "boundary": "Six device double helper specializations are deleted; real calls are rejected.",
-        "not_a_claim": "No automatic FP64 migration, target compilation, correctness, or performance claim.",
+        "boundary": "Five device double arithmetic specializations are deleted; real arithmetic calls are rejected.",
+        "retained_constant": "Inf<double> returns the original CUDART_INF constant. It is retained for the recipe infinity-family proof, not FP64 arithmetic support.",
+        "not_a_claim": "No FP64 arithmetic migration, target compilation, correctness, or performance claim.",
         "files": records,
     }
     # mkdir is exclusive: an existing directory, file, or symlink is never reused.

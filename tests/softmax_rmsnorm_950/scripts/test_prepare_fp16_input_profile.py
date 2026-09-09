@@ -30,8 +30,8 @@ class InputProfileTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.temporary.cleanup()
 
-    def test_only_six_exact_double_specializations_change(self):
-        self.assertEqual(sum(len(f["edits"]) for f in self.manifest["files"]), 6)
+    def test_only_five_exact_double_arithmetic_specializations_change(self):
+        self.assertEqual(sum(len(f["edits"]) for f in self.manifest["files"]), 5)
         for record in self.manifest["files"]:
             source = (profile.DEFAULT_INPUT_ROOT / record["path"]).read_bytes()
             prepared = (self.output / record["path"]).read_bytes()
@@ -45,6 +45,18 @@ class InputProfileTests(unittest.TestCase):
         rms = "oneflow/core/cuda/rms_norm.cuh"
         self.assertEqual((self.output / rms).read_bytes(),
                          (profile.DEFAULT_INPUT_ROOT / rms).read_bytes())
+
+    def test_infinity_constants_remain_original_for_recipe_proof(self):
+        path = "oneflow/core/cuda/softmax.cuh"
+        source = (profile.DEFAULT_INPUT_ROOT / path).read_text()
+        prepared = (self.output / path).read_text()
+        for dtype, constant in (("float", "CUDART_INF_F"), ("double", "CUDART_INF")):
+            body = (f"template<>\n__inline__ __device__ {dtype} Inf<{dtype}>() {{\n"
+                    f"  return {constant};\n}}\n")
+            self.assertEqual(source.count(body), 1)
+            self.assertEqual(prepared.count(body), 1)
+        self.assertIn("retained_constant", self.manifest)
+        self.assertEqual(self.manifest["profile"], "oneflow-fp16-no-device-fp64-arithmetic-v2")
 
     def test_deterministic_profile_and_manifest(self):
         other = self.root / "profile-again"
@@ -96,7 +108,7 @@ class DeletedSpecializationTests(unittest.TestCase):
                       layer.index("template<class Func>\ninline cudaError_t GetNumBlocks(")]
         cls.helpers = (
             "#include <cmath>\n#include <type_traits>\n"
-            "#define __device__\n#define CUDART_INF_F INFINITY\n"
+            "#define __device__\n#define CUDART_INF_F INFINITY\n#define CUDART_INF HUGE_VAL\n"
             "float rsqrt(float x) { return 1.0f / std::sqrt(x); }\n"
             "namespace softmax {\n" + softmax + "}\n"
             "namespace layer_norm {\n" + layer + "}\n"
@@ -139,8 +151,19 @@ int main() {
         run = subprocess.run([str(executable)], capture_output=True, timeout=30)
         self.assertEqual(run.returncode, 0)
 
-    def test_every_explicit_double_call_is_rejected(self):
-        calls = ["softmax::Inf<double>()", "softmax::Exp<double>(1.0)",
+    def test_retained_double_infinity_is_only_the_original_positive_constant(self):
+        result, executable = self.compile(r'''
+int main() {
+  const double value = softmax::Inf<double>();
+  return !(std::isinf(value) && !std::signbit(value));
+}
+''', link=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = subprocess.run([str(executable)], capture_output=True, timeout=30)
+        self.assertEqual(run.returncode, 0)
+
+    def test_every_explicit_double_arithmetic_call_is_rejected(self):
+        calls = ["softmax::Exp<double>(1.0)",
                  "softmax::Div<double>(1.0, 2.0)", "softmax::Log<double>(1.0)",
                  "layer_norm::Div<double>(1.0, 2.0)", "layer_norm::Rsqrt<double>(1.0)"]
         for call in calls:
