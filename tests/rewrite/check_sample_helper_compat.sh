@@ -4,6 +4,7 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 action_cpp="$repo_root/src/AscifyAction.cpp"
 compat_header="$repo_root/include/ascify/ascify_cuda_compat.hpp"
+compat_identifiers="$repo_root/src/AscifyCudaCompatIdentifiers.inc"
 host_test="$repo_root/tests/rewrite/sample_helper_compat_test.cpp"
 find_device_host_test="$repo_root/tests/rewrite/sample_find_device_compat_test.cpp"
 fixtures="$repo_root/tests/rewrite/fixtures"
@@ -78,15 +79,42 @@ require_fixed '997f9ac1f8e5f8e5f45f8b11eebab5b89305dee7430b90654bafe62283cffee1'
 require_fixed '26e988c97fb3d77d498e384c685177ed7966e41d5d58ebc9b7d3d696859f5e57' "$action_cpp"
 require_fixed 'FrozenOfficialNvidiaSampleHelperFunctions' "$action_cpp"
 require_fixed 'FrozenOfficialNvidiaSampleHelperImage' "$action_cpp"
+require_fixed 'FrozenOfficialNvidiaSampleHelperTimer' "$action_cpp"
 require_fixed '3fdcd18e41ffc2a9c88ade3595384e9cd05a2d84f80b86a2d5982035ca79c426' "$action_cpp"
 require_fixed 'bc1fe7921bafad278ffa2e4bc8a99c18825208b9f5f47842a7cf7e86cae8b3f1' "$action_cpp"
 require_fixed 'activeFrozenHelperFunctionsProviderMacroBodyMatches' "$action_cpp"
-require_fixed 'name == "EXIT_WAIVED" || name == "MAX"' "$action_cpp"
+require_fixed 'activeFrozenHelperCudaMaxBodyMatches' "$action_cpp"
+require_fixed 'frozenNvidiaSampleDirectFunctionsRootIdentities' \
+  "$action_cpp"
+require_fixed 'frozenNvidiaSampleDirectFunctionsRootFileIds' "$action_cpp"
+require_fixed 'isDirectFrozenFunctionsImageProviderInstance' "$action_cpp"
+require_fixed 'preprocessorConditionalDepth == 0' "$action_cpp"
+require_fixed 'sourceManager.getIncludeLoc(imageFile)' "$action_cpp"
+require_fixed 'isNvidiaSampleHelperObservableMacro' "$action_cpp"
+require_fixed 'pragma observation of' "$action_cpp"
+require_fixed 'pragma macro-stack' "$action_cpp"
+require_fixed 'NvidiaSampleHelperObservableMacros' "$action_cpp"
+require_fixed 'Introducer != clang::PIK_HashPragma' "$action_cpp"
+require_fixed 'trigraph pragma spelling' "$action_cpp"
+require_fixed 'block-comment pragma' "$action_cpp"
+require_fixed 'isDirectlyAllowedHashPragma' "$action_cpp"
+require_fixed 'PragmaDiagnosticPush' "$action_cpp"
+require_fixed 'finalizePendingNvidiaSampleHelperPragma' "$action_cpp"
+require_fixed 'auditSkippedNvidiaSampleHelperElifDirective' "$action_cpp"
 require_fixed 'admittedConsumer && useKind == "#ifndef"' "$action_cpp"
 require_fixed 'frozenNvidiaSampleMacroProviderIdentities.count' "$action_cpp"
-require_fixed 'providerRole == FrozenOfficialNvidiaSampleHelperImage' "$action_cpp"
+require_fixed 'FrozenOfficialNvidiaSampleHelperImage)' "$action_cpp"
 require_fixed '!isFrozenHelperFunctionsProviderPolicyMacro(macroName)' "$action_cpp"
 require_fixed '::ascify::sampleFindCudaDevice' "$action_cpp"
+require_fixed 'VisitUnresolvedLookupExpr' "$action_cpp"
+require_fixed 'auditRawPublishedCompatTokensInFile' "$action_cpp"
+require_fixed 'isAscifyCudaCompatReservedMacro' "$action_cpp"
+require_fixed 'isAscifyCudaCompatPublishedMacro' "$action_cpp"
+require_fixed 'RuntimeLock' "$compat_identifiers"
+require_fixed 'c1f87bd416aa4f389171593bd5e47894999d05407e5935d3151fbcd2aa6438c9' \
+  "$action_cpp"
+require_fixed '#include <helper_string.h>' "$action_cpp"
+require_fixed 'surface retained' "$action_cpp"
 require_fixed 'ct::Replacements staged(*replacements);' "$action_cpp"
 require_fixed '*replacements = std::move(staged);' "$action_cpp"
 require_fixed 'nvidiaSampleHelperRawAuditCompleted = true;' "$action_cpp"
@@ -97,6 +125,15 @@ require_fixed 'exactly one visible logical device is required' "$compat_header"
 require_fixed 'const aclError status = cudaGetLastError();' "$compat_header"
 require_fixed '#expression, __FILE__, __LINE__' "$compat_header"
 forbid_fixed 'gpuGetMaxGflopsDeviceId' "$compat_header"
+
+[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 43500 ]
+if command -v sha256sum >/dev/null 2>&1; then
+  compat_header_sha=$(sha256sum "$compat_header" | awk '{print $1}')
+else
+  compat_header_sha=$(shasum -a 256 "$compat_header" | awk '{print $1}')
+fi
+[ "$compat_header_sha" = \
+  c1f87bd416aa4f389171593bd5e47894999d05407e5935d3151fbcd2aa6438c9 ]
 
 official_helper_functions="$fixtures/nvidia_samples/Common/helper_functions.h"
 [ "$(wc -c <"$official_helper_functions" | tr -d ' ')" -eq 2358 ]
@@ -129,6 +166,18 @@ cleanup() {
   rm -rf -- "$test_tmp"
 }
 trap cleanup 0 1 2 15
+
+raw_token_clang=${CLANG:-clang}
+if command -v "$raw_token_clang" >/dev/null 2>&1; then
+  "$raw_token_clang" -cc1 -x c++ -std=c++17 -dump-raw-tokens \
+    "$compat_header" 2>&1 | \
+    sed -n "s/^raw_identifier '\([^']*\)'.*/\1/p" | \
+    LC_ALL=C sort -u >"$test_tmp/compat-identifiers.expected"
+  sed -n 's/^[[:space:]]*"\([^"]*\)",$/\1/p' \
+    "$compat_identifiers" >"$test_tmp/compat-identifiers.actual"
+  diff -u "$test_tmp/compat-identifiers.expected" \
+    "$test_tmp/compat-identifiers.actual"
+fi
 
 cxx=${CXX:-c++}
 if command -v "$cxx" >/dev/null 2>&1; then
@@ -234,11 +283,32 @@ translate() {
     >"$log.stdout" 2>"$log.stderr"
 }
 
+translate_expect_failure() {
+  input=$1
+  include_dir=$2
+  output=$3
+  log=$4
+  shift 4
+  set +e
+  "$binary" "$input" \
+    --target-policy=dav-c310-vec \
+    --simt-math=fast \
+    --default-preprocessor \
+    --cuda-path="$cuda_path" \
+    --clang-resource-directory="$resource_dir" \
+    -o "$output" -- -x cuda -std=c++17 -I"$include_dir" -I"$fixtures" "$@" \
+    >"$log.stdout" 2>"$log.stderr"
+  failure_rc=$?
+  set -e
+  [ "$failure_rc" -ne 0 ]
+}
+
 translate_with_command_line_collision() {
   input=$1
   include_dir=$2
   output=$3
   log=$4
+  set +e
   "$binary" "$input" \
     --target-policy=dav-c310-vec \
     --simt-math=fast \
@@ -250,6 +320,9 @@ translate_with_command_line_collision() {
     '-DASCIFY_NVIDIA_SAMPLE_GET_LAST_CUDA_ERROR(message)=ascifyCommandLineLastError(message)' \
     '-DsampleFindCudaDevice(argc,argv)=ascifyCommandLineDevice((argc),(argv))' \
     >"$log.stdout" 2>"$log.stderr"
+  command_line_collision_rc=$?
+  set -e
+  [ "$command_line_collision_rc" -ne 0 ]
 }
 
 translate "$fixtures/sample_helper_supported.cu" \
@@ -257,12 +330,33 @@ translate "$fixtures/sample_helper_supported.cu" \
   "$test_tmp/supported.cpp" "$test_tmp/supported"
 require_fixed '#include <ascify/ascify_cuda_compat.hpp>' \
   "$test_tmp/supported.cpp"
+require_fixed '#include <stdint.h>' "$test_tmp/supported.cpp"
+require_fixed '#include <helper_string.h>' "$test_tmp/supported.cpp"
 require_fixed 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaMalloc' \
   "$test_tmp/supported.cpp"
 require_fixed 'ASCIFY_NVIDIA_SAMPLE_GET_LAST_CUDA_ERROR("kernel launch")' \
   "$test_tmp/supported.cpp"
 forbid_fixed 'helper_cuda.h' "$test_tmp/supported.cpp"
 require_fixed 'include removed' "$test_tmp/supported.stderr"
+
+translate "$fixtures/sample_helper_portable_surface.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/portable-surface.cpp" "$test_tmp/portable-surface"
+require_fixed '#include <stdint.h>' "$test_tmp/portable-surface.cpp"
+require_fixed '#include <stdio.h>' "$test_tmp/portable-surface.cpp"
+require_fixed '#include <stdlib.h>' "$test_tmp/portable-surface.cpp"
+require_fixed '#include <string.h>' "$test_tmp/portable-surface.cpp"
+require_fixed '#include <helper_string.h>' "$test_tmp/portable-surface.cpp"
+forbid_fixed '#include <helper_cuda.h>' "$test_tmp/portable-surface.cpp"
+forbid_fixed '#include <ascify/ascify_cuda_compat.hpp>' \
+  "$test_tmp/portable-surface.cpp"
+require_fixed 'portable surface retained' \
+  "$test_tmp/portable-surface.stderr"
+if command -v "$cxx" >/dev/null 2>&1; then
+  "$cxx" -std=c++17 -fsyntax-only \
+    -I"$fixtures/nvidia_samples/Common" \
+    "$test_tmp/portable-surface.cpp"
+fi
 
 translate "$fixtures/sample_helper_residual.cu" \
   "$fixtures/nvidia_samples/Common" \
@@ -280,11 +374,42 @@ translate "$fixtures/sample_helper_find_device_direct.cu" \
   "$test_tmp/find-direct.cpp" "$test_tmp/find-direct"
 require_fixed '#include <ascify/ascify_cuda_compat.hpp>' \
   "$test_tmp/find-direct.cpp"
+require_fixed '#include <helper_string.h>' "$test_tmp/find-direct.cpp"
 require_fixed 'return ::ascify::sampleFindCudaDevice(argc, argv);' \
   "$test_tmp/find-direct.cpp"
 forbid_fixed 'helper_cuda.h' "$test_tmp/find-direct.cpp"
 require_fixed 'find_device_rewrites=1' "$test_tmp/find-direct.stderr"
 require_fixed 'include removed' "$test_tmp/find-direct.stderr"
+
+translate "$fixtures/sample_helper_find_device_external_deferred.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-external-deferred.cpp" \
+  "$test_tmp/find-external-deferred"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-external-deferred.cpp"
+require_fixed 'return findCudaDevice(argc, argv);' \
+  "$test_tmp/find-external-deferred.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-external-deferred.cpp"
+require_fixed "residual helper declaration 'findCudaDevice'" \
+  "$test_tmp/find-external-deferred.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-external-deferred.stderr"
+
+translate "$fixtures/sample_helper_find_device_unrelated_push_pop.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-unrelated-push-pop.cpp" \
+  "$test_tmp/find-unrelated-push-pop"
+require_fixed '#pragma push_macro("ASCIFY_TEST_UNRELATED")' \
+  "$test_tmp/find-unrelated-push-pop.cpp"
+require_fixed '#pragma pop_macro("ASCIFY_TEST_UNRELATED")' \
+  "$test_tmp/find-unrelated-push-pop.cpp"
+require_fixed 'return ::ascify::sampleFindCudaDevice(argc, argv);' \
+  "$test_tmp/find-unrelated-push-pop.cpp"
+forbid_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-unrelated-push-pop.cpp"
+require_fixed 'include removed' \
+  "$test_tmp/find-unrelated-push-pop.stderr"
 
 # Reproduce simpleAtomicIntrinsics' unedited Common-header graph. The exact
 # helper_functions root enters exact helper_image first, which establishes
@@ -303,6 +428,358 @@ require_fixed 'find_device_rewrites=1' \
   "$test_tmp/find-official-exit-waived.stderr"
 require_fixed 'include removed' \
   "$test_tmp/find-official-exit-waived.stderr"
+
+# scalarProd uses the reverse direct-include order. The exact helper_cuda MAX
+# body is active while exact helper_functions enters exact helper_image. That
+# one internal expansion is safe because removing helper_cuda makes the same
+# image file publish its equivalent MAX body before the same use.
+translate "$fixtures/sample_helper_find_device_cuda_then_functions.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-cuda-then-functions.cpp" \
+  "$test_tmp/find-cuda-then-functions"
+require_fixed '#include <helper_functions.h>' \
+  "$test_tmp/find-cuda-then-functions.cpp"
+require_fixed '#include <helper_string.h>' \
+  "$test_tmp/find-cuda-then-functions.cpp"
+require_fixed 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaSetDevice' \
+  "$test_tmp/find-cuda-then-functions.cpp"
+require_fixed 'ASCIFY_NVIDIA_SAMPLE_GET_LAST_CUDA_ERROR(' \
+  "$test_tmp/find-cuda-then-functions.cpp"
+require_fixed 'return ::ascify::sampleFindCudaDevice(argc, argv);' \
+  "$test_tmp/find-cuda-then-functions.cpp"
+forbid_fixed 'helper_cuda.h' \
+  "$test_tmp/find-cuda-then-functions.cpp"
+require_fixed 'check_rewrites=1' \
+  "$test_tmp/find-cuda-then-functions.stderr"
+require_fixed 'get_last_rewrites=1' \
+  "$test_tmp/find-cuda-then-functions.stderr"
+require_fixed 'find_device_rewrites=1' \
+  "$test_tmp/find-cuda-then-functions.stderr"
+require_fixed 'include removed' \
+  "$test_tmp/find-cuda-then-functions.stderr"
+if command -v "$cxx" >/dev/null 2>&1; then
+  "$cxx" -std=c++17 -fsyntax-only -D__aicore__= \
+    -I"$repo_root/tests/rewrite/stubs" \
+    -I"$repo_root/include" \
+    -I"$fixtures/nvidia_samples/Common" \
+    "$test_tmp/find-cuda-then-functions.cpp"
+fi
+
+# Exact helper_image alone is not the admitted replacement-provider graph.
+translate "$fixtures/sample_helper_find_device_cuda_then_image.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-cuda-then-image.cpp" \
+  "$test_tmp/find-cuda-then-image"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-cuda-then-image.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-cuda-then-image.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-cuda-then-image.cpp"
+require_fixed 'helper macro expansion outside the main file' \
+  "$test_tmp/find-cuda-then-image.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-cuda-then-image.stderr"
+
+# An include reached only through a helper_cuda-controlled conditional would
+# disappear after helper_cuda removal, so it cannot prove the replacement
+# provider even though the original preprocessing run entered the exact file.
+translate "$fixtures/sample_helper_find_device_conditional_functions.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-conditional-functions.cpp" \
+  "$test_tmp/find-conditional-functions"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-conditional-functions.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-conditional-functions.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-conditional-functions.cpp"
+require_fixed 'helper macro expansion outside the main file' \
+  "$test_tmp/find-conditional-functions.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-conditional-functions.stderr"
+
+# Exercise the separate PPCallbacks::If path as well as Ifdef: an exact root
+# selected by `#if defined(...)` would also disappear after helper removal.
+translate "$fixtures/sample_helper_find_device_if_defined_functions.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-if-defined-functions.cpp" \
+  "$test_tmp/find-if-defined-functions"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-if-defined-functions.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-if-defined-functions.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-if-defined-functions.cpp"
+require_fixed 'helper macro expansion outside the main file' \
+  "$test_tmp/find-if-defined-functions.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-if-defined-functions.stderr"
+
+# A direct user wrapper is preserved, but it is not itself proof that an exact
+# helper_functions provider remains unconditionally reachable after removal.
+translate "$fixtures/sample_helper_find_device_transitive_functions.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-transitive-functions.cpp" \
+  "$test_tmp/find-transitive-functions"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-transitive-functions.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-transitive-functions.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-transitive-functions.cpp"
+require_fixed 'helper macro expansion outside the main file' \
+  "$test_tmp/find-transitive-functions.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-transitive-functions.stderr"
+
+# A direct exact functions root cannot lend trust to an exact image entered by
+# a different helper_cuda-controlled include path.
+translate "$fixtures/sample_helper_find_device_provider_ancestry_bypass.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-provider-ancestry-bypass.cpp" \
+  "$test_tmp/find-provider-ancestry-bypass"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-provider-ancestry-bypass.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-provider-ancestry-bypass.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-provider-ancestry-bypass.cpp"
+require_fixed 'include kept' \
+  "$test_tmp/find-provider-ancestry-bypass.stderr"
+require_fixed 'helper macro expansion outside the main file' \
+  "$test_tmp/find-provider-ancestry-bypass.stderr"
+
+# Removing helper_cuda must not change a downstream include-guard observation.
+translate "$fixtures/sample_helper_find_device_downstream_guard.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-downstream-guard.cpp" \
+  "$test_tmp/find-downstream-guard"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-downstream-guard.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-downstream-guard.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-downstream-guard.cpp"
+require_fixed "observable #ifdef use of 'COMMON_HELPER_CUDA_H_'" \
+  "$test_tmp/find-downstream-guard.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-downstream-guard.stderr"
+
+# The preprocessor macro stack is observable even when no later MAX expansion
+# occurs, so push/pop around the provider graph remains fail-closed.
+translate "$fixtures/sample_helper_find_device_push_pop_max.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-push-pop-max.cpp" \
+  "$test_tmp/find-push-pop-max"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-push-pop-max.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-push-pop-max.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-push-pop-max.cpp"
+require_fixed 'pragma macro-stack operation keeps all helper edits' \
+  "$test_tmp/find-push-pop-max.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-push-pop-max.stderr"
+
+for pragma_form in multiline macro_generated; do
+  translate \
+    "$fixtures/sample_helper_find_device_${pragma_form}_push_pop_max.cu" \
+    "$fixtures/nvidia_samples/Common" \
+    "$test_tmp/find-${pragma_form}-push-pop-max.cpp" \
+    "$test_tmp/find-${pragma_form}-push-pop-max"
+  require_fixed '#include <helper_cuda.h>' \
+    "$test_tmp/find-${pragma_form}-push-pop-max.cpp"
+  require_fixed 'findCudaDevice(argc, argv)' \
+    "$test_tmp/find-${pragma_form}-push-pop-max.cpp"
+  forbid_fixed 'sampleFindCudaDevice' \
+    "$test_tmp/find-${pragma_form}-push-pop-max.cpp"
+  require_fixed 'include kept' \
+    "$test_tmp/find-${pragma_form}-push-pop-max.stderr"
+done
+require_fixed 'pragma macro-stack operation keeps all helper edits' \
+  "$test_tmp/find-multiline-push-pop-max.stderr"
+require_fixed 'macro-generated pragma keeps all helper edits' \
+  "$test_tmp/find-macro_generated-push-pop-max.stderr"
+
+translate "$fixtures/sample_helper_find_device_macro_target_push_pop_max.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-macro-target-push-pop-max.cpp" \
+  "$test_tmp/find-macro-target-push-pop-max"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-macro-target-push-pop-max.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-macro-target-push-pop-max.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-macro-target-push-pop-max.cpp"
+require_fixed 'pragma macro-stack operation keeps all helper edits' \
+  "$test_tmp/find-macro-target-push-pop-max.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-macro-target-push-pop-max.stderr"
+
+translate "$fixtures/sample_helper_published_macro_stack.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/published-macro-stack.cpp" \
+  "$test_tmp/published-macro-stack"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/published-macro-stack.cpp"
+require_fixed 'checkCudaErrors(ascify::cudaMalloc' \
+  "$test_tmp/published-macro-stack.cpp"
+forbid_fixed 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(' \
+  "$test_tmp/published-macro-stack.cpp"
+require_fixed 'pragma macro-stack operation keeps all helper edits' \
+  "$test_tmp/published-macro-stack.stderr"
+require_fixed 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS' \
+  "$test_tmp/published-macro-stack.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/published-macro-stack.stderr"
+
+translate "$fixtures/sample_helper_find_device_trigraph_pragma_max.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-trigraph-pragma-max.cpp" \
+  "$test_tmp/find-trigraph-pragma-max" \
+  '-trigraphs'
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-trigraph-pragma-max.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-trigraph-pragma-max.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-trigraph-pragma-max.cpp"
+require_fixed 'trigraph pragma spelling keeps all helper edits' \
+  "$test_tmp/find-trigraph-pragma-max.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-trigraph-pragma-max.stderr"
+
+bare_cr_pragma_input="$test_tmp/sample-helper-bare-cr-pragma-max.cu"
+tr '\n' '\r' \
+  <"$fixtures/sample_helper_find_device_bare_cr_pragma_max.template.cu" \
+  >"$bare_cr_pragma_input"
+translate "$bare_cr_pragma_input" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-bare-cr-pragma-max.cpp" \
+  "$test_tmp/find-bare-cr-pragma-max"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-bare-cr-pragma-max.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-bare-cr-pragma-max.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-bare-cr-pragma-max.cpp"
+require_fixed "pragma observation of 'MAX'" \
+  "$test_tmp/find-bare-cr-pragma-max.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-bare-cr-pragma-max.stderr"
+
+translate "$fixtures/sample_helper_find_device_comment_pragma_max.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-comment-pragma-max.cpp" \
+  "$test_tmp/find-comment-pragma-max"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-comment-pragma-max.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-comment-pragma-max.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-comment-pragma-max.cpp"
+require_fixed 'block-comment pragma spelling keeps all helper edits' \
+  "$test_tmp/find-comment-pragma-max.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-comment-pragma-max.stderr"
+
+translate "$fixtures/sample_helper_find_device_external_deprecated_max.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-external-deprecated-max.cpp" \
+  "$test_tmp/find-external-deprecated-max"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-external-deprecated-max.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-external-deprecated-max.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-external-deprecated-max.cpp"
+require_fixed "pragma observation of 'MAX'" \
+  "$test_tmp/find-external-deprecated-max.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-external-deprecated-max.stderr"
+
+translate "$fixtures/sample_helper_find_device_external_annotation_alias.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-external-annotation-alias.cpp" \
+  "$test_tmp/find-external-annotation-alias"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-external-annotation-alias.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-external-annotation-alias.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-external-annotation-alias.cpp"
+require_fixed "unproven hash pragma 'clang'" \
+  "$test_tmp/find-external-annotation-alias.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-external-annotation-alias.stderr"
+
+translate "$fixtures/sample_helper_find_device_external_published_macro.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-external-published-macro.cpp" \
+  "$test_tmp/find-external-published-macro"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-external-published-macro.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-external-published-macro.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-external-published-macro.cpp"
+require_fixed "retained header observes published macro token 'ASCIFY_GLOBAL'" \
+  "$test_tmp/find-external-published-macro.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-external-published-macro.stderr"
+
+translate "$fixtures/sample_helper_find_device_token_pasted_defined_max.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-token-pasted-defined-max.cpp" \
+  "$test_tmp/find-token-pasted-defined-max"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-token-pasted-defined-max.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-token-pasted-defined-max.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-token-pasted-defined-max.cpp"
+require_fixed "observable defined use of 'MAX'" \
+  "$test_tmp/find-token-pasted-defined-max.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-token-pasted-defined-max.stderr"
+
+for elif_form in taken skipped; do
+  translate \
+    "$fixtures/sample_helper_find_device_external_elifdef_${elif_form}.cu" \
+    "$fixtures/nvidia_samples/Common" \
+    "$test_tmp/find-external-elifdef-${elif_form}.cpp" \
+    "$test_tmp/find-external-elifdef-${elif_form}"
+  require_fixed '#include <helper_cuda.h>' \
+    "$test_tmp/find-external-elifdef-${elif_form}.cpp"
+  require_fixed 'findCudaDevice(argc, argv)' \
+    "$test_tmp/find-external-elifdef-${elif_form}.cpp"
+  forbid_fixed 'sampleFindCudaDevice' \
+    "$test_tmp/find-external-elifdef-${elif_form}.cpp"
+  require_fixed '#elifdef' \
+    "$test_tmp/find-external-elifdef-${elif_form}.stderr"
+  require_fixed 'include kept' \
+    "$test_tmp/find-external-elifdef-${elif_form}.stderr"
+done
+
+# The exact internal image use does not authorize a later user-header use of
+# helper_cuda's MAX macro.
+translate \
+  "$fixtures/sample_helper_find_device_cuda_then_functions_external_max.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-cuda-then-functions-external-max.cpp" \
+  "$test_tmp/find-cuda-then-functions-external-max"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-cuda-then-functions-external-max.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-cuda-then-functions-external-max.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-cuda-then-functions-external-max.cpp"
+require_fixed 'helper macro expansion outside the main file' \
+  "$test_tmp/find-cuda-then-functions-external-max.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-cuda-then-functions-external-max.stderr"
 
 assert_exit_waived_rejected() {
   label=$1
@@ -420,6 +897,47 @@ translate "$fixtures/sample_helper_find_device_mutated_image_max.cu" \
 assert_max_rejected \
   "$test_tmp/find-mutated-image-max.cpp" \
   "$test_tmp/find-mutated-image-max"
+
+# A same-size mutation of the consumer cannot borrow the internal-expansion
+# exception, even when the surrounding direct-include order is unchanged.
+translate "$fixtures/sample_helper_find_device_cuda_then_functions.cu" \
+  "$mutated_image_dir" \
+  "$test_tmp/find-cuda-then-mutated-image.cpp" \
+  "$test_tmp/find-cuda-then-mutated-image" \
+  "-I$fixtures/nvidia_samples/Common"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-cuda-then-mutated-image.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-cuda-then-mutated-image.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-cuda-then-mutated-image.cpp"
+require_fixed 'helper macro expansion outside the main file' \
+  "$test_tmp/find-cuda-then-mutated-image.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-cuda-then-mutated-image.stderr"
+
+mutated_functions_dir="$test_tmp/helper-functions-same-size-mutation"
+mkdir -p "$mutated_functions_dir"
+sed 's/These are helper functions/These are helper functionz/' \
+  "$fixtures/nvidia_samples/Common/helper_functions.h" \
+  >"$mutated_functions_dir/helper_functions.h"
+[ "$(wc -c <"$mutated_functions_dir/helper_functions.h" | tr -d ' ')" \
+  -eq 2358 ]
+translate "$fixtures/sample_helper_find_device_cuda_then_functions.cu" \
+  "$mutated_functions_dir" \
+  "$test_tmp/find-cuda-then-mutated-functions.cpp" \
+  "$test_tmp/find-cuda-then-mutated-functions" \
+  "-I$fixtures/nvidia_samples/Common"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-cuda-then-mutated-functions.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-cuda-then-mutated-functions.cpp"
+forbid_fixed 'sampleFindCudaDevice' \
+  "$test_tmp/find-cuda-then-mutated-functions.cpp"
+require_fixed 'helper macro expansion outside the main file' \
+  "$test_tmp/find-cuda-then-mutated-functions.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-cuda-then-mutated-functions.stderr"
 
 translate "$fixtures/sample_helper_find_device_discarded_call.cu" \
   "$fixtures/nvidia_samples/Common" \
@@ -572,26 +1090,13 @@ require_fixed 'global proof failed before replacement' \
   "$test_tmp/pp-alias.stderr"
 require_fixed 'include kept' "$test_tmp/pp-alias.stderr"
 
-translate "$fixtures/sample_helper_preexisting_output_macro.cu" \
+translate_expect_failure "$fixtures/sample_helper_preexisting_output_macro.cu" \
   "$fixtures/nvidia_samples/Common" \
   "$test_tmp/output-collision.cpp" "$test_tmp/output-collision"
-require_fixed '#include <helper_cuda.h>' "$test_tmp/output-collision.cpp"
-require_fixed 'checkCudaErrors(ascify::cudaMalloc' \
-  "$test_tmp/output-collision.cpp"
-require_fixed 'getLastCudaError("user output macro collision")' \
-  "$test_tmp/output-collision.cpp"
-require_fixed 'findCudaDevice(argc, argv)' \
-  "$test_tmp/output-collision.cpp"
-[ "$(grep -F -c 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS' \
-       "$test_tmp/output-collision.cpp")" -eq 1 ]
-[ "$(grep -F -c 'ASCIFY_NVIDIA_SAMPLE_GET_LAST_CUDA_ERROR' \
-       "$test_tmp/output-collision.cpp")" -eq 1 ]
-[ "$(grep -F -c 'sampleFindCudaDevice' \
-       "$test_tmp/output-collision.cpp")" -eq 1 ]
+[ ! -e "$test_tmp/output-collision.cpp" ]
 require_fixed 'reserved output macro' "$test_tmp/output-collision.stderr"
-require_fixed 'global proof failed before replacement' \
+require_fixed 'cannot publish CUDA compatibility output' \
   "$test_tmp/output-collision.stderr"
-require_fixed 'include kept' "$test_tmp/output-collision.stderr"
 
 translate "$fixtures/sample_helper_find_device_altered_definition.cu" \
   "$fixtures/altered_find_nvidia_samples/Common" \
@@ -672,25 +1177,90 @@ for find_mutation in \
     "$test_tmp/find-mutation-${find_mutation}.stderr"
 done
 
-translate "$fixtures/sample_helper_user_header_output_macro.cu" \
+for compat_collision in \
+  compat_guard_collision ascify_macro_collision \
+  ascify_declaration_collision extern_ascify_collision \
+  active_compat_macro; do
+  translate \
+    "$fixtures/sample_helper_find_device_${compat_collision}.cu" \
+    "$fixtures/nvidia_samples/Common" \
+    "$test_tmp/find-${compat_collision}.cpp" \
+    "$test_tmp/find-${compat_collision}"
+  require_fixed '#include <helper_cuda.h>' \
+    "$test_tmp/find-${compat_collision}.cpp"
+  require_fixed 'findCudaDevice(argc, argv)' \
+    "$test_tmp/find-${compat_collision}.cpp"
+  forbid_fixed '::ascify::sampleFindCudaDevice' \
+    "$test_tmp/find-${compat_collision}.cpp"
+  require_fixed 'include kept' \
+    "$test_tmp/find-${compat_collision}.stderr"
+done
+require_fixed 'reserved output macro' \
+  "$test_tmp/find-compat_guard_collision.stderr"
+require_fixed 'reserved output macro' \
+  "$test_tmp/find-ascify_macro_collision.stderr"
+require_fixed "top-level declaration 'ascify'" \
+  "$test_tmp/find-ascify_declaration_collision.stderr"
+require_fixed "top-level declaration 'ascify'" \
+  "$test_tmp/find-extern_ascify_collision.stderr"
+require_fixed "untrusted input macro 'RuntimeLock'" \
+  "$test_tmp/find-active_compat_macro.stderr"
+
+translate "$fixtures/sample_helper_find_device_spoof_compat.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-spoof-compat.cpp" \
+  "$test_tmp/find-spoof-compat" \
+  "-I$fixtures/sample_helper_spoof"
+require_fixed '#include <ascify/ascify_cuda_compat.hpp>' \
+  "$test_tmp/find-spoof-compat.cpp"
+require_fixed '#include <helper_cuda.h>' \
+  "$test_tmp/find-spoof-compat.cpp"
+require_fixed 'findCudaDevice(argc, argv)' \
+  "$test_tmp/find-spoof-compat.cpp"
+forbid_fixed '::ascify::sampleFindCudaDevice' \
+  "$test_tmp/find-spoof-compat.cpp"
+require_fixed 'unrecognized header' \
+  "$test_tmp/find-spoof-compat.stderr"
+require_fixed 'include kept' \
+  "$test_tmp/find-spoof-compat.stderr"
+
+translate_expect_failure "$fixtures/sample_helper_backing_macro_collision.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/backing-macro-collision.cpp" \
+  "$test_tmp/backing-macro-collision"
+[ ! -e "$test_tmp/backing-macro-collision.cpp" ]
+require_fixed "reserved output macro 'sampleCheckCudaErrors'" \
+  "$test_tmp/backing-macro-collision.stderr"
+require_fixed 'cannot publish CUDA compatibility output' \
+  "$test_tmp/backing-macro-collision.stderr"
+
+translate_expect_failure \
+  "$fixtures/cuda_compat_ascify_declaration_collision.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/generic-ascify-declaration-collision.cpp" \
+  "$test_tmp/generic-ascify-declaration-collision"
+[ ! -e "$test_tmp/generic-ascify-declaration-collision.cpp" ]
+require_fixed "input owns the top-level name 'ascify'" \
+  "$test_tmp/generic-ascify-declaration-collision.stderr"
+
+translate_expect_failure \
+  "$fixtures/cuda_compat_active_macro_collision.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/generic-active-macro-collision.cpp" \
+  "$test_tmp/generic-active-macro-collision"
+[ ! -e "$test_tmp/generic-active-macro-collision.cpp" ]
+require_fixed "active input macro 'RuntimeLock'" \
+  "$test_tmp/generic-active-macro-collision.stderr"
+
+translate_expect_failure "$fixtures/sample_helper_user_header_output_macro.cu" \
   "$fixtures/nvidia_samples/Common" \
   "$test_tmp/user-header-collision.cpp" \
   "$test_tmp/user-header-collision"
-require_fixed '#include "sample_helper_user_output_macros.h"' \
-  "$test_tmp/user-header-collision.cpp"
-require_fixed '#include <helper_cuda.h>' \
-  "$test_tmp/user-header-collision.cpp"
-require_fixed 'checkCudaErrors(ascify::cudaMalloc' \
-  "$test_tmp/user-header-collision.cpp"
-require_fixed 'getLastCudaError("user header output macro collision")' \
-  "$test_tmp/user-header-collision.cpp"
-forbid_fixed 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(' \
-  "$test_tmp/user-header-collision.cpp"
-forbid_fixed 'ASCIFY_NVIDIA_SAMPLE_GET_LAST_CUDA_ERROR(' \
-  "$test_tmp/user-header-collision.cpp"
+[ ! -e "$test_tmp/user-header-collision.cpp" ]
 require_fixed 'reserved output macro' \
   "$test_tmp/user-header-collision.stderr"
-require_fixed 'include kept' "$test_tmp/user-header-collision.stderr"
+require_fixed 'cannot publish CUDA compatibility output' \
+  "$test_tmp/user-header-collision.stderr"
 
 translate_with_command_line_collision \
   "$fixtures/sample_helper_supported.cu" \
@@ -698,18 +1268,12 @@ translate_with_command_line_collision \
   "$test_tmp/command-line-collision.cpp" \
   "$test_tmp/command-line-collision"
 require_fixed '#include <helper_cuda.h>' \
-  "$test_tmp/command-line-collision.cpp"
-require_fixed 'checkCudaErrors(ascify::cudaMalloc' \
-  "$test_tmp/command-line-collision.cpp"
-require_fixed 'getLastCudaError("kernel launch")' \
-  "$test_tmp/command-line-collision.cpp"
-forbid_fixed 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(' \
-  "$test_tmp/command-line-collision.cpp"
-forbid_fixed 'ASCIFY_NVIDIA_SAMPLE_GET_LAST_CUDA_ERROR(' \
-  "$test_tmp/command-line-collision.cpp"
+  "$fixtures/sample_helper_supported.cu"
+[ ! -e "$test_tmp/command-line-collision.cpp" ]
 require_fixed 'reserved output macro' \
   "$test_tmp/command-line-collision.stderr"
-require_fixed 'include kept' "$test_tmp/command-line-collision.stderr"
+require_fixed 'cannot publish CUDA compatibility output' \
+  "$test_tmp/command-line-collision.stderr"
 
 translate "$fixtures/sample_helper_macro_include.cu" \
   "$fixtures/nvidia_samples/Common" \

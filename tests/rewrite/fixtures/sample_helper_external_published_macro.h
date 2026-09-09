@@ -1,0 +1,9 @@
+#ifndef ASCIFY_TEST_EXTERNAL_PUBLISHED_MACRO_H_
+#define ASCIFY_TEST_EXTERNAL_PUBLISHED_MACRO_H_
+
+#define ASCIFY_TEST_STRINGIZE_INNER(value) #value
+#define ASCIFY_TEST_STRINGIZE(value) ASCIFY_TEST_STRINGIZE_INNER(value)
+inline const char* ascifyTestPublishedMacroSpelling =
+    ASCIFY_TEST_STRINGIZE(ASCIFY_GLOBAL);
+
+#endif

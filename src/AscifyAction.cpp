@@ -98,6 +98,7 @@ enum FrozenNvidiaSampleHelperFileRole : unsigned {
   FrozenOfficialNvidiaSampleHelperString = 1U << 1,
   FrozenOfficialNvidiaSampleHelperFunctions = 1U << 2,
   FrozenOfficialNvidiaSampleHelperImage = 1U << 3,
+  FrozenOfficialNvidiaSampleHelperTimer = 1U << 4,
 };
 
 bool sha256Equals(llvm::StringRef contents, llvm::StringRef expectedHex) {
@@ -128,6 +129,20 @@ bool sha256Equals(llvm::StringRef contents, llvm::StringRef expectedHex) {
 #endif
 }
 
+bool isFrozenOfficialNvidiaSampleHelperFunctionsPath(llvm::StringRef path) {
+  if (path.empty() ||
+      llvm::sys::path::filename(path) != "helper_functions.h")
+    return false;
+  const auto bufferOrError = llvm::MemoryBuffer::getFile(path);
+  if (!bufferOrError)
+    return false;
+  const llvm::StringRef contents = (*bufferOrError)->getBuffer();
+  return contents.size() == 2358 &&
+         sha256Equals(
+             contents,
+             "3fdcd18e41ffc2a9c88ade3595384e9cd05a2d84f80b86a2d5982035ca79c426");
+}
+
 unsigned frozenNvidiaSampleHelperFileRole(
     clang::SourceManager &sourceManager,
     clang::SourceLocation location) {
@@ -140,7 +155,8 @@ unsigned frozenNvidiaSampleHelperFileRole(
   const llvm::StringRef filename = llvm::sys::path::filename(
       sourceManager.getFilename(spelling));
   if (filename != "helper_cuda.h" && filename != "helper_string.h" &&
-      filename != "helper_functions.h" && filename != "helper_image.h")
+      filename != "helper_functions.h" && filename != "helper_image.h" &&
+      filename != "helper_timer.h")
     return FrozenNvidiaSampleHelperNone;
   bool invalidBuffer = false;
   const llvm::StringRef contents =
@@ -172,12 +188,391 @@ unsigned frozenNvidiaSampleHelperFileRole(
             contents,
             "bc1fe7921bafad278ffa2e4bc8a99c18825208b9f5f47842a7cf7e86cae8b3f1"))
       return FrozenOfficialNvidiaSampleHelperImage;
+  } else if (filename == "helper_timer.h") {
+    if (contents.size() == 16060 &&
+        sha256Equals(
+            contents,
+            "c48552a7c7b7a5840fcfbc176bfb5a19b501fdc56796b64a63e78e39ab547078"))
+      return FrozenOfficialNvidiaSampleHelperTimer;
   }
   return FrozenNvidiaSampleHelperNone;
 }
 
 bool isFrozenHelperFunctionsProviderPolicyMacro(llvm::StringRef name) {
   return name == "EXIT_WAIVED" || name == "MAX";
+}
+
+const char *const NvidiaSampleHelperObservableMacros[] = {
+    "COMMON_HELPER_CUDA_H_", "EXIT_WAIVED", "checkCudaErrors",
+    "getLastCudaError", "printLastCudaError", "MAX"};
+
+bool isNvidiaSampleHelperObservableMacro(llvm::StringRef name) {
+  return std::find_if(
+             std::begin(NvidiaSampleHelperObservableMacros),
+             std::end(NvidiaSampleHelperObservableMacros),
+             [&](const char *observable) { return name == observable; }) !=
+         std::end(NvidiaSampleHelperObservableMacros);
+}
+
+bool directPragmaMacroStackTarget(
+    llvm::StringRef line, size_t operationPosition,
+    llvm::StringRef operation, std::string &target) {
+  size_t cursor = operationPosition + operation.size();
+  const auto skipHorizontalWhitespace = [&]() {
+    while (cursor < line.size() &&
+           (line[cursor] == ' ' || line[cursor] == '\t' ||
+            line[cursor] == '\f' || line[cursor] == '\v'))
+      ++cursor;
+  };
+  skipHorizontalWhitespace();
+  if (cursor >= line.size() || line[cursor] != '(')
+    return false;
+  ++cursor;
+  skipHorizontalWhitespace();
+  if (cursor >= line.size() || line[cursor] != '"')
+    return false;
+  ++cursor;
+  const size_t targetBegin = cursor;
+  while (cursor < line.size() && line[cursor] != '"') {
+    if (line[cursor] == '\\' ||
+        !(line[cursor] == '_' ||
+          (line[cursor] >= 'a' && line[cursor] <= 'z') ||
+          (line[cursor] >= 'A' && line[cursor] <= 'Z') ||
+          (cursor != targetBegin && line[cursor] >= '0' &&
+           line[cursor] <= '9')))
+      return false;
+    ++cursor;
+  }
+  if (cursor == targetBegin || cursor >= line.size())
+    return false;
+  target = line.slice(targetBegin, cursor).str();
+  ++cursor;
+  skipHorizontalWhitespace();
+  return cursor < line.size() && line[cursor] == ')';
+}
+
+bool isAscifyCudaCompatReservedMacro(llvm::StringRef name);
+
+bool pragmaLineHasUnsafeMacroStackOperation(
+    llvm::StringRef line, std::string &operation,
+    std::string &target) {
+  bool inString = false;
+  bool inCharacter = false;
+  bool escaped = false;
+  for (size_t cursor = 0; cursor < line.size();) {
+    const char current = line[cursor];
+    if (inString || inCharacter) {
+      if (escaped) {
+        escaped = false;
+      } else if (current == '\\') {
+        escaped = true;
+      } else if ((inString && current == '"') ||
+                 (inCharacter && current == '\'')) {
+        inString = false;
+        inCharacter = false;
+      }
+      ++cursor;
+      continue;
+    }
+    if (current == '"') {
+      inString = true;
+      ++cursor;
+      continue;
+    }
+    if (current == '\'') {
+      inCharacter = true;
+      ++cursor;
+      continue;
+    }
+    if (current == '/' && cursor + 1 < line.size() &&
+        line[cursor + 1] == '/')
+      return false;
+    const bool identifierStart =
+        current == '_' || (current >= 'a' && current <= 'z') ||
+        (current >= 'A' && current <= 'Z');
+    if (!identifierStart) {
+      ++cursor;
+      continue;
+    }
+    const size_t begin = cursor++;
+    while (cursor < line.size() &&
+           (line[cursor] == '_' ||
+            (line[cursor] >= 'a' && line[cursor] <= 'z') ||
+            (line[cursor] >= 'A' && line[cursor] <= 'Z') ||
+            (line[cursor] >= '0' && line[cursor] <= '9')))
+      ++cursor;
+    const llvm::StringRef identifier = line.slice(begin, cursor);
+    if (identifier != "push_macro" && identifier != "pop_macro")
+      continue;
+    operation = identifier.str();
+    std::string directTarget;
+    if (!directPragmaMacroStackTarget(
+            line, begin, identifier, directTarget)) {
+      target.clear();
+      return true;
+    }
+    if (isNvidiaSampleHelperObservableMacro(directTarget) ||
+        isAscifyCudaCompatReservedMacro(directTarget)) {
+      target = directTarget;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool pragmaLineContainsObservableIdentifier(
+    llvm::StringRef line, std::string &observed) {
+  bool inString = false;
+  bool inCharacter = false;
+  bool escaped = false;
+  for (size_t cursor = 0; cursor < line.size();) {
+    const char current = line[cursor];
+    if (inString || inCharacter) {
+      if (escaped) {
+        escaped = false;
+      } else if (current == '\\') {
+        escaped = true;
+      } else if ((inString && current == '"') ||
+                 (inCharacter && current == '\'')) {
+        inString = false;
+        inCharacter = false;
+      }
+      ++cursor;
+      continue;
+    }
+    if (current == '"') {
+      inString = true;
+      ++cursor;
+      continue;
+    }
+    if (current == '\'') {
+      inCharacter = true;
+      ++cursor;
+      continue;
+    }
+    if (current == '/' && cursor + 1 < line.size() &&
+        line[cursor + 1] == '/')
+      return false;
+    const bool identifierStart =
+        current == '_' || (current >= 'a' && current <= 'z') ||
+        (current >= 'A' && current <= 'Z');
+    if (!identifierStart) {
+      ++cursor;
+      continue;
+    }
+    const size_t begin = cursor++;
+    while (cursor < line.size() &&
+           (line[cursor] == '_' ||
+            (line[cursor] >= 'a' && line[cursor] <= 'z') ||
+            (line[cursor] >= 'A' && line[cursor] <= 'Z') ||
+            (line[cursor] >= '0' && line[cursor] <= '9')))
+      ++cursor;
+    const llvm::StringRef identifier = line.slice(begin, cursor);
+    if (isNvidiaSampleHelperObservableMacro(identifier)) {
+      observed = identifier.str();
+      return true;
+    }
+  }
+  return false;
+}
+
+struct DirectPragmaToken {
+  enum class Kind { Identifier, Number, String, Punctuation };
+  Kind kind;
+  std::string spelling;
+};
+
+std::vector<DirectPragmaToken> directPragmaTokens(llvm::StringRef line) {
+  std::vector<DirectPragmaToken> tokens;
+  for (size_t cursor = 0; cursor < line.size();) {
+    const char current = line[cursor];
+    if (current == ' ' || current == '\t' || current == '\f' ||
+        current == '\v') {
+      ++cursor;
+      continue;
+    }
+    if (current == '/' && cursor + 1 < line.size() &&
+        line[cursor + 1] == '/')
+      break;
+    const bool identifierStart =
+        current == '_' || (current >= 'a' && current <= 'z') ||
+        (current >= 'A' && current <= 'Z');
+    if (identifierStart) {
+      const size_t begin = cursor++;
+      while (cursor < line.size() &&
+             (line[cursor] == '_' ||
+              (line[cursor] >= 'a' && line[cursor] <= 'z') ||
+              (line[cursor] >= 'A' && line[cursor] <= 'Z') ||
+              (line[cursor] >= '0' && line[cursor] <= '9')))
+        ++cursor;
+      tokens.push_back(
+          {DirectPragmaToken::Kind::Identifier,
+           line.slice(begin, cursor).str()});
+      continue;
+    }
+    if (current >= '0' && current <= '9') {
+      const size_t begin = cursor++;
+      while (cursor < line.size() && line[cursor] >= '0' &&
+             line[cursor] <= '9')
+        ++cursor;
+      tokens.push_back(
+          {DirectPragmaToken::Kind::Number,
+           line.slice(begin, cursor).str()});
+      continue;
+    }
+    if (current == '"') {
+      const size_t begin = cursor++;
+      bool escaped = false;
+      while (cursor < line.size()) {
+        const char stringCharacter = line[cursor++];
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (stringCharacter == '\\') {
+          escaped = true;
+          continue;
+        }
+        if (stringCharacter == '"')
+          break;
+      }
+      tokens.push_back(
+          {DirectPragmaToken::Kind::String,
+           line.slice(begin, cursor).str()});
+      continue;
+    }
+    tokens.push_back(
+        {DirectPragmaToken::Kind::Punctuation,
+         std::string(1, current)});
+    ++cursor;
+  }
+  return tokens;
+}
+
+bool isDirectlyAllowedHashPragma(
+    llvm::StringRef line, std::string &operation) {
+  const std::vector<DirectPragmaToken> tokens = directPragmaTokens(line);
+  size_t pragma = 0;
+  while (pragma < tokens.size() &&
+         !(tokens[pragma].kind == DirectPragmaToken::Kind::Identifier &&
+           tokens[pragma].spelling == "pragma"))
+    ++pragma;
+  if (pragma == tokens.size() || ++pragma == tokens.size()) {
+    operation = "<unparsed>";
+    return false;
+  }
+  const auto identifierAt = [&](size_t index, llvm::StringRef spelling) {
+    return index < tokens.size() &&
+           tokens[index].kind == DirectPragmaToken::Kind::Identifier &&
+           tokens[index].spelling == spelling;
+  };
+  const auto punctuationAt = [&](size_t index, llvm::StringRef spelling) {
+    return index < tokens.size() &&
+           tokens[index].kind == DirectPragmaToken::Kind::Punctuation &&
+           tokens[index].spelling == spelling;
+  };
+  operation = tokens[pragma].spelling;
+  const size_t remaining = tokens.size() - pragma;
+  if (remaining == 1 &&
+      (identifierAt(pragma, "once") ||
+       identifierAt(pragma, "nounroll") ||
+       identifierAt(pragma, "nv_exec_check_disable") ||
+       identifierAt(pragma, "hd_warning_disable")))
+    return true;
+  if (identifierAt(pragma, "unroll") &&
+      (remaining == 1 ||
+       (remaining == 2 &&
+        tokens[pragma + 1].kind == DirectPragmaToken::Kind::Number)))
+    return true;
+  if (remaining == 2 &&
+      ((identifierAt(pragma, "GCC") ||
+        identifierAt(pragma, "clang")) &&
+       identifierAt(pragma + 1, "system_header")))
+    return true;
+  if (remaining >= 3 &&
+      (identifierAt(pragma, "GCC") ||
+       identifierAt(pragma, "clang")) &&
+      identifierAt(pragma + 1, "diagnostic")) {
+    if (remaining == 3 &&
+        (identifierAt(pragma + 2, "push") ||
+         identifierAt(pragma + 2, "pop")))
+      return true;
+    if (remaining == 4 &&
+        (identifierAt(pragma + 2, "ignored") ||
+         identifierAt(pragma + 2, "warning") ||
+         identifierAt(pragma + 2, "error") ||
+         identifierAt(pragma + 2, "fatal")) &&
+        tokens[pragma + 3].kind == DirectPragmaToken::Kind::String)
+      return true;
+  }
+  if (remaining == 4 &&
+      (identifierAt(pragma, "push_macro") ||
+       identifierAt(pragma, "pop_macro")) &&
+      punctuationAt(pragma + 1, "(") &&
+      tokens[pragma + 2].kind == DirectPragmaToken::Kind::String &&
+      punctuationAt(pragma + 3, ")"))
+    return true;
+  return false;
+}
+
+bool isAscifyCudaCompatReservedMacro(llvm::StringRef name) {
+  static const char *const reserved[] = {
+      "ASCIFY_ASCIFY_CUDA_COMPAT_HPP",
+      "ASCIFY_SIMT_HEADER_FAMILY_PUBLIC_85",
+      "ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3",
+      "ASCIFY_SIMT_LEGACY_HAS_VECTOR_CONSTRUCTORS",
+      "ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS",
+      "ASCIFY_ALIGN",
+      "ASCIFY_FORCEINLINE",
+      "ASCIFY_GLOBAL",
+      "ASCIFY_DEFINE_GLOBAL_ATOMIC_BINARY",
+      "ASCIFY_DEFINE_GLOBAL_ATOMIC_CAS",
+      "ASCIFY_DEFINE_GLOBAL_ATOMIC_UNSIGNED",
+      "ASCIFY_DEFINE_UNAVAILABLE_GLOBAL_ATOMIC_BINARY",
+      "ASCIFY_DEFINE_UNAVAILABLE_GLOBAL_ATOMIC_CAS",
+      "ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS",
+      "ASCIFY_NVIDIA_SAMPLE_GET_LAST_CUDA_ERROR",
+      "ASCIFY_TEST_CONTROLLABLE_EXIT_REGISTRATION",
+      "ascify",
+      "sampleCheckCudaErrors",
+      "sampleGetLastCudaError",
+      "sampleFindCudaDevice",
+  };
+  return std::find_if(
+             std::begin(reserved), std::end(reserved),
+             [&](const char *candidate) { return name == candidate; }) !=
+         std::end(reserved);
+}
+
+bool isAscifyCudaCompatPublishedMacro(llvm::StringRef name) {
+  static const char *const published[] = {
+      "ASCIFY_ASCIFY_CUDA_COMPAT_HPP",
+      "ASCIFY_SIMT_HEADER_FAMILY_PUBLIC_85",
+      "ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3",
+      "ASCIFY_SIMT_LEGACY_HAS_VECTOR_CONSTRUCTORS",
+      "ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS",
+      "ASCIFY_ALIGN",
+      "ASCIFY_FORCEINLINE",
+      "ASCIFY_GLOBAL",
+      "ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS",
+      "ASCIFY_NVIDIA_SAMPLE_GET_LAST_CUDA_ERROR",
+  };
+  return std::find_if(
+             std::begin(published), std::end(published),
+             [&](const char *candidate) { return name == candidate; }) !=
+         std::end(published);
+}
+
+const char *const AscifyCudaCompatIdentifiers[] = {
+#include "AscifyCudaCompatIdentifiers.inc"
+};
+
+bool isAscifyCudaCompatIdentifier(llvm::StringRef name) {
+  return std::find_if(
+             std::begin(AscifyCudaCompatIdentifiers),
+             std::end(AscifyCudaCompatIdentifiers),
+             [&](const char *candidate) { return name == candidate; }) !=
+         std::end(AscifyCudaCompatIdentifiers);
 }
 
 bool activeFrozenHelperFunctionsProviderMacroBodyMatches(
@@ -209,6 +604,27 @@ bool activeFrozenHelperFunctionsProviderMacroBodyMatches(
   return actual == expected;
 }
 
+bool activeFrozenHelperCudaMaxBodyMatches(
+    const clang::MacroInfo &macroInfo,
+    clang::Preprocessor &preprocessor) {
+  if (!macroInfo.isFunctionLike() || macroInfo.getNumParams() != 2)
+    return false;
+  auto parameter = macroInfo.param_begin();
+  if (parameter == macroInfo.param_end() || *parameter == nullptr)
+    return false;
+  const std::string left = (*parameter++)->getName().str();
+  if (parameter == macroInfo.param_end() || *parameter == nullptr)
+    return false;
+  const std::string right = (*parameter)->getName().str();
+  std::vector<std::string> actual;
+  actual.reserve(macroInfo.getNumTokens());
+  for (const clang::Token &token : macroInfo.tokens())
+    actual.push_back(preprocessor.getSpelling(token));
+  const std::vector<std::string> expected = {
+      "(", left, ">", right, "?", left, ":", right, ")"};
+  return actual == expected;
+}
+
 bool locationComesFromFrozenNvidiaSampleHelperFile(
     clang::SourceManager &sourceManager,
     clang::SourceLocation location,
@@ -230,13 +646,7 @@ bool locationComesFromRecognizedNvidiaSampleHelper(
       sourceManager.getFilename(spelling));
 }
 
-bool locationComesFromAscifyCudaCompat(
-    clang::SourceManager &sourceManager, clang::SourceLocation location) {
-  const clang::SourceLocation spelling =
-      sourceManager.getSpellingLoc(location);
-  if (spelling.isInvalid())
-    return false;
-  const llvm::StringRef path = sourceManager.getFilename(spelling);
+bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (path.empty() ||
       llvm::sys::path::filename(path) != "ascify_cuda_compat.hpp")
     return false;
@@ -244,13 +654,49 @@ bool locationComesFromAscifyCudaCompat(
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
+  if (contents.size() != 43500)
+    return false;
+#if LLVM_VERSION_MAJOR >= 13
+  return sha256Equals(
+      contents,
+      "c1f87bd416aa4f389171593bd5e47894999d05407e5935d3151fbcd2aa6438c9");
+#else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
-         contents.contains(
-             "#define ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS") &&
-         contents.contains(
-             "#define ASCIFY_NVIDIA_SAMPLE_GET_LAST_CUDA_ERROR") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
-         contents.contains("inline void sampleGetLastCudaError(");
+         contents.contains("inline int sampleFindCudaDevice(");
+#endif
+}
+
+bool locationComesFromAscifyCudaCompat(
+    clang::SourceManager &sourceManager, clang::SourceLocation location) {
+  const clang::SourceLocation spelling =
+      sourceManager.getSpellingLoc(location);
+  if (spelling.isInvalid())
+    return false;
+  const clang::FileID file = sourceManager.getFileID(spelling);
+  if (file.isInvalid())
+    return false;
+  const clang::FileEntry *entry = sourceManager.getFileEntryForID(file);
+  if (entry == nullptr || sourceManager.isFileOverridden(entry))
+    return false;
+  const llvm::StringRef path = sourceManager.getFilename(spelling);
+  if (path.empty() ||
+      llvm::sys::path::filename(path) != "ascify_cuda_compat.hpp")
+    return false;
+  bool invalidBuffer = false;
+  const llvm::StringRef contents =
+      sourceManager.getBufferData(file, &invalidBuffer);
+  if (invalidBuffer || contents.size() != 43500)
+    return false;
+#if LLVM_VERSION_MAJOR >= 13
+  return sha256Equals(
+      contents,
+      "c1f87bd416aa4f389171593bd5e47894999d05407e5935d3151fbcd2aa6438c9");
+#else
+  return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
+         contents.contains("inline void sampleCheckCudaErrors(") &&
+         contents.contains("inline int sampleFindCudaDevice(");
+#endif
 }
 
 bool activeNvidiaSampleHelperMacroBodyMatches(
@@ -2476,6 +2922,37 @@ bool AscifyAction::isInNvidiaSampleHelperMacroRange(
   return false;
 }
 
+bool hasInputTopLevelAscifyDeclaration(
+    clang::ASTContext &context, clang::SourceManager &sourceManager) {
+  class Visitor : public clang::RecursiveASTVisitor<Visitor> {
+  public:
+    explicit Visitor(clang::SourceManager &sourceManager)
+        : sourceManager(sourceManager) {}
+
+    bool VisitNamedDecl(clang::NamedDecl *declaration) {
+      if (conflict || declaration == nullptr || declaration->isImplicit() ||
+          declaration->getIdentifier() == nullptr ||
+          declaration->getName() != "ascify" ||
+          declaration->getDeclContext() == nullptr ||
+          !declaration->getDeclContext()->getRedeclContext()
+               ->isTranslationUnit() ||
+          locationComesFromAscifyCudaCompat(
+              sourceManager, declaration->getLocation()))
+        return !conflict;
+      conflict = true;
+      return false;
+    }
+
+    bool hasConflict() const { return conflict; }
+
+  private:
+    clang::SourceManager &sourceManager;
+    bool conflict = false;
+  } visitor(sourceManager);
+  visitor.TraverseDecl(context.getTranslationUnitDecl());
+  return visitor.hasConflict();
+}
+
 bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
   class Visitor : public clang::RecursiveASTVisitor<Visitor> {
   public:
@@ -2535,6 +3012,17 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
                  ? true
                  : inspect(expression->getExprLoc(),
                            expression->getDecl());
+    }
+
+    bool VisitUnresolvedLookupExpr(
+        clang::UnresolvedLookupExpr *expression) {
+      if (expression == nullptr)
+        return true;
+      for (const clang::NamedDecl *declaration : expression->decls()) {
+        if (!inspect(expression->getNameLoc(), declaration))
+          return false;
+      }
+      return true;
     }
 
     bool VisitMemberExpr(clang::MemberExpr *expression) {
@@ -2668,10 +3156,24 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
             getCompilerInstance().getSourceManager().getFileLoc(
                 candidate.nameLocation)));
   }
+  const bool helperNeedsCompat =
+      !nvidiaSampleHelperMacroCandidates.empty() ||
+      !nvidiaSampleFindDeviceCandidates.empty();
+  if (helperNeedsCompat && ascifyCudaCompatActiveMacroConflict)
+    nvidiaSampleHelperUnsupportedMacroUse = true;
+  const bool compatNamespaceConflict =
+      helperNeedsCompat && !hasCudaCompatHeaderBeforeNvidiaHelper &&
+      ascifyCudaCompatDeclarationConflict;
   if (visitor.hasConflict()) {
     llvm::errs() << "Ascify NVIDIA sample-helper closure: residual helper "
                  << "declaration '" << visitor.conflictingName()
                  << "' keeps helper_cuda.h\n";
+  }
+  if (compatNamespaceConflict) {
+    llvm::errs()
+        << "Ascify NVIDIA sample-helper closure: top-level declaration "
+        << "'ascify' conflicts with the required compat namespace; "
+        << "helper_cuda.h kept\n";
   }
   for (const NvidiaSampleHelperMacroCandidate &candidate :
        nvidiaSampleHelperMacroCandidates) {
@@ -2684,7 +3186,7 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
           << "domain not proven; macro and include kept\n";
     }
   }
-  return visitor.hasConflict();
+  return visitor.hasConflict() || compatNamespaceConflict;
 }
 
 bool AscifyAction::RewriteToken(clang::Lexer &, clang::Token &tok) {
@@ -2736,22 +3238,66 @@ void AscifyAction::FileChanged(
     clang::SourceLocation location,
     clang::PPCallbacks::FileChangeReason reason,
     clang::SrcMgr::CharacteristicKind fileType) {
+  if (reason == clang::PPCallbacks::ExitFile) {
+    if (!nvidiaSampleHelperCudaFileStack.empty())
+      nvidiaSampleHelperCudaFileStack.pop_back();
+    return;
+  }
   if (reason != clang::PPCallbacks::EnterFile)
     return;
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
   const clang::SourceLocation spelling =
       sourceManager.getSpellingLoc(location);
-  if (spelling.isInvalid())
+  if (spelling.isInvalid()) {
+    nvidiaSampleHelperCudaFileStack.push_back(
+        !nvidiaSampleHelperCudaFileStack.empty() &&
+        nvidiaSampleHelperCudaFileStack.back());
     return;
+  }
   const clang::FileID file = sourceManager.getFileID(spelling);
-  if (file.isInvalid())
+  if (file.isInvalid()) {
+    nvidiaSampleHelperCudaFileStack.push_back(
+        !nvidiaSampleHelperCudaFileStack.empty() &&
+        nvidiaSampleHelperCudaFileStack.back());
     return;
+  }
+  const unsigned frozenRole =
+      frozenNvidiaSampleHelperFileRole(sourceManager, spelling);
+  const bool parentInsideRemovedHelper =
+      !nvidiaSampleHelperCudaFileStack.empty() &&
+      nvidiaSampleHelperCudaFileStack.back();
+  const bool insideRemovedHelper =
+      parentInsideRemovedHelper ||
+      frozenRole == FrozenOfficialNvidiaSampleHelperCuda;
+  nvidiaSampleHelperCudaFileStack.push_back(insideRemovedHelper);
+
+  const llvm::StringRef enteredFilename =
+      llvm::sys::path::filename(sourceManager.getFilename(spelling));
+  const bool exactCompat =
+      locationComesFromAscifyCudaCompat(sourceManager, spelling);
+  if (enteredFilename == "ascify_cuda_compat.hpp" && !exactCompat) {
+    ascifyCudaCompatIncludeConflict = true;
+    nvidiaSampleHelperUnsupportedMacroUse = true;
+    llvm::errs()
+        << "Ascify CUDA compat closure: parsed compat header identity is "
+        << "unrecognized; helper edits kept\n";
+  }
+  if (frozenRole != FrozenOfficialNvidiaSampleHelperCuda && !exactCompat &&
+      !sourceManager.isWrittenInMainFile(spelling) &&
+      nvidiaSampleRetainedFileIdHashes.insert(file.getHashValue()).second)
+    nvidiaSampleRetainedFileIds.push_back(file);
+
   const clang::FileEntry *entry = sourceManager.getFileEntryForID(file);
   // Imaginary/remapped buffers have no stable include-search identity. A
   // content override must not inherit the physical file's trusted identity.
   if (entry == nullptr || sourceManager.isFileOverridden(entry))
     return;
+  if (exactCompat) {
+    hasCudaCompatHeader = true;
+    if (nvidiaSampleHelperIncludes.empty())
+      hasCudaCompatHeaderBeforeNvidiaHelper = true;
+  }
   const llvm::sys::fs::UniqueID &uniqueId = entry->getUniqueID();
   if (uniqueId.getDevice() == 0 && uniqueId.getFile() == 0)
     return;
@@ -2762,10 +3308,12 @@ void AscifyAction::FileChanged(
   const bool wasUntrusted =
       initiallyUntrustedSystemFileIdentities.count(identity) != 0;
   if (!wasTrusted && !wasUntrusted) {
-    const unsigned frozenRole =
-        frozenNvidiaSampleHelperFileRole(sourceManager, spelling);
-    if (frozenRole == FrozenOfficialNvidiaSampleHelperFunctions)
+    if (frozenRole == FrozenOfficialNvidiaSampleHelperFunctions &&
+        frozenNvidiaSampleDirectFunctionsRootIdentities.count(identity) != 0) {
       frozenOfficialNvidiaSampleHelperFunctionsSeen = true;
+      frozenNvidiaSampleDirectFunctionsRootFileIds.insert(
+          file.getHashValue());
+    }
     if (frozenRole == FrozenOfficialNvidiaSampleHelperImage)
       frozenNvidiaSampleMacroProviderIdentities.insert(identity);
     if (fileType == clang::SrcMgr::C_System ||
@@ -2809,37 +3357,48 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
     }
     return;
   }
+  const clang::SourceLocation filenameBegin = filename_range.getBegin();
+  const clang::SourceLocation filenameEnd = filename_range.getEnd();
+  const clang::SourceLocation hashFile = SM.getFileLoc(hash_loc);
+  const clang::SourceLocation beginFile = SM.getFileLoc(filenameBegin);
+  const clang::SourceLocation endFile = SM.getFileLoc(filenameEnd);
+  bool invalidSpelling = false;
+  const llvm::StringRef spelling = clang::Lexer::getSourceText(
+      filename_range, SM, getCompilerInstance().getLangOpts(),
+      &invalidSpelling);
+  const std::string filename = file_name.str();
+  const std::string quoted = "\"" + filename + "\"";
+  const std::string angled = "<" + filename + ">";
+  const std::string quotedWithoutEnd = "\"" + filename;
+  const std::string angledWithoutEnd = "<" + filename;
+  const bool directSpelling =
+      !invalidSpelling &&
+      (spelling == file_name || spelling == quoted ||
+       spelling == angled || spelling == quotedWithoutEnd ||
+       spelling == angledWithoutEnd);
+  const bool directRange =
+      hash_loc.isFileID() && filenameBegin.isFileID() &&
+      filenameEnd.isFileID() && hashFile.isValid() &&
+      beginFile.isValid() && endFile.isValid() &&
+      SM.isWrittenInMainFile(beginFile) &&
+      SM.isWrittenInMainFile(endFile) &&
+      SM.getFileID(hashFile) == SM.getFileID(beginFile) &&
+      SM.getFileID(beginFile) == SM.getFileID(endFile);
+  if (file_name == "helper_functions.h" && directRange && directSpelling &&
+      preprocessorConditionalDepth == 0 &&
+      isFrozenOfficialNvidiaSampleHelperFunctionsPath(resolved_file_name)) {
+    llvm::sys::fs::UniqueID directIdentity;
+    if (!llvm::sys::fs::getUniqueID(resolved_file_name, directIdentity) &&
+        !(directIdentity.getDevice() == 0 && directIdentity.getFile() == 0)) {
+      frozenNvidiaSampleDirectFunctionsRootIdentities.insert(
+          {directIdentity.getDevice(), directIdentity.getFile()});
+    }
+  }
   if (recognizedNvidiaHelper) {
-    const clang::SourceLocation filenameBegin = filename_range.getBegin();
-    const clang::SourceLocation filenameEnd = filename_range.getEnd();
-    const clang::SourceLocation hashFile = SM.getFileLoc(hash_loc);
-    const clang::SourceLocation beginFile = SM.getFileLoc(filenameBegin);
-    const clang::SourceLocation endFile = SM.getFileLoc(filenameEnd);
-    bool invalidSpelling = false;
-    const llvm::StringRef spelling = clang::Lexer::getSourceText(
-        filename_range, SM, getCompilerInstance().getLangOpts(),
-        &invalidSpelling);
-    const std::string filename = file_name.str();
-    const std::string quoted = "\"" + filename + "\"";
-    const std::string angled = "<" + filename + ">";
-    const std::string quotedWithoutEnd = "\"" + filename;
-    const std::string angledWithoutEnd = "<" + filename;
-    const bool directSpelling =
-        !invalidSpelling &&
-        (spelling == file_name || spelling == quoted ||
-         spelling == angled || spelling == quotedWithoutEnd ||
-         spelling == angledWithoutEnd);
-    const bool directRange =
-        hash_loc.isFileID() && filenameBegin.isFileID() &&
-        filenameEnd.isFileID() && hashFile.isValid() &&
-        beginFile.isValid() && endFile.isValid() &&
-        SM.isWrittenInMainFile(beginFile) &&
-        SM.isWrittenInMainFile(endFile) &&
-        SM.getFileID(hashFile) == SM.getFileID(beginFile) &&
-        SM.getFileID(beginFile) == SM.getFileID(endFile);
     if (file_name == "helper_cuda.h" && directRange && directSpelling) {
       nvidiaSampleHelperIncludes.push_back({hash_loc, filenameEnd});
       recognizedNvidiaSampleHelperPaths.insert(resolved_file_name.str());
+      auditActiveAscifyCudaCompatMacrosAtInsertion();
     } else {
       // A TU may contain both a removable direct include and another include
       // that reaches the same recognized helper through a macro. The latter
@@ -2851,8 +3410,14 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
           << "direct main-file literal; include and calls kept\n";
     }
   }
-  if (file_name == "ascify/ascify_cuda_compat.hpp")
-    hasCudaCompatHeader = true;
+  if (file_name == "ascify/ascify_cuda_compat.hpp" &&
+      !isExactAscifyCudaCompatPath(resolved_file_name)) {
+    ascifyCudaCompatIncludeConflict = true;
+    nvidiaSampleHelperUnsupportedMacroUse = true;
+    llvm::errs()
+        << "Ascify CUDA compat closure: include spelling resolves to an "
+        << "unrecognized header; helper edits kept\n";
+  }
   if (file_name == ascify::DavC310TargetRecipe::TargetHeader)
     hasDavC310TargetHeader = true;
   if (file_name == ascify::DavC310TargetRecipe::SimdTargetHeader)
@@ -2941,8 +3506,145 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
       Rep, clang::FullSourceLoc{sl, SM}, sl, replacementEnd);
 }
 
-void AscifyAction::PragmaDirective(clang::SourceLocation Loc, clang::PragmaIntroducerKind Introducer) {
+void AscifyAction::PragmaDirective(
+    clang::SourceLocation Loc,
+    clang::PragmaIntroducerKind Introducer) {
+  finalizePendingNvidiaSampleHelperPragma();
+  clang::SourceManager &sourceManager =
+      getCompilerInstance().getSourceManager();
+  const clang::SourceLocation expansion =
+      sourceManager.getExpansionLoc(Loc);
+  if (Introducer != clang::PIK_HashPragma) {
+    // _Pragma/__pragma tokens are lexed from a scratch buffer.  Admit only a
+    // diagnostic pragma applied inside a file that was a system header on its
+    // first EnterFile callback.  The matching specialized callback below
+    // clears this pending bit; every other macro-generated pragma fails closed
+    // at the next pragma or at EndSourceFileAction.
+    if (!locationComesFromInitiallyTrustedSystemFile(
+            sourceManager, expansion, trustedSystemFileIds)) {
+      nvidiaSampleHelperUnsupportedMacroUse = true;
+      llvm::errs()
+          << "Ascify NVIDIA sample-helper closure: untrusted "
+          << "macro-generated pragma keeps all helper edits\n";
+      return;
+    }
+    nvidiaSampleHelperPendingMacroGeneratedPragma = true;
+    return;
+  }
+  const clang::SourceLocation fileLocation =
+      sourceManager.getFileLoc(expansion);
+  if (fileLocation.isInvalid()) {
+    nvidiaSampleHelperUnsupportedMacroUse = true;
+    return;
+  }
+  bool invalidBuffer = false;
+  const clang::FileID file = sourceManager.getFileID(fileLocation);
+  const llvm::StringRef buffer =
+      sourceManager.getBufferData(file, &invalidBuffer);
+  if (invalidBuffer) {
+    nvidiaSampleHelperUnsupportedMacroUse = true;
+    return;
+  }
+  const unsigned offset = sourceManager.getFileOffset(fileLocation);
+  if (offset >= buffer.size()) {
+    nvidiaSampleHelperUnsupportedMacroUse = true;
+    return;
+  }
+  std::string logicalLine;
+  for (size_t index = offset; index < buffer.size();) {
+    const char current = buffer[index];
+    if (current == '?' && index + 2 < buffer.size() &&
+        buffer[index + 1] == '?' && buffer[index + 2] == '/') {
+      // With -trigraphs, the question-question-slash trigraph becomes a
+      // backslash before line splicing.  The SourceManager buffer retains the
+      // phase-1 spelling, so do not reconstruct this pragma.
+      nvidiaSampleHelperUnsupportedMacroUse = true;
+      llvm::errs()
+          << "Ascify NVIDIA sample-helper closure: trigraph pragma spelling "
+          << "keeps all helper edits\n";
+      return;
+    }
+    if (current == '/' && index + 1 < buffer.size() &&
+        buffer[index + 1] == '*') {
+      // A block comment may span a physical newline while the surrounding
+      // preprocessing directive continues after comment replacement.  Keep
+      // the transaction instead of trying to duplicate Clang's comment lexer.
+      nvidiaSampleHelperUnsupportedMacroUse = true;
+      llvm::errs()
+          << "Ascify NVIDIA sample-helper closure: block-comment pragma "
+          << "spelling keeps all helper edits\n";
+      return;
+    }
+    if (current == '\\') {
+      size_t newline = index + 1;
+      while (newline < buffer.size() &&
+             (buffer[newline] == ' ' || buffer[newline] == '\t' ||
+              buffer[newline] == '\f' || buffer[newline] == '\v'))
+        ++newline;
+      if (newline < buffer.size() && buffer[newline] == '\n') {
+        index = newline + 1;
+        continue;
+      }
+      if (newline < buffer.size() && buffer[newline] == '\r') {
+        index = newline + 1;
+        if (index < buffer.size() && buffer[index] == '\n')
+          ++index;
+        continue;
+      }
+    }
+    if (current == '\r' || current == '\n')
+      break;
+    logicalLine.push_back(current);
+    ++index;
+  }
+  const llvm::StringRef line(logicalLine);
+  std::string macroStackOperation;
+  std::string macroStackTarget;
+  if (pragmaLineHasUnsafeMacroStackOperation(
+          line, macroStackOperation, macroStackTarget)) {
+    nvidiaSampleHelperUnsupportedMacroUse = true;
+    llvm::errs()
+        << "Ascify NVIDIA sample-helper closure: pragma macro-stack "
+        << "operation keeps all helper edits: " << macroStackOperation;
+    if (!macroStackTarget.empty())
+      llvm::errs() << " of observable '" << macroStackTarget << "'";
+    else
+      llvm::errs() << " has an unresolved target";
+    llvm::errs() << "\n";
+    return;
+  }
+  std::string observedPragmaMacro;
+  if (pragmaLineContainsObservableIdentifier(line, observedPragmaMacro)) {
+    nvidiaSampleHelperUnsupportedMacroUse = true;
+    llvm::errs()
+        << "Ascify NVIDIA sample-helper closure: pragma observation of '"
+        << observedPragmaMacro << "' keeps all helper edits\n";
+    return;
+  }
+  std::string pragmaOperation;
+  if (!isDirectlyAllowedHashPragma(line, pragmaOperation)) {
+    nvidiaSampleHelperUnsupportedMacroUse = true;
+    llvm::errs()
+        << "Ascify NVIDIA sample-helper closure: unproven hash pragma '"
+        << pragmaOperation << "' keeps all helper edits\n";
+  }
+}
 
+void AscifyAction::PragmaDiagnostic() {
+  // PPCallbacks emits this immediately after PragmaDirective for a parsed
+  // diagnostic push, pop, or mapping.  It is the only non-hash pragma class
+  // admitted by the helper transaction.
+  nvidiaSampleHelperPendingMacroGeneratedPragma = false;
+}
+
+void AscifyAction::finalizePendingNvidiaSampleHelperPragma() {
+  if (!nvidiaSampleHelperPendingMacroGeneratedPragma)
+    return;
+  nvidiaSampleHelperPendingMacroGeneratedPragma = false;
+  nvidiaSampleHelperUnsupportedMacroUse = true;
+  llvm::errs()
+      << "Ascify NVIDIA sample-helper closure: unresolved trusted-system "
+      << "macro-generated pragma keeps all helper edits\n";
 }
 
 bool AscifyAction::cudaLaunchKernel(const mat::MatchFinder::MatchResult &Result) {
@@ -3453,6 +4155,7 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
 }
 
 void AscifyAction::Ifndef(clang::SourceLocation Loc, const clang::Token &MacroNameTok, const clang::MacroDefinition &MD) {
+  ConditionalDirectiveEntered();
   auditExternalNvidiaSampleHelperPreprocessorUse(
       Loc, MacroNameTok, "#ifndef");
   auditFrozenNvidiaSampleHelperMacroDependency(
@@ -3462,10 +4165,38 @@ void AscifyAction::Ifndef(clang::SourceLocation Loc, const clang::Token &MacroNa
 void AscifyAction::Ifdef(clang::SourceLocation Loc,
                          const clang::Token &MacroNameTok,
                          const clang::MacroDefinition &MD) {
+  ConditionalDirectiveEntered();
   auditExternalNvidiaSampleHelperPreprocessorUse(
       Loc, MacroNameTok, "#ifdef");
   auditFrozenNvidiaSampleHelperMacroDependency(
       Loc, MacroNameTok, MD, "#ifdef");
+}
+
+void AscifyAction::Elifdef(clang::SourceLocation Loc,
+                           const clang::Token &MacroNameTok,
+                           const clang::MacroDefinition &MD,
+                           llvm::StringRef directive) {
+  auditExternalNvidiaSampleHelperPreprocessorUse(
+      Loc, MacroNameTok, directive);
+  auditFrozenNvidiaSampleHelperMacroDependency(
+      Loc, MacroNameTok, MD, directive);
+}
+
+void AscifyAction::ElifdefSkipped(
+    clang::SourceLocation Loc,
+    clang::SourceRange ConditionRange,
+    llvm::StringRef directive) {
+  auditSkippedNvidiaSampleHelperElifDirective(
+      Loc, ConditionRange, directive);
+}
+
+void AscifyAction::ConditionalDirectiveEntered() {
+  ++preprocessorConditionalDepth;
+}
+
+void AscifyAction::ConditionalDirectiveEnded() {
+  if (preprocessorConditionalDepth != 0)
+    --preprocessorConditionalDepth;
 }
 
 void AscifyAction::Defined(const clang::Token &MacroNameTok,
@@ -3491,25 +4222,136 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
     return;
   const llvm::StringRef name =
       MacroNameTok.getIdentifierInfo()->getName();
-  if (name == "ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS" ||
-      name == "ASCIFY_NVIDIA_SAMPLE_GET_LAST_CUDA_ERROR" ||
-      name == "sampleFindCudaDevice") {
-    clang::SourceManager &sourceManager =
-        getCompilerInstance().getSourceManager();
-    if (!locationComesFromAscifyCudaCompat(
-            sourceManager, MacroNameTok.getLocation())) {
+  clang::SourceManager &sourceManager =
+      getCompilerInstance().getSourceManager();
+  const bool fromCompat = locationComesFromAscifyCudaCompat(
+      sourceManager, MacroNameTok.getLocation());
+  if (isAscifyCudaCompatReservedMacro(name) && !fromCompat) {
       nvidiaSampleHelperOutputMacroEverDefined = true;
       nvidiaSampleHelperUnsupportedMacroUse = true;
       llvm::errs()
           << "Ascify NVIDIA sample-helper closure: reserved output macro '"
           << name << "' was already defined outside Ascify compat; all "
           << "helper edits kept\n";
+  }
+  const unsigned frozenMacroGraph =
+      FrozenOfficialNvidiaSampleHelperCuda |
+      FrozenOfficialNvidiaSampleHelperString |
+      FrozenOfficialNvidiaSampleHelperFunctions |
+      FrozenOfficialNvidiaSampleHelperImage |
+      FrozenOfficialNvidiaSampleHelperTimer;
+  if (isNvidiaSampleHelperObservableMacro(name) && !fromCompat &&
+      !locationComesFromFrozenNvidiaSampleHelperFile(
+          sourceManager, MacroNameTok.getLocation(), frozenMacroGraph)) {
+    nvidiaSampleHelperUnsupportedMacroUse = true;
+    llvm::errs()
+        << "Ascify NVIDIA sample-helper closure: external definition of "
+        << "observable helper macro '" << name
+        << "' keeps all helper edits\n";
+  }
+  if (!fromCompat && !isAscifyCudaCompatReservedMacro(name) &&
+      isAscifyCudaCompatIdentifier(name)) {
+    const clang::SourceLocation definitionLocation =
+        sourceManager.getSpellingLoc(MacroNameTok.getLocation());
+    const unsigned frozenMacroGraph =
+        FrozenOfficialNvidiaSampleHelperCuda |
+        FrozenOfficialNvidiaSampleHelperString |
+        FrozenOfficialNvidiaSampleHelperFunctions |
+        FrozenOfficialNvidiaSampleHelperImage |
+        FrozenOfficialNvidiaSampleHelperTimer;
+    const clang::FileID definitionFile = definitionLocation.isValid()
+        ? sourceManager.getFileID(definitionLocation)
+        : clang::FileID();
+#if LLVM_VERSION_MAJOR >= 8
+    const clang::FileID predefinesFile =
+        getCompilerInstance().getPreprocessor().getPredefinesFileID();
+    const bool compilerPredefinition =
+        definitionFile.isValid() && predefinesFile.isValid() &&
+        definitionFile == predefinesFile &&
+        !sourceManager.isWrittenInCommandLineFile(definitionLocation);
+#else
+    (void)definitionFile;
+    const bool compilerPredefinition = false;
+#endif
+    const bool trustedDefinition =
+        compilerPredefinition ||
+        (definitionLocation.isValid() &&
+         (locationComesFromInitiallyTrustedSystemFile(
+              sourceManager, definitionLocation, trustedSystemFileIds) ||
+          locationComesFromFrozenNvidiaSampleHelperFile(
+              sourceManager, definitionLocation, frozenMacroGraph)));
+    if (!trustedDefinition && !ascifyCudaCompatActiveMacroConflict) {
+      ascifyCudaCompatActiveMacroConflict = true;
+      ascifyCudaCompatActiveMacroConflictName = name.str();
+      llvm::errs()
+          << "Ascify CUDA compat closure: untrusted input macro '" << name
+          << "' collides with the frozen compat identifier surface\n";
     }
   }
   if (TargetRecipe != ascify::DavC310TargetRecipe::SimdRecipeName)
     return;
   if (isRowwiseSimdReservedMacro(name))
     rowwiseSimdMacrosEverDefined.insert(name.str());
+}
+
+void AscifyAction::auditActiveAscifyCudaCompatMacrosAtInsertion() {
+  if (hasCudaCompatHeaderBeforeNvidiaHelper ||
+      ascifyCudaCompatActiveMacroConflict)
+    return;
+  clang::Preprocessor &preprocessor =
+      getCompilerInstance().getPreprocessor();
+  clang::SourceManager &sourceManager =
+      getCompilerInstance().getSourceManager();
+  const unsigned frozenMacroGraph =
+      FrozenOfficialNvidiaSampleHelperCuda |
+      FrozenOfficialNvidiaSampleHelperString |
+      FrozenOfficialNvidiaSampleHelperFunctions |
+      FrozenOfficialNvidiaSampleHelperImage |
+      FrozenOfficialNvidiaSampleHelperTimer;
+  for (const char *name : AscifyCudaCompatIdentifiers) {
+    const clang::IdentifierInfo *identifier =
+        preprocessor.getIdentifierInfo(name);
+    if (identifier == nullptr)
+      continue;
+    const clang::MacroInfo *macroInfo =
+        preprocessor.getMacroDefinition(identifier).getMacroInfo();
+    if (macroInfo == nullptr || macroInfo->isBuiltinMacro())
+      continue;
+    const clang::SourceLocation definitionLocation =
+        sourceManager.getSpellingLoc(macroInfo->getDefinitionLoc());
+    const clang::FileID definitionFile = definitionLocation.isValid()
+        ? sourceManager.getFileID(definitionLocation)
+        : clang::FileID();
+#if LLVM_VERSION_MAJOR >= 8
+    const clang::FileID predefinesFile = preprocessor.getPredefinesFileID();
+    const bool compilerPredefinition =
+        definitionFile.isValid() && predefinesFile.isValid() &&
+        definitionFile == predefinesFile &&
+        !sourceManager.isWrittenInCommandLineFile(definitionLocation);
+#else
+    (void)definitionFile;
+    const bool compilerPredefinition = false;
+#endif
+    const bool trustedSystemDefinition =
+        definitionLocation.isValid() &&
+        locationComesFromInitiallyTrustedSystemFile(
+            sourceManager, definitionLocation, trustedSystemFileIds);
+    const bool frozenHelperDefinition =
+        definitionLocation.isValid() &&
+        locationComesFromFrozenNvidiaSampleHelperFile(
+            sourceManager, definitionLocation, frozenMacroGraph);
+    if (compilerPredefinition || trustedSystemDefinition ||
+        frozenHelperDefinition ||
+        locationComesFromAscifyCudaCompat(
+            sourceManager, definitionLocation))
+      continue;
+    ascifyCudaCompatActiveMacroConflict = true;
+    ascifyCudaCompatActiveMacroConflictName = name;
+    llvm::errs()
+        << "Ascify CUDA compat closure: active untrusted macro '" << name
+        << "' collides with the frozen compat header at the helper include\n";
+    return;
+  }
 }
 
 void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
@@ -3520,12 +4362,18 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
   const clang::MacroInfo *macroInfo = MD.getMacroInfo();
+  if (isAscifyCudaCompatPublishedMacro(
+          MacroNameTok.getIdentifierInfo()->getName()))
+    auditExternalNvidiaSampleHelperPreprocessorUse(
+        MacroNameTok.getLocation(), MacroNameTok, "expansion");
   auditFrozenNvidiaSampleHelperMacroDependency(
       MacroNameTok.getLocation(), MacroNameTok, MD, "expansion");
   if (macroInfo == nullptr ||
       !locationComesFromRecognizedNvidiaSampleHelper(
           sourceManager, macroInfo->getDefinitionLoc()))
     return;
+  const llvm::StringRef name =
+      MacroNameTok.getIdentifierInfo()->getName();
   const clang::SourceLocation macroLocation =
       sourceManager.getExpansionLoc(MacroNameTok.getLocation());
   if (macroLocation.isInvalid()) {
@@ -3533,6 +4381,29 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
     return;
   }
   if (!sourceManager.isWrittenInMainFile(macroLocation)) {
+    // NVIDIA cuda-samples v13.3 also has a reversed direct-include order:
+    // helper_cuda.h followed by helper_functions.h. In that exact graph,
+    // helper_cuda's MAX is active while the frozen helper_image body expands
+    // MAX internally. Removing helper_cuda makes the same exact image file
+    // publish its own equivalent MAX before that use. Admit only this one
+    // order-dependent internal expansion: exact producer and consumer roles,
+    // exact active producer body, an observed exact helper_functions root,
+    // and the first physical identity of the non-overridden image provider.
+    bool admittedFrozenInternalMaxExpansion = false;
+    if (name == "MAX" &&
+        frozenOfficialNvidiaSampleHelperFunctionsSeen &&
+        frozenNvidiaSampleHelperFileRole(sourceManager, macroLocation) ==
+            FrozenOfficialNvidiaSampleHelperImage &&
+        frozenNvidiaSampleHelperFileRole(
+            sourceManager, macroInfo->getDefinitionLoc()) ==
+            FrozenOfficialNvidiaSampleHelperCuda &&
+        activeFrozenHelperCudaMaxBodyMatches(
+            *macroInfo, getCompilerInstance().getPreprocessor())) {
+      admittedFrozenInternalMaxExpansion =
+          isDirectFrozenFunctionsImageProviderInstance(macroLocation);
+    }
+    if (admittedFrozenInternalMaxExpansion)
+      return;
     // Ignore implementation-internal expansions from the recognized helper,
     // but never remove the helper when an arbitrary local/user header relies
     // on one of its macros: this prototype does not rewrite that header.
@@ -3545,9 +4416,6 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
     }
     return;
   }
-
-  const llvm::StringRef name =
-      MacroNameTok.getIdentifierInfo()->getName();
   if (name != "checkCudaErrors" && name != "getLastCudaError") {
     nvidiaSampleHelperUnsupportedMacroUse = true;
     return;
@@ -3668,12 +4536,25 @@ void AscifyAction::auditRawNvidiaSampleHelperToken(
     const clang::Token &token) {
   if (nvidiaSampleHelperIncludes.empty() || !token.isAnyIdentifier())
     return;
-  const llvm::StringRef name = token.getRawIdentifier();
-  if (name != "checkCudaErrors" && name != "getLastCudaError" &&
-      name != "findCudaDevice")
-    return;
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
+  bool invalidSpelling = false;
+  const std::string name = clang::Lexer::getSpelling(
+      token, sourceManager, getCompilerInstance().getLangOpts(),
+      &invalidSpelling);
+  if (invalidSpelling) {
+    nvidiaSampleHelperUnsupportedMacroUse = true;
+    llvm::errs()
+        << "Ascify NVIDIA sample-helper closure: unreadable raw identifier "
+        << "keeps helper_cuda.h\n";
+    return;
+  }
+  const bool publishedCompatMacro =
+      !hasCudaCompatHeaderBeforeNvidiaHelper &&
+      isAscifyCudaCompatPublishedMacro(name);
+  if (!isNvidiaSampleHelperObservableMacro(name) &&
+      name != "findCudaDevice" && !publishedCompatMacro)
+    return;
   const clang::SourceLocation fileLoc =
       sourceManager.getFileLoc(token.getLocation());
   if (fileLoc.isInvalid() || !sourceManager.isWrittenInMainFile(fileLoc))
@@ -3690,6 +4571,55 @@ void AscifyAction::auditRawNvidiaSampleHelperToken(
   nvidiaSampleHelperUnsupportedMacroUse = true;
 }
 
+void AscifyAction::auditRawPublishedCompatTokensInFile(
+    clang::FileID file) {
+  if (file.isInvalid() || hasCudaCompatHeaderBeforeNvidiaHelper)
+    return;
+  clang::SourceManager &sourceManager =
+      getCompilerInstance().getSourceManager();
+  bool invalidBuffer = false;
+  const llvm::StringRef buffer =
+      sourceManager.getBufferData(file, &invalidBuffer);
+  if (invalidBuffer) {
+    nvidiaSampleHelperUnsupportedMacroUse = true;
+    llvm::errs()
+        << "Ascify CUDA compat closure: retained header could not be "
+        << "audited for published macros; helper edits kept\n";
+    return;
+  }
+  const clang::SourceLocation start =
+      sourceManager.getLocForStartOfFile(file);
+  clang::Lexer lexer(
+      start, getCompilerInstance().getLangOpts(), buffer.begin(),
+      buffer.begin(), buffer.end());
+  clang::Token token;
+  lexer.LexFromRawLexer(token);
+  while (token.isNot(clang::tok::eof)) {
+    if (token.isAnyIdentifier()) {
+      bool invalidSpelling = false;
+      const std::string name = clang::Lexer::getSpelling(
+          token, sourceManager, getCompilerInstance().getLangOpts(),
+          &invalidSpelling);
+      if (invalidSpelling) {
+        nvidiaSampleHelperUnsupportedMacroUse = true;
+        llvm::errs()
+            << "Ascify CUDA compat closure: retained header contains an "
+            << "unreadable raw identifier; helper edits kept\n";
+        return;
+      }
+      if (isAscifyCudaCompatPublishedMacro(name)) {
+        nvidiaSampleHelperUnsupportedMacroUse = true;
+        llvm::errs()
+            << "Ascify CUDA compat closure: retained header observes "
+            << "published macro token '" << name
+            << "'; helper edits kept\n";
+        return;
+      }
+    }
+    lexer.LexFromRawLexer(token);
+  }
+}
+
 void AscifyAction::auditExternalNvidiaSampleHelperPreprocessorUse(
     clang::SourceLocation location,
     const clang::Token &macroNameToken,
@@ -3698,21 +4628,112 @@ void AscifyAction::auditExternalNvidiaSampleHelperPreprocessorUse(
     return;
   const llvm::StringRef name =
       macroNameToken.getIdentifierInfo()->getName();
-  if (name != "checkCudaErrors" && name != "getLastCudaError")
+  const bool observableHelper =
+      isNvidiaSampleHelperObservableMacro(name);
+  const bool downstreamCompatPublication =
+      !nvidiaSampleHelperIncludes.empty() &&
+      !hasCudaCompatHeaderBeforeNvidiaHelper &&
+      isAscifyCudaCompatPublishedMacro(name);
+  if (!observableHelper && !downstreamCompatPublication)
     return;
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
   const clang::SourceLocation expansion =
       sourceManager.getExpansionLoc(location);
-  if (expansion.isInvalid() ||
-      sourceManager.isWrittenInMainFile(expansion) ||
-      locationComesFromRecognizedNvidiaSampleHelper(
-          sourceManager, expansion))
+  if (expansion.isInvalid()) {
+    nvidiaSampleHelperUnsupportedMacroUse = true;
+    llvm::errs()
+        << "Ascify NVIDIA sample-helper closure: invalid observable "
+        << directive << " location keeps all helper edits\n";
+    return;
+  }
+  const unsigned frozenRole =
+      frozenNvidiaSampleHelperFileRole(sourceManager, expansion);
+  const unsigned frozenMacroGraph =
+      FrozenOfficialNvidiaSampleHelperCuda |
+      FrozenOfficialNvidiaSampleHelperString |
+      FrozenOfficialNvidiaSampleHelperFunctions |
+      FrozenOfficialNvidiaSampleHelperImage |
+      FrozenOfficialNvidiaSampleHelperTimer;
+  if (locationComesFromRecognizedNvidiaSampleHelper(
+          sourceManager, expansion) ||
+      (frozenRole & frozenMacroGraph) != 0 ||
+      locationComesFromAscifyCudaCompat(sourceManager, expansion))
     return;
   nvidiaSampleHelperUnsupportedMacroUse = true;
   llvm::errs()
-      << "Ascify NVIDIA sample-helper closure: external " << directive
+      << "Ascify NVIDIA sample-helper closure: observable " << directive
       << " use of '" << name << "' keeps all helper edits\n";
+}
+
+void AscifyAction::auditSkippedNvidiaSampleHelperElifDirective(
+    clang::SourceLocation location,
+    clang::SourceRange conditionRange,
+    llvm::StringRef directive) {
+  (void)conditionRange;
+  clang::SourceManager &sourceManager =
+      getCompilerInstance().getSourceManager();
+  const clang::SourceLocation expansion =
+      sourceManager.getExpansionLoc(location);
+  const unsigned frozenRole = expansion.isValid()
+      ? frozenNvidiaSampleHelperFileRole(sourceManager, expansion)
+      : FrozenNvidiaSampleHelperNone;
+  const unsigned frozenMacroGraph =
+      FrozenOfficialNvidiaSampleHelperCuda |
+      FrozenOfficialNvidiaSampleHelperString |
+      FrozenOfficialNvidiaSampleHelperFunctions |
+      FrozenOfficialNvidiaSampleHelperImage |
+      FrozenOfficialNvidiaSampleHelperTimer;
+  if (expansion.isValid() &&
+      (locationComesFromRecognizedNvidiaSampleHelper(
+           sourceManager, expansion) ||
+       (frozenRole & frozenMacroGraph) != 0))
+    return;
+  // Clang reports only a raw ConditionRange for a skipped #elifdef/ifndef.
+  // That spelling is not phase-2 cleaned, so line splices can hide an
+  // observable helper name.  These directives are rare in CUDA Samples; keep
+  // the transaction fail-closed instead of maintaining a second lexer.
+  nvidiaSampleHelperUnsupportedMacroUse = true;
+  llvm::errs()
+      << "Ascify NVIDIA sample-helper closure: unproven skipped "
+      << directive << " keeps all helper edits\n";
+}
+
+bool AscifyAction::isDirectFrozenFunctionsImageProviderInstance(
+    clang::SourceLocation imageLocation) {
+  clang::SourceManager &sourceManager =
+      getCompilerInstance().getSourceManager();
+  const clang::SourceLocation imageSpelling =
+      sourceManager.getSpellingLoc(imageLocation);
+  if (imageSpelling.isInvalid() ||
+      frozenNvidiaSampleHelperFileRole(sourceManager, imageSpelling) !=
+          FrozenOfficialNvidiaSampleHelperImage)
+    return false;
+  const clang::FileID imageFile = sourceManager.getFileID(imageSpelling);
+  const clang::FileEntry *imageEntry = imageFile.isValid()
+      ? sourceManager.getFileEntryForID(imageFile)
+      : nullptr;
+  if (imageEntry == nullptr || sourceManager.isFileOverridden(imageEntry))
+    return false;
+  const llvm::sys::fs::UniqueID &imageUniqueId = imageEntry->getUniqueID();
+  const std::pair<std::uint64_t, std::uint64_t> imageIdentity(
+      imageUniqueId.getDevice(), imageUniqueId.getFile());
+  if ((imageIdentity.first == 0 && imageIdentity.second == 0) ||
+      frozenNvidiaSampleMacroProviderIdentities.count(imageIdentity) == 0)
+    return false;
+  const clang::SourceLocation includeLocation =
+      sourceManager.getIncludeLoc(imageFile);
+  const clang::SourceLocation includerSpelling =
+      sourceManager.getSpellingLoc(includeLocation);
+  if (includerSpelling.isInvalid() ||
+      frozenNvidiaSampleHelperFileRole(sourceManager, includerSpelling) !=
+          FrozenOfficialNvidiaSampleHelperFunctions)
+    return false;
+  const clang::FileID includerFile =
+      sourceManager.getFileID(includerSpelling);
+  return includerFile.isValid() &&
+      frozenNvidiaSampleDirectFunctionsRootFileIds.count(
+          includerFile.getHashValue()) != 0;
 }
 
 void AscifyAction::auditFrozenNvidiaSampleHelperMacroDependency(
@@ -3785,24 +4806,8 @@ void AscifyAction::auditFrozenNvidiaSampleHelperMacroDependency(
       activeFrozenHelperFunctionsProviderMacroBodyMatches(
           macroName, *macroInfo,
           getCompilerInstance().getPreprocessor())) {
-    const unsigned providerRole = frozenNvidiaSampleHelperFileRole(
-        sourceManager, definitionLocation);
-    const clang::FileEntry *providerEntry =
-        definitionFile.isValid()
-            ? sourceManager.getFileEntryForID(definitionFile)
-            : nullptr;
-    if (providerRole == FrozenOfficialNvidiaSampleHelperImage &&
-        providerEntry != nullptr &&
-        !sourceManager.isFileOverridden(providerEntry)) {
-      const llvm::sys::fs::UniqueID &providerUniqueId =
-          providerEntry->getUniqueID();
-      const std::pair<std::uint64_t, std::uint64_t> providerIdentity(
-          providerUniqueId.getDevice(), providerUniqueId.getFile());
-      frozenOfficialProviderMacroDependency =
-          !(providerIdentity.first == 0 && providerIdentity.second == 0) &&
-          frozenNvidiaSampleMacroProviderIdentities.count(
-              providerIdentity) != 0;
-    }
+    frozenOfficialProviderMacroDependency =
+        isDirectFrozenFunctionsImageProviderInstance(definitionLocation);
   }
   const bool frozenCoreDefinition =
       definitionLocation.isValid() &&
@@ -3939,7 +4944,8 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
     stagedSemanticRanges.push_back(candidate.rewriteRange);
   }
 
-  bool compatInsertedByClosure = hasCudaCompatHeader;
+  bool compatInsertedByClosure =
+      hasCudaCompatHeaderBeforeNvidiaHelper;
   const NvidiaSampleHelperInclude &include =
       nvidiaSampleHelperIncludes.front();
   const char *begin = sourceManager.getCharacterData(include.hashLocation);
@@ -3948,15 +4954,24 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
       (begin == nullptr || end == nullptr || end < begin)) {
     stagingError = "invalid direct include range";
   }
-  std::string includeReplacementText;
+  // helper_cuda's direct portable include surface is part of the source
+  // contract even when no downstream AST node points back to it.  Keep those
+  // declarations and helper_string macros at the original include position;
+  // replace only the CUDA-specific helper layer.
+  std::string includeReplacementText =
+      "#include <stdint.h>\n"
+      "#include <stdio.h>\n"
+      "#include <stdlib.h>\n"
+      "#include <string.h>\n"
+      "#include <helper_string.h>";
   const bool helperNeedsCompat =
       !nvidiaSampleHelperMacroCandidates.empty() ||
       !nvidiaSampleFindDeviceCandidates.empty();
   if (stagingError.empty() &&
       (needsCudaCompatHeader || helperNeedsCompat) &&
       !compatInsertedByClosure) {
-    includeReplacementText =
-        "#include <ascify/ascify_cuda_compat.hpp>";
+    includeReplacementText +=
+        "\n#include <ascify/ascify_cuda_compat.hpp>";
     compatInsertedByClosure = true;
   }
   std::unique_ptr<ct::Replacement> includeReplacement;
@@ -3999,6 +5014,8 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
   needsCudaCompatHeader = needsCudaCompatHeader || helperNeedsCompat;
   if (compatInsertedByClosure)
     hasCudaCompatHeader = true;
+  if (compatInsertedByClosure)
+    hasCudaCompatHeaderBeforeNvidiaHelper = true;
   if (PrintStats || PrintStatsCSV) {
     for (size_t index = 0; index < committedMacroReplacements.size();
          ++index) {
@@ -4014,7 +5031,8 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
     Statistics::current().bytesChanged(includeReplacement->getLength());
   }
   llvm::errs()
-      << "Ascify NVIDIA sample-helper closure: include removed"
+      << "Ascify NVIDIA sample-helper closure: include removed; portable "
+      << "surface retained"
       << ", includes=1"
       << ", check_rewrites=" << nvidiaSampleCheckCudaErrorsRewrites
       << ", get_last_rewrites="
@@ -4024,6 +5042,47 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
 }
 
 void AscifyAction::EndSourceFileAction() {
+  finalizePendingNvidiaSampleHelperPragma();
+  if (needsCudaCompatHeader &&
+      nvidiaSampleHelperOutputMacroEverDefined) {
+    const auto diagnostic =
+        getCompilerInstance().getDiagnostics().getCustomDiagID(
+            clang::DiagnosticsEngine::Error,
+            "Ascify cannot publish CUDA compatibility output because a "
+            "reserved compat macro was defined by the input");
+    getCompilerInstance().getDiagnostics().Report(diagnostic);
+    return;
+  }
+  if (needsCudaCompatHeader && ascifyCudaCompatIncludeConflict) {
+    const auto diagnostic =
+        getCompilerInstance().getDiagnostics().getCustomDiagID(
+            clang::DiagnosticsEngine::Error,
+            "Ascify cannot publish CUDA compatibility output because the "
+            "compat include spelling resolves to an unrecognized header");
+    getCompilerInstance().getDiagnostics().Report(diagnostic);
+    return;
+  }
+  if (needsCudaCompatHeader && ascifyCudaCompatActiveMacroConflict) {
+    const auto diagnostic =
+        getCompilerInstance().getDiagnostics().getCustomDiagID(
+            clang::DiagnosticsEngine::Error,
+            "Ascify cannot publish CUDA compatibility output because active "
+            "input macro '%0' collides with the frozen compat header");
+    getCompilerInstance().getDiagnostics().Report(diagnostic)
+        << ascifyCudaCompatActiveMacroConflictName;
+    return;
+  }
+  if (needsCudaCompatHeader &&
+      !hasCudaCompatHeaderBeforeNvidiaHelper &&
+      ascifyCudaCompatDeclarationConflict) {
+    const auto diagnostic =
+        getCompilerInstance().getDiagnostics().getCustomDiagID(
+            clang::DiagnosticsEngine::Error,
+            "Ascify cannot publish CUDA compatibility output because the "
+            "input owns the top-level name 'ascify'");
+    getCompilerInstance().getDiagnostics().Report(diagnostic);
+    return;
+  }
   finalizeNvidiaSampleHelperClosure();
   std::string includes;
   if (needsCudaCompatHeader && !hasCudaCompatHeader)
@@ -4143,14 +5202,68 @@ public:
     ascifyAction.PragmaDirective(Loc, Introducer);
   }
 
+#if LLVM_VERSION_MAJOR >= 13
+  void PragmaDiagnosticPush(
+      clang::SourceLocation, StringRef) override {
+    ascifyAction.PragmaDiagnostic();
+  }
+
+  void PragmaDiagnosticPop(
+      clang::SourceLocation, StringRef) override {
+    ascifyAction.PragmaDiagnostic();
+  }
+
+  void PragmaDiagnostic(
+      clang::SourceLocation, StringRef, clang::diag::Severity,
+      StringRef) override {
+    ascifyAction.PragmaDiagnostic();
+  }
+#endif
+
   void Ifndef(clang::SourceLocation Loc, const clang::Token &MacroNameTok, const clang::MacroDefinition &MD) override {
     ascifyAction.Ifndef(Loc, MacroNameTok, MD);
+  }
+
+  void If(clang::SourceLocation,
+          clang::SourceRange,
+          clang::PPCallbacks::ConditionValueKind) override {
+    ascifyAction.ConditionalDirectiveEntered();
   }
 
   void Ifdef(clang::SourceLocation Loc,
              const clang::Token &MacroNameTok,
              const clang::MacroDefinition &MD) override {
     ascifyAction.Ifdef(Loc, MacroNameTok, MD);
+  }
+
+#if LLVM_VERSION_MAJOR >= 13
+  void Elifdef(clang::SourceLocation Loc,
+               const clang::Token &MacroNameTok,
+               const clang::MacroDefinition &MD) override {
+    ascifyAction.Elifdef(Loc, MacroNameTok, MD, "#elifdef");
+  }
+
+  void Elifdef(clang::SourceLocation Loc,
+               clang::SourceRange ConditionRange,
+               clang::SourceLocation) override {
+    ascifyAction.ElifdefSkipped(Loc, ConditionRange, "#elifdef");
+  }
+
+  void Elifndef(clang::SourceLocation Loc,
+                const clang::Token &MacroNameTok,
+                const clang::MacroDefinition &MD) override {
+    ascifyAction.Elifdef(Loc, MacroNameTok, MD, "#elifndef");
+  }
+
+  void Elifndef(clang::SourceLocation Loc,
+                clang::SourceRange ConditionRange,
+                clang::SourceLocation) override {
+    ascifyAction.ElifdefSkipped(Loc, ConditionRange, "#elifndef");
+  }
+#endif
+
+  void Endif(clang::SourceLocation, clang::SourceLocation) override {
+    ascifyAction.ConditionalDirectiveEnded();
   }
 
   void Defined(const clang::Token &MacroNameTok,
@@ -4235,6 +5348,9 @@ void AscifyAction::ExecuteAction() {
   // Now we're done futzing with the lexer, have the subclass proceeed with Sema and AST matching.
   clang::ASTFrontendAction::ExecuteAction();
   auto &SM = getCompilerInstance().getSourceManager();
+  ascifyCudaCompatDeclarationConflict =
+      hasInputTopLevelAscifyDeclaration(
+          getCompilerInstance().getASTContext(), SM);
   if (!nvidiaSampleHelperIncludes.empty()) {
     nvidiaSampleHelperUnsupportedDeclarationUse =
         hasUnsupportedNvidiaSampleHelperDeclarationUse();
@@ -4338,6 +5454,10 @@ void AscifyAction::ExecuteAction() {
     if (RewriteToken(RawLex, RawTok))
       continue;
     RawLex.LexFromRawLexer(RawTok);
+  }
+  if (!nvidiaSampleHelperIncludes.empty()) {
+    for (clang::FileID file : nvidiaSampleRetainedFileIds)
+      auditRawPublishedCompatTokensInFile(file);
   }
   // Every helper edit remains staged until the raw pass reaches EOF. Any
   // earlier target-recipe return leaves this false, so EndSourceFileAction

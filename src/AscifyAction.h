@@ -92,6 +92,9 @@ private:
   std::set<std::string> recognizedNvidiaSampleHelperPaths;
   std::set<unsigned> nvidiaSampleHelperNormalMacroOffsets;
   std::set<unsigned> nvidiaSampleFindDeviceNormalOffsets;
+  std::vector<bool> nvidiaSampleHelperCudaFileStack;
+  std::vector<clang::FileID> nvidiaSampleRetainedFileIds;
+  std::set<unsigned> nvidiaSampleRetainedFileIdHashes;
   // FileIDs whose first EnterFile callback already carried a system
   // characteristic.  A later #pragma system_header notification must not be
   // able to promote an ordinary project/preinclude file into this set.
@@ -105,11 +108,20 @@ private:
   // independent of later system_header state.
   std::set<std::pair<std::uint64_t, std::uint64_t>>
       frozenNvidiaSampleMacroProviderIdentities;
+  std::set<std::pair<std::uint64_t, std::uint64_t>>
+      frozenNvidiaSampleDirectFunctionsRootIdentities;
+  std::set<unsigned> frozenNvidiaSampleDirectFunctionsRootFileIds;
   bool frozenOfficialNvidiaSampleHelperFunctionsSeen = false;
+  unsigned preprocessorConditionalDepth = 0;
   bool nvidiaSampleHelperUnsupportedMacroUse = false;
   bool nvidiaSampleHelperUnsupportedDeclarationUse = false;
   bool nvidiaSampleHelperRewriteFailed = false;
   bool nvidiaSampleHelperOutputMacroEverDefined = false;
+  bool nvidiaSampleHelperPendingMacroGeneratedPragma = false;
+  bool ascifyCudaCompatDeclarationConflict = false;
+  bool ascifyCudaCompatIncludeConflict = false;
+  bool ascifyCudaCompatActiveMacroConflict = false;
+  std::string ascifyCudaCompatActiveMacroConflictName;
   bool nvidiaSampleFrozenProfileMacroConflict = false;
   bool nvidiaSampleHelperReadyToCommit = false;
   bool nvidiaSampleHelperRawAuditCompleted = false;
@@ -137,6 +149,7 @@ private:
   bool firstHeader = false;
   bool needsCudaCompatHeader = false;
   bool hasCudaCompatHeader = false;
+  bool hasCudaCompatHeaderBeforeNvidiaHelper = false;
   bool needsDavC310TargetHeader = false;
   bool hasDavC310TargetHeader = false;
   bool hasDavC310SimdTargetHeader = false;
@@ -166,15 +179,23 @@ private:
   bool hasUnsupportedNvidiaSampleHelperDeclarationUse();
   void rewriteProvenNvidiaSampleHelperMacros();
   void auditRawNvidiaSampleHelperToken(const clang::Token &token);
+  void auditRawPublishedCompatTokensInFile(clang::FileID file);
+  void auditActiveAscifyCudaCompatMacrosAtInsertion();
   void auditExternalNvidiaSampleHelperPreprocessorUse(
       clang::SourceLocation location,
       const clang::Token &macroNameToken,
+      llvm::StringRef directive);
+  void auditSkippedNvidiaSampleHelperElifDirective(
+      clang::SourceLocation location,
+      clang::SourceRange conditionRange,
       llvm::StringRef directive);
   void auditFrozenNvidiaSampleHelperMacroDependency(
       clang::SourceLocation useLocation,
       const clang::Token &macroNameToken,
       const clang::MacroDefinition &definition,
       llvm::StringRef useKind);
+  bool isDirectFrozenFunctionsImageProviderInstance(
+      clang::SourceLocation imageLocation);
   void finalizeNvidiaSampleHelperClosure();
   // Calculate str's SourceLocation in SourceRange sr
   clang::SourceLocation GetSubstrLocation(const std::string &str, const clang::SourceRange &sr);
@@ -226,11 +247,22 @@ public:
                           const clang::Module *imported);
   // Called by the preprocessor for each pragma directive during the non-raw lexing pass.
   void PragmaDirective(clang::SourceLocation Loc, clang::PragmaIntroducerKind Introducer);
+  void PragmaDiagnostic();
+  void finalizePendingNvidiaSampleHelperPragma();
   // Called by the preprocessor for each ifndef directive during the non-raw lexing pass.
   // Found ifndef will be used in EndSourceFileAction() for catching include guard controlling macro.
   void Ifndef(clang::SourceLocation Loc, const clang::Token &MacroNameTok, const clang::MacroDefinition &MD);
   void Ifdef(clang::SourceLocation Loc, const clang::Token &MacroNameTok,
              const clang::MacroDefinition &MD);
+  void Elifdef(clang::SourceLocation Loc,
+               const clang::Token &MacroNameTok,
+               const clang::MacroDefinition &MD,
+               llvm::StringRef directive);
+  void ElifdefSkipped(clang::SourceLocation Loc,
+                      clang::SourceRange ConditionRange,
+                      llvm::StringRef directive);
+  void ConditionalDirectiveEntered();
+  void ConditionalDirectiveEnded();
   void Defined(const clang::Token &MacroNameTok,
                const clang::MacroDefinition &MD,
                clang::SourceRange Range);

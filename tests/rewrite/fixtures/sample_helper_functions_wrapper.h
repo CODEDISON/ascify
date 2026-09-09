@@ -1,0 +1,6 @@
+#ifndef ASCIFY_TEST_SAMPLE_HELPER_FUNCTIONS_WRAPPER_H
+#define ASCIFY_TEST_SAMPLE_HELPER_FUNCTIONS_WRAPPER_H
+
+#include <helper_functions.h>
+
+#endif
