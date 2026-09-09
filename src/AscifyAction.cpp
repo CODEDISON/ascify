@@ -450,7 +450,8 @@ std::vector<DirectPragmaToken> directPragmaTokens(llvm::StringRef line) {
 }
 
 bool isDirectlyAllowedHashPragma(
-    llvm::StringRef line, std::string &operation) {
+    llvm::StringRef line, std::string &operation,
+    bool initiallyTrustedSystemFile) {
   const std::vector<DirectPragmaToken> tokens = directPragmaTokens(line);
   size_t pragma = 0;
   while (pragma < tokens.size() &&
@@ -505,12 +506,28 @@ bool isDirectlyAllowedHashPragma(
         tokens[pragma + 3].kind == DirectPragmaToken::Kind::String)
       return true;
   }
-  if (remaining == 4 &&
+  // Clang's CUDA texture header uses a trailing semicolon on its literal
+  // macro-stack pragmas. This does not change the target-name proof performed
+  // before this syntax admission. Accept exactly one optional semicolon.
+  if ((remaining == 4 ||
+       (remaining == 5 && punctuationAt(pragma + 4, ";"))) &&
       (identifierAt(pragma, "push_macro") ||
        identifierAt(pragma, "pop_macro")) &&
       punctuationAt(pragma + 1, "(") &&
       tokens[pragma + 2].kind == DirectPragmaToken::Kind::String &&
       punctuationAt(pragma + 3, ")"))
+    return true;
+  // libstdc++ brackets portable standard declarations with default symbol
+  // visibility. Only headers trusted on their first entry may use this form;
+  // a user pragma or a later system_header promotion cannot change the ABI of
+  // the compatibility declarations inserted by the helper transaction.
+  if (initiallyTrustedSystemFile &&
+      identifierAt(pragma, "GCC") && identifierAt(pragma + 1, "visibility") &&
+      ((remaining == 3 && identifierAt(pragma + 2, "pop")) ||
+       (remaining == 6 && identifierAt(pragma + 2, "push") &&
+        punctuationAt(pragma + 3, "(") &&
+        identifierAt(pragma + 4, "default") &&
+        punctuationAt(pragma + 5, ")"))))
     return true;
   return false;
 }
@@ -3622,7 +3639,10 @@ void AscifyAction::PragmaDirective(
     return;
   }
   std::string pragmaOperation;
-  if (!isDirectlyAllowedHashPragma(line, pragmaOperation)) {
+  if (!isDirectlyAllowedHashPragma(
+          line, pragmaOperation,
+          locationComesFromInitiallyTrustedSystemFile(
+              sourceManager, fileLocation, trustedSystemFileIds))) {
     nvidiaSampleHelperUnsupportedMacroUse = true;
     llvm::errs()
         << "Ascify NVIDIA sample-helper closure: unproven hash pragma '"

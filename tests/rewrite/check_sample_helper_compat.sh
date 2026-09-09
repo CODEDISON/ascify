@@ -465,6 +465,44 @@ if command -v "$cxx" >/dev/null 2>&1; then
     "$test_tmp/find-cuda-then-functions.cpp"
 fi
 
+# GCC standard headers use fixed visibility pragmas; CUDA's builtin headers
+# also use a semicolon after literal push/pop_macro. Admit these forms without
+# allowing ordinary headers to acquire system provenance after first entry.
+translate "$fixtures/sample_helper_find_device_system_pragmas.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-system-pragmas.cpp" "$test_tmp/find-system-pragmas" \
+  -isystem "$fixtures/pragma_headers"
+require_fixed 'return ::ascify::sampleFindCudaDevice(argc, argv);' \
+  "$test_tmp/find-system-pragmas.cpp"
+require_fixed 'include removed' "$test_tmp/find-system-pragmas.stderr"
+
+for provenance in ordinary promoted; do
+  promotion_arg=
+  if [ "$provenance" = promoted ]; then
+    promotion_arg=-DASCIFY_TEST_PRAGMA_SYSTEM_PROMOTION
+  fi
+  translate "$fixtures/sample_helper_find_device_system_pragmas.cu" \
+    "$fixtures/nvidia_samples/Common" \
+    "$test_tmp/find-$provenance-pragmas.cpp" \
+    "$test_tmp/find-$provenance-pragmas" \
+    -I"$fixtures/pragma_headers" ${promotion_arg:+"$promotion_arg"}
+  forbid_fixed '::ascify::sampleFindCudaDevice' \
+    "$test_tmp/find-$provenance-pragmas.cpp"
+  require_fixed "unproven hash pragma 'GCC'" \
+    "$test_tmp/find-$provenance-pragmas.stderr"
+  require_fixed 'include kept' "$test_tmp/find-$provenance-pragmas.stderr"
+done
+
+translate "$fixtures/sample_helper_find_device_semicolon_observable.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-semicolon-observable.cpp" \
+  "$test_tmp/find-semicolon-observable"
+forbid_fixed '::ascify::sampleFindCudaDevice' \
+  "$test_tmp/find-semicolon-observable.cpp"
+require_fixed "of observable 'MAX'" \
+  "$test_tmp/find-semicolon-observable.stderr"
+require_fixed 'include kept' "$test_tmp/find-semicolon-observable.stderr"
+
 # Exact helper_image alone is not the admitted replacement-provider graph.
 translate "$fixtures/sample_helper_find_device_cuda_then_image.cu" \
   "$fixtures/nvidia_samples/Common" \

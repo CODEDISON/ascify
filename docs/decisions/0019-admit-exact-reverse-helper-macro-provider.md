@@ -70,12 +70,22 @@ Hash pragmas use a direct-spelling allowlist. Direct literal macro-stack
 operations are admitted only for an ASCII identifier outside both the removed
 helper surface and Ascify's reserved compatibility surface. An observable,
 macro-produced, escaped, or otherwise unresolved stack target rolls back the
-transaction. Direct `once`, system-header, diagnostic, numeric unroll, and
+transaction. Exactly one optional trailing semicolon on a literal stack pragma
+is admitted, as used by Clang's CUDA texture header. Direct `once`, system-header, diagnostic, numeric unroll, and
 fixed CUDA warning-control forms are admitted; other hash pragma classes fail
 closed, including annotation handlers whose argument lexing could reveal a
 helper macro through an unrelated alias. LF, CRLF, and bare-CR line splices
 are normalized. Trigraph and block-comment spellings fail closed instead of
 duplicating Clang's preprocessing phases.
+
+An additional fixed form is admitted only in files already trusted as system
+headers on their first entry: `#pragma GCC visibility push(default)` and its
+matching syntax `#pragma GCC visibility pop`. libstdc++ 11 uses these around
+portable standard declarations. Ordinary user headers and later
+`system_header` promotion do not acquire this admission; hidden/protected,
+macro-produced, or extra-token visibility forms remain outside it. DT's
+2026-09-09 frontend run exposed these standard-header forms and the CUDA
+macro-stack semicolons as false rejections of the helper transaction.
 
 For non-hash `_Pragma`/`__pragma`, only a diagnostic pragma applied in a file
 that was already a system header on its first entry is admitted. A generic
