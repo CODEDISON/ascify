@@ -15,7 +15,14 @@
 #include <vector>
 
 #define __device__
+#if defined(__ARM_FP16_FORMAT_IEEE)
+// GCC 11 on DT exposes IEEE half storage as __fp16, while rejecting the
+// _Float16 C++ spelling even though it defines __FLT16_* feature macros.
+using half = __fp16;
+#else
 using half = _Float16;
+#endif
+static_assert(sizeof(half) == sizeof(uint16_t), "host test needs IEEE binary16 storage");
 using aclError = int;
 using aclrtStream = void*;
 constexpr int ACL_SUCCESS = 0;
