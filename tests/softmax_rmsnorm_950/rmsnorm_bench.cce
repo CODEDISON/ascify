@@ -30,12 +30,12 @@ static aclError LaunchRmsNorm(aclrtStream stream, const half* input, half* outpu
   ln::DirectLoad<half, float> load(input, cols);
   if (affine) {
     ascify950_recipe_fixture::RmsNormAffineStore<float, half, true> store(
-        output, weight, static_cast<int32_t>(cols));
+        output, weight, cols);
     return rn::LaunchRmsNorm<decltype(load), decltype(store), float>(
         stream, load, store, rows, cols, eps, inv_rms);
   }
   ascify950_recipe_fixture::RmsNormAffineStore<float, half, false> store(
-      output, nullptr, static_cast<int32_t>(cols));
+      output, nullptr, cols);
   return rn::LaunchRmsNorm<decltype(load), decltype(store), float>(
       stream, load, store, rows, cols, eps, inv_rms);
 #endif

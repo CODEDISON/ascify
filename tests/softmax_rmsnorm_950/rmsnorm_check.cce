@@ -47,14 +47,29 @@ class GuardedBuffer {
     return aclrtMemset(Payload(), payload_bytes_, static_cast<int32_t>(value), payload_bytes_);
   }
 
+  aclError CopyPayloadFromHost(const void* source, size_t offset, size_t bytes) {
+    if (offset > payload_bytes_ || bytes > payload_bytes_ - offset) {
+      return ACL_ERROR_RT_PARAM_INVALID;
+    }
+    return aclrtMemcpy(static_cast<uint8_t*>(Payload()) + offset, bytes,
+                       source, bytes, ACL_MEMCPY_HOST_TO_DEVICE);
+  }
+
   aclError CopyPayloadFromHost(const void* source) {
-    return aclrtMemcpy(Payload(), payload_bytes_, source, payload_bytes_,
-                       ACL_MEMCPY_HOST_TO_DEVICE);
+    return CopyPayloadFromHost(source, 0, payload_bytes_);
+  }
+
+  aclError CopyPayloadToHost(void* destination, size_t offset, size_t bytes) {
+    if (offset > payload_bytes_ || bytes > payload_bytes_ - offset) {
+      return ACL_ERROR_RT_PARAM_INVALID;
+    }
+    return aclrtMemcpy(destination, bytes,
+                       static_cast<uint8_t*>(Payload()) + offset, bytes,
+                       ACL_MEMCPY_DEVICE_TO_HOST);
   }
 
   aclError CopyPayloadToHost(void* destination) {
-    return aclrtMemcpy(destination, payload_bytes_, Payload(), payload_bytes_,
-                       ACL_MEMCPY_DEVICE_TO_HOST);
+    return CopyPayloadToHost(destination, 0, payload_bytes_);
   }
 
   aclError CountGuardMismatches(uint8_t expected, uint64_t* mismatch_count) {
@@ -106,12 +121,12 @@ static aclError LaunchRmsNorm(aclrtStream stream, const half* input, half* outpu
   ln::DirectLoad<half, float> load(input, cols);
   if (affine) {
     ascify950_recipe_fixture::RmsNormAffineStore<float, half, true> store(
-        output, weight, static_cast<int32_t>(cols));
+        output, weight, cols);
     return rn::LaunchRmsNorm<decltype(load), decltype(store), float>(
         stream, load, store, rows, cols, eps, inv_rms);
   }
   ascify950_recipe_fixture::RmsNormAffineStore<float, half, false> store(
-      output, nullptr, static_cast<int32_t>(cols));
+      output, nullptr, cols);
   return rn::LaunchRmsNorm<decltype(load), decltype(store), float>(
       stream, load, store, rows, cols, eps, inv_rms);
 #endif
@@ -139,6 +154,14 @@ int main(int argc, char** argv) {
       std::strtoull(b950::GetArg(argc, argv, "--seed", "0x9507a45"), nullptr, 0);
   const size_t max_elements = static_cast<size_t>(
       std::strtoull(b950::GetArg(argc, argv, "--max-elements", "4000000"), nullptr, 10));
+  // Whole rows keep the FP32 reduction order unchanged. Device allocations and
+  // the kernel launch still use the original complete shape.
+  const size_t host_chunk_elements = static_cast<size_t>(std::strtoull(
+      b950::GetArg(argc, argv, "--host-chunk-elements", "1048576"), nullptr, 10));
+  if (host_chunk_elements == 0) {
+    std::fprintf(stderr, "--host-chunk-elements must be positive\n");
+    return 1;
+  }
   const double abs_tolerance =
       std::strtod(b950::GetArg(argc, argv, "--abs-tol", "5e-3"), nullptr);
   const double scaled_rel_tolerance =
@@ -224,18 +247,30 @@ int main(int argc, char** argv) {
 
     const b950::InputPatternCode pattern = b950::PatternCode(test_case.input_pattern);
     const uint64_t case_seed = seed ^ static_cast<uint64_t>(test_case.idx + 1);
-    std::vector<uint16_t> host_input(elements);
-    std::vector<uint16_t> host_input_after(elements);
-    std::vector<float> quantized_input(elements);
-    for (size_t linear = 0; linear < elements; ++linear) {
-      const int64_t row = static_cast<int64_t>(linear / static_cast<size_t>(test_case.cols));
-      const int64_t col =
-          static_cast<int64_t>(linear - static_cast<size_t>(row) * test_case.cols);
-      const float value =
-          b950::HostInputValue(pattern, linear, row, col, test_case.cols, case_seed);
-      host_input[linear] = b950::FloatToHalfBits(value);
-      quantized_input[linear] = b950::HalfBitsToFloat(host_input[linear]);
-    }
+    const int64_t chunk_rows = static_cast<int64_t>(std::min<size_t>(
+        static_cast<size_t>(test_case.rows),
+        std::max<size_t>(1, host_chunk_elements / test_case.cols)));
+    std::vector<uint16_t> host_input;
+    std::vector<uint16_t> host_input_after;
+    std::vector<float> quantized_input;
+    // Regenerate the same original input during readback instead of retaining
+    // complete tensors in host RAM. This visits every row, including those with
+    // linear offsets above INT32_MAX.
+    auto prepare_chunk = [&](int64_t first_row, int64_t rows_in_chunk) {
+      const size_t count = static_cast<size_t>(rows_in_chunk) * test_case.cols;
+      host_input.resize(count);
+      quantized_input.resize(count);
+      const size_t first_element = static_cast<size_t>(first_row) * test_case.cols;
+      for (size_t local = 0; local < count; ++local) {
+        const size_t linear = first_element + local;
+        const int64_t row = static_cast<int64_t>(linear / test_case.cols);
+        const int64_t col = static_cast<int64_t>(linear % test_case.cols);
+        const float value =
+            b950::HostInputValue(pattern, linear, row, col, test_case.cols, case_seed);
+        host_input[local] = b950::FloatToHalfBits(value);
+        quantized_input[local] = b950::HalfBitsToFloat(host_input[local]);
+      }
+    };
 
     std::vector<uint16_t> host_weight(weight_elements);
     std::vector<uint16_t> host_weight_after(weight_elements);
@@ -274,7 +309,14 @@ int main(int argc, char** argv) {
     }
     if (error == ACL_SUCCESS) { error = device_output.FillPayload(kPayloadCanaryByte); }
     if (error == ACL_SUCCESS) { error = device_inv_rms.FillPayload(kPayloadCanaryByte); }
-    if (error == ACL_SUCCESS) { error = device_input.CopyPayloadFromHost(host_input.data()); }
+    for (int64_t first_row = 0; error == ACL_SUCCESS && first_row < test_case.rows;
+         first_row += chunk_rows) {
+      const int64_t count = std::min(chunk_rows, test_case.rows - first_row);
+      prepare_chunk(first_row, count);
+      error = device_input.CopyPayloadFromHost(
+          host_input.data(), static_cast<size_t>(first_row) * test_case.cols * sizeof(uint16_t),
+          host_input.size() * sizeof(uint16_t));
+    }
     if (error == ACL_SUCCESS && test_case.affine) {
       error = device_weight.CopyPayloadFromHost(host_weight.data());
     }
@@ -300,12 +342,9 @@ int main(int argc, char** argv) {
       continue;
     }
 
-    std::vector<uint16_t> host_output(elements);
-    std::vector<float> host_inv_rms(inv_elements);
-    error = device_output.CopyPayloadToHost(host_output.data());
-    if (error == ACL_SUCCESS) { error = device_inv_rms.CopyPayloadToHost(host_inv_rms.data()); }
-    if (error == ACL_SUCCESS) { error = device_input.CopyPayloadToHost(host_input_after.data()); }
-    if (error == ACL_SUCCESS && test_case.affine) {
+    std::vector<uint16_t> host_output;
+    std::vector<float> host_inv_rms;
+    if (test_case.affine) {
       error = device_weight.CopyPayloadToHost(host_weight_after.data());
     }
 
@@ -330,8 +369,7 @@ int main(int argc, char** argv) {
       continue;
     }
 
-    uint64_t canary_mismatches =
-        CountByteMismatches(host_input.data(), host_input_after.data(), tensor_bytes);
+    uint64_t canary_mismatches = 0;
     if (test_case.affine) {
       canary_mismatches +=
           CountByteMismatches(host_weight.data(), host_weight_after.data(), weight_bytes);
@@ -344,64 +382,107 @@ int main(int argc, char** argv) {
         | (static_cast<uint32_t>(kPayloadCanaryByte) << 8)
         | (static_cast<uint32_t>(kPayloadCanaryByte) << 16)
         | (static_cast<uint32_t>(kPayloadCanaryByte) << 24);
-    for (uint16_t value : host_output) {
-      if (value == output_canary) { ++canary_mismatches; }
-    }
-    for (float value : host_inv_rms) {
-      uint32_t bits = 0;
-      std::memcpy(&bits, &value, sizeof(bits));
-      if (bits == inv_canary) { ++canary_mismatches; }
-    }
-
     double max_abs_error = 0.0;
     double max_scaled_rel_error = 0.0;
     double max_inv_abs_error = 0.0;
     double max_inv_scaled_rel_error = 0.0;
     uint64_t nonfinite_count = 0;
     const float eps = static_cast<float>(test_case.eps);
-    for (int64_t row = 0; row < test_case.rows; ++row) {
-      const size_t row_offset = static_cast<size_t>(row) * test_case.cols;
-      float square_sum = 0.0f;
-      for (int64_t col = 0; col < test_case.cols; ++col) {
-        const float value = quantized_input[row_offset + col];
-        square_sum += value * value;
+    uint64_t checked_elements = 0;
+    uint64_t checked_rows = 0;
+    for (int64_t first_row = 0; first_row < test_case.rows; first_row += chunk_rows) {
+      const int64_t rows_in_chunk = std::min(chunk_rows, test_case.rows - first_row);
+      prepare_chunk(first_row, rows_in_chunk);
+      host_output.resize(host_input.size());
+      host_input_after.resize(host_input.size());
+      host_inv_rms.resize(static_cast<size_t>(rows_in_chunk));
+      const size_t offset = static_cast<size_t>(first_row) * test_case.cols * sizeof(uint16_t);
+      const size_t bytes = host_input.size() * sizeof(uint16_t);
+      error = device_output.CopyPayloadToHost(host_output.data(), offset, bytes);
+      if (error == ACL_SUCCESS) {
+        error = device_input.CopyPayloadToHost(host_input_after.data(), offset, bytes);
       }
-      const float reference_inv_rms =
-          1.0f / std::sqrt(square_sum / static_cast<float>(test_case.cols) + eps);
-      const float actual_inv_rms = host_inv_rms[static_cast<size_t>(row)];
-      if (!std::isfinite(actual_inv_rms)) {
-        ++nonfinite_count;
-      } else {
-        const double absolute_error =
-            std::fabs(static_cast<double>(actual_inv_rms)
-                      - static_cast<double>(reference_inv_rms));
-        const double scaled_relative_error =
-            absolute_error / std::max(std::fabs(static_cast<double>(reference_inv_rms)), 1.0e-3);
-        max_inv_abs_error = std::max(max_inv_abs_error, absolute_error);
-        max_inv_scaled_rel_error =
-            std::max(max_inv_scaled_rel_error, scaled_relative_error);
+      if (error == ACL_SUCCESS) {
+        error = device_inv_rms.CopyPayloadToHost(
+            host_inv_rms.data(), static_cast<size_t>(first_row) * sizeof(float),
+            host_inv_rms.size() * sizeof(float));
       }
-
-      for (int64_t col = 0; col < test_case.cols; ++col) {
-        float reference = quantized_input[row_offset + col] * reference_inv_rms;
-        if (test_case.affine) {
-          const float normalized_half =
-              b950::HalfBitsToFloat(b950::FloatToHalfBits(reference));
-          reference = normalized_half * quantized_weight[static_cast<size_t>(col)];
+      if (error != ACL_SUCCESS) { break; }
+      canary_mismatches +=
+          CountByteMismatches(host_input.data(), host_input_after.data(), bytes);
+      for (uint16_t value : host_output) {
+        if (value == output_canary) { ++canary_mismatches; }
+      }
+      for (float value : host_inv_rms) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        if (bits == inv_canary) { ++canary_mismatches; }
+      }
+      for (int64_t row = 0; row < rows_in_chunk; ++row) {
+        const size_t row_offset = static_cast<size_t>(row) * test_case.cols;
+        float square_sum = 0.0f;
+        for (int64_t col = 0; col < test_case.cols; ++col) {
+          const float value = quantized_input[row_offset + col];
+          square_sum += value * value;
         }
-        reference = b950::HalfBitsToFloat(b950::FloatToHalfBits(reference));
-        const double actual = b950::HalfBitsToFloat(host_output[row_offset + col]);
-        if (!std::isfinite(actual)) {
+        const float reference_inv_rms =
+            1.0f / std::sqrt(square_sum / static_cast<float>(test_case.cols) + eps);
+        const float actual_inv_rms = host_inv_rms[static_cast<size_t>(row)];
+        if (!std::isfinite(actual_inv_rms)) {
           ++nonfinite_count;
-          continue;
+        } else {
+          const double absolute_error =
+              std::fabs(static_cast<double>(actual_inv_rms)
+                        - static_cast<double>(reference_inv_rms));
+          const double scaled_relative_error =
+              absolute_error / std::max(std::fabs(static_cast<double>(reference_inv_rms)), 1.0e-3);
+          max_inv_abs_error = std::max(max_inv_abs_error, absolute_error);
+          max_inv_scaled_rel_error =
+              std::max(max_inv_scaled_rel_error, scaled_relative_error);
         }
-        const double absolute_error = std::fabs(actual - static_cast<double>(reference));
-        const double scaled_relative_error =
-            absolute_error / std::max(std::fabs(static_cast<double>(reference)), 1.0e-3);
-        max_abs_error = std::max(max_abs_error, absolute_error);
-        max_scaled_rel_error = std::max(max_scaled_rel_error, scaled_relative_error);
+
+        for (int64_t col = 0; col < test_case.cols; ++col) {
+          float reference = quantized_input[row_offset + col] * reference_inv_rms;
+          if (test_case.affine) {
+            const float normalized_half =
+                b950::HalfBitsToFloat(b950::FloatToHalfBits(reference));
+            reference = normalized_half * quantized_weight[static_cast<size_t>(col)];
+          }
+          reference = b950::HalfBitsToFloat(b950::FloatToHalfBits(reference));
+          const double actual = b950::HalfBitsToFloat(host_output[row_offset + col]);
+          if (!std::isfinite(actual)) {
+            ++nonfinite_count;
+            continue;
+          }
+          const double absolute_error = std::fabs(actual - static_cast<double>(reference));
+          const double scaled_relative_error =
+              absolute_error / std::max(std::fabs(static_cast<double>(reference)), 1.0e-3);
+          max_abs_error = std::max(max_abs_error, absolute_error);
+          max_scaled_rel_error = std::max(max_scaled_rel_error, scaled_relative_error);
+        }
       }
+      checked_elements += host_input.size();
+      checked_rows += static_cast<uint64_t>(rows_in_chunk);
     }
+    if (error != ACL_SUCCESS) {
+      record.status = "error";
+      record.reason = b950::AclErrorReason("chunk payload copy", error);
+      csv.Write(record);
+      ++failed;
+      continue;
+    }
+    if (checked_elements != elements || checked_rows != inv_elements) {
+      record.status = "error";
+      record.reason = "incomplete full-tensor oracle coverage";
+      csv.Write(record);
+      ++failed;
+      continue;
+    }
+    std::fprintf(stderr, "full oracle: idx=%lld elements=%llu rows=%llu host_chunk_rows=%lld\n",
+                 static_cast<long long>(test_case.idx),
+                 static_cast<unsigned long long>(checked_elements),
+                 static_cast<unsigned long long>(checked_rows),
+                 static_cast<long long>(chunk_rows));
 
     record.max_abs_error = max_abs_error;
     record.max_scaled_rel_error = max_scaled_rel_error;
