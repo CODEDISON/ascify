@@ -1,64 +1,56 @@
-# Explicit FP16 workload input profile
+# Explicit FP16 input profile
 
-The `oneflow-fp16-no-device-fp64-v1` profile prepares conversion inputs for
-FP16 input/output with FP32 accumulation. It isolates unused device FP64
-helper definitions that the target compiler otherwise diagnoses while parsing
-the complete OneFlow headers. It does not add FP64 support to Ascify.
-
-The vendored OneFlow fixtures remain unchanged. The preparer validates the
-three fixture SHA256 values from `tests/fixtures/oneflow/README.md`, then
-creates a separate include root and `profile.json`. The manifest records the
-source/profile hashes and every exact edit. Output must be a new directory.
-
-Only six explicit device `double` specializations change:
-
-| Header | Specializations |
-|---|---|
-| `softmax.cuh` | `Inf<double>`, `Exp<double>`, `Div<double>`, `Log<double>` |
-| `layer_norm.cuh` | `Div<double>`, `Rsqrt<double>` |
-
-Their function bodies become same-signature `= delete` declarations. Actual
-direct calls, template instantiations, deduced calls, and function-address
-uses remain compile-time errors; they cannot silently resolve to the float
-specialization. Every other byte is retained, including float definitions,
-host-side doubles, epsilon signatures, alignment expressions, and the existing
-RMSNorm row-tail fix. This is a workload input selection, not a general filter
-for every possible double expression.
-
-From the repository root, explicitly prepare the profile and select it for
-the pure SIMT (`dav-fast`) conversion baseline:
+`prepare_fp16_input_profile.py` produces separate, versioned conversion inputs
+for FP16 input/output and FP32 accumulation. It verifies the original three
+OneFlow fixture hashes before writing a new directory and `profile.json`.
+It does not edit the original fixtures or any generated CCE output.
 
 ```sh
 python3 -B tests/softmax_rmsnorm_950/scripts/prepare_fp16_input_profile.py \
-  --output-root "$PWD/.work/oneflow-fp16-input-v1"
-
-INPUT_ROOT="$PWD/.work/oneflow-fp16-input-v1" \
-CONVERSION_SET_ID=ascify_fp16_no_device_fp64_v1 \
-bash tests/softmax_rmsnorm_950/scripts/run_910_conversion_v3.sh
+  --input-root tests/fixtures/oneflow \
+  --output-root /path/to/new/fp16_inputs
 ```
 
-Set the usual `ASCIFY_BINARY`, `CUDA_ROOT`, `CLANG_RESOURCE_DIRECTORY`, and
-`WORK_ROOT` for the DT installation. Keep `profile.json` alongside the
-conversion evidence; the existing conversion runner records the actual
-profile input bytes in its input hashes. The default conversion input remains
-the original vendored fixture. No generated `.cce`/`.cuh` output is edited.
+Pass this output directory as the converter's input/include root. The RMSNorm
+store adapter remains the current, separately converted input in
+`tests/softmax_rmsnorm_950/inputs/rmsnorm_affine_store.cuh`.
 
-`run_910_conversion_v3.sh` does not select the mixed SIMD+SIMT target recipe.
-For the hybrid workload, pass the same prepared source root to the dedicated
-`tools/generate_rowwise_cce.py --mode simd-simt` pipeline. The input profile is
-independent of this mode selection: profile preparation or pure SIMT
-conversion must not be reported as hybrid compilation or execution.
+The current profile is `oneflow-fp16-no-device-fp64-arithmetic-v2`:
 
-Host verification:
+| Helper specialization | Profile behavior |
+|---|---|
+| Softmax `Exp<double>`, `Div<double>`, `Log<double>` | Deleted declaration; actual arithmetic calls fail compilation |
+| LayerNorm `Div<double>`, `Rsqrt<double>` | Deleted declaration; actual arithmetic calls fail compilation |
+| Softmax `Inf<double>` | Original function returning the `CUDART_INF` positive-infinity constant is retained |
+| All float helpers | Unchanged |
+| RMSNorm kernel fixture, including its existing tail fix | Unchanged |
+
+The previous v1 deleted six specializations, including `Inf<double>`. That
+prevented the existing recipe from proving the infinity helper family:
+`provenPositiveInfinityCall` requires both original float and double
+positive-infinity bodies. Consequently all three Softmax wrapper proofs were
+lost. Retaining the original unused constant-return function restores that
+proof without changing the recipe or adding device FP64 arithmetic support.
+
+The v2 boundary is intentionally narrower than v1: five double **arithmetic**
+specializations are rejected. A call to `Inf<double>` is no longer rejected by
+this profile. Do not claim that all six double calls are deleted, or that this
+profile implements FP64 operators. A deleted specialization also prevents
+implicit deduction, dependent instantiation or taking its function address
+from silently using a float implementation.
 
 ```sh
 python3 -B tests/softmax_rmsnorm_950/scripts/test_prepare_fp16_input_profile.py -v
 ```
 
-The test compiles the actual prepared math helper regions with a host C++
-compiler: float helpers compile and retain their values, while every deleted
-double helper and indirect/template use is rejected. It also verifies exact
-reversibility of the six edits, unchanged source identities, deterministic
-profile generation, and refusal of changed sources or existing output paths.
-This does not replace DT Ascify/CCEC validation or final PR correctness and
-performance testing. No target compilation result is claimed by the profile.
+Host tests exercise the actual prepared helper declarations, preserved infinity
+constants, five deleted arithmetic calls, source identity, deterministic output
+and refusal to overwrite prior evidence. Full conversion, CCEC compilation and
+device correctness/performance are separate validation stages.
+
+The input profile does not select an execution mode. The existing
+`run_910_conversion_v3.sh` uses pure SIMT with `dav-c310-vec` and fast math;
+for mixed SIMD+SIMT, pass the prepared root to
+`tools/generate_rowwise_cce.py --mode simd-simt`. Keep `profile.json` beside
+conversion evidence and record the actual profile input hashes. Pure SIMT
+conversion must not be reported as mixed execution.
