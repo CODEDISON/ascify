@@ -87,7 +87,7 @@ int main() {
     @classmethod
     def compile(cls, source, output):
         result = subprocess.run(shlex.split(os.environ.get("CXX", "c++")) + [
-            "-std=c++17", "-O1", "-fsanitize=undefined", "-fno-sanitize-recover=all",
+            "-std=c++17", "-pthread", "-O1", "-fsanitize=undefined", "-fno-sanitize-recover=all",
             "-I", str(cls.root), str(source), "-o", str(output)],
             text=True, capture_output=True)
         if result.returncode:
@@ -143,6 +143,23 @@ int main() {
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual(actual[0][2], "error")
         self.assertIn("chunk payload copy", actual[0][-1])
+
+    def test_parallel_oracle_preserves_records_and_tail_failures(self):
+        for corruption in (None, "output", "input", "inverse", "nan", "weight", "guard", "unwritten", "readback"):
+            reference, expected = self.run_checker(17, corruption)
+            for workers in (2, 3, 8, 64):
+                with self.subTest(corruption=corruption, workers=workers):
+                    result, actual = self.run_checker(17, corruption, ("--host-workers", str(workers)))
+                    self.assertEqual(result.returncode, reference.returncode, result.stderr)
+                    self.assertEqual(actual, expected)
+                    self.assertIn(f"host oracle workers: {workers}", result.stderr)
+
+    def test_invalid_workers_rejected_before_device_initialization(self):
+        for workers in ("0", "65", "-1", "oops", "2x", "99999999999999999999999"):
+            with self.subTest(workers=workers):
+                result, _ = self.run_checker(17, extra=("--host-workers", workers))
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("--host-workers must be", result.stderr)
 
     def test_zero_chunk_rejected_before_device_initialization(self):
         result, _ = self.run_checker(0)

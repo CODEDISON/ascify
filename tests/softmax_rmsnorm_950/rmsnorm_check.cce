@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <thread>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -142,6 +144,39 @@ static uint64_t CountByteMismatches(const void* lhs, const void* rhs, size_t byt
   return mismatches;
 }
 
+// Parallelize complete host rows only; ACL calls stay on the owning thread.
+// Each row retains its original FP32 summation and FP16 rounding order.
+template<typename Function>
+static void RunHostRows(int64_t rows, int requested_workers, Function&& function) {
+  const int workers = static_cast<int>(std::min<int64_t>(rows, requested_workers));
+  if (workers <= 1) { function(0, 0, rows); return; }
+  std::vector<std::thread> threads;
+  std::vector<std::exception_ptr> errors(workers);
+  threads.reserve(workers);
+  try {
+    for (int worker = 0; worker < workers; ++worker) {
+      threads.emplace_back([&, worker] {
+        try {
+          function(worker, rows * worker / workers, rows * (worker + 1) / workers);
+        } catch (...) { errors[worker] = std::current_exception(); }
+      });
+    }
+  } catch (...) {
+    for (auto& thread : threads) { thread.join(); }
+    throw;
+  }
+  for (auto& thread : threads) { thread.join(); }
+  for (const auto& error : errors) { if (error) { std::rethrow_exception(error); } }
+}
+
+struct HostOracleMetrics {
+  double max_abs_error = 0.0;
+  double max_scaled_rel_error = 0.0;
+  double max_inv_abs_error = 0.0;
+  double max_inv_scaled_rel_error = 0.0;
+  uint64_t nonfinite_count = 0;
+};
+
 int main(int argc, char** argv) {
   const std::string shapes_path =
       b950::GetArg(argc, argv, "--shapes", "shapes/correctness.csv");
@@ -162,6 +197,16 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "--host-chunk-elements must be positive\n");
     return 1;
   }
+  char* workers_end = nullptr;
+  const char* workers_arg = b950::GetArg(argc, argv, "--host-workers", "1");
+  const unsigned long parsed_workers = std::strtoul(workers_arg, &workers_end, 10);
+  if (workers_end == workers_arg || *workers_end != '\0' || parsed_workers < 1
+      || parsed_workers > 64) {
+    std::fprintf(stderr, "--host-workers must be an integer from 1 to 64\n");
+    return 1;
+  }
+  const int host_workers = static_cast<int>(parsed_workers);
+  std::fprintf(stderr, "host oracle workers: %d (complete rows; serial ACL calls)\n", host_workers);
   const double abs_tolerance =
       std::strtod(b950::GetArg(argc, argv, "--abs-tol", "5e-3"), nullptr);
   const double scaled_rel_tolerance =
@@ -261,15 +306,18 @@ int main(int argc, char** argv) {
       host_input.resize(count);
       quantized_input.resize(count);
       const size_t first_element = static_cast<size_t>(first_row) * test_case.cols;
-      for (size_t local = 0; local < count; ++local) {
-        const size_t linear = first_element + local;
-        const int64_t row = static_cast<int64_t>(linear / test_case.cols);
-        const int64_t col = static_cast<int64_t>(linear % test_case.cols);
-        const float value =
-            b950::HostInputValue(pattern, linear, row, col, test_case.cols, case_seed);
-        host_input[local] = b950::FloatToHalfBits(value);
-        quantized_input[local] = b950::HalfBitsToFloat(host_input[local]);
-      }
+      RunHostRows(rows_in_chunk, host_workers, [&](int, int64_t begin, int64_t end) {
+        for (size_t local = static_cast<size_t>(begin) * test_case.cols;
+             local < static_cast<size_t>(end) * test_case.cols; ++local) {
+          const size_t linear = first_element + local;
+          const int64_t row = static_cast<int64_t>(linear / test_case.cols);
+          const int64_t col = static_cast<int64_t>(linear % test_case.cols);
+          const float value =
+              b950::HostInputValue(pattern, linear, row, col, test_case.cols, case_seed);
+          host_input[local] = b950::FloatToHalfBits(value);
+          quantized_input[local] = b950::HalfBitsToFloat(host_input[local]);
+        }
+      });
     };
 
     std::vector<uint16_t> host_weight(weight_elements);
@@ -418,48 +466,63 @@ int main(int argc, char** argv) {
         std::memcpy(&bits, &value, sizeof(bits));
         if (bits == inv_canary) { ++canary_mismatches; }
       }
-      for (int64_t row = 0; row < rows_in_chunk; ++row) {
-        const size_t row_offset = static_cast<size_t>(row) * test_case.cols;
-        float square_sum = 0.0f;
-        for (int64_t col = 0; col < test_case.cols; ++col) {
-          const float value = quantized_input[row_offset + col];
-          square_sum += value * value;
-        }
-        const float reference_inv_rms =
-            1.0f / std::sqrt(square_sum / static_cast<float>(test_case.cols) + eps);
-        const float actual_inv_rms = host_inv_rms[static_cast<size_t>(row)];
-        if (!std::isfinite(actual_inv_rms)) {
-          ++nonfinite_count;
-        } else {
-          const double absolute_error =
-              std::fabs(static_cast<double>(actual_inv_rms)
-                        - static_cast<double>(reference_inv_rms));
-          const double scaled_relative_error =
-              absolute_error / std::max(std::fabs(static_cast<double>(reference_inv_rms)), 1.0e-3);
-          max_inv_abs_error = std::max(max_inv_abs_error, absolute_error);
-          max_inv_scaled_rel_error =
-              std::max(max_inv_scaled_rel_error, scaled_relative_error);
-        }
-
-        for (int64_t col = 0; col < test_case.cols; ++col) {
-          float reference = quantized_input[row_offset + col] * reference_inv_rms;
-          if (test_case.affine) {
-            const float normalized_half =
-                b950::HalfBitsToFloat(b950::FloatToHalfBits(reference));
-            reference = normalized_half * quantized_weight[static_cast<size_t>(col)];
+      std::vector<HostOracleMetrics> partial(host_workers);
+      RunHostRows(rows_in_chunk, host_workers, [&](int worker, int64_t begin, int64_t end) {
+        auto& max_abs_error = partial[worker].max_abs_error;
+        auto& max_scaled_rel_error = partial[worker].max_scaled_rel_error;
+        auto& max_inv_abs_error = partial[worker].max_inv_abs_error;
+        auto& max_inv_scaled_rel_error = partial[worker].max_inv_scaled_rel_error;
+        auto& nonfinite_count = partial[worker].nonfinite_count;
+        for (int64_t row = begin; row < end; ++row) {
+          const size_t row_offset = static_cast<size_t>(row) * test_case.cols;
+          float square_sum = 0.0f;
+          for (int64_t col = 0; col < test_case.cols; ++col) {
+            const float value = quantized_input[row_offset + col];
+            square_sum += value * value;
           }
-          reference = b950::HalfBitsToFloat(b950::FloatToHalfBits(reference));
-          const double actual = b950::HalfBitsToFloat(host_output[row_offset + col]);
-          if (!std::isfinite(actual)) {
+          const float reference_inv_rms =
+              1.0f / std::sqrt(square_sum / static_cast<float>(test_case.cols) + eps);
+          const float actual_inv_rms = host_inv_rms[static_cast<size_t>(row)];
+          if (!std::isfinite(actual_inv_rms)) {
             ++nonfinite_count;
-            continue;
+          } else {
+            const double absolute_error =
+                std::fabs(static_cast<double>(actual_inv_rms)
+                          - static_cast<double>(reference_inv_rms));
+            const double scaled_relative_error =
+                absolute_error / std::max(std::fabs(static_cast<double>(reference_inv_rms)), 1.0e-3);
+            max_inv_abs_error = std::max(max_inv_abs_error, absolute_error);
+            max_inv_scaled_rel_error =
+                std::max(max_inv_scaled_rel_error, scaled_relative_error);
           }
-          const double absolute_error = std::fabs(actual - static_cast<double>(reference));
-          const double scaled_relative_error =
-              absolute_error / std::max(std::fabs(static_cast<double>(reference)), 1.0e-3);
-          max_abs_error = std::max(max_abs_error, absolute_error);
-          max_scaled_rel_error = std::max(max_scaled_rel_error, scaled_relative_error);
+
+          for (int64_t col = 0; col < test_case.cols; ++col) {
+            float reference = quantized_input[row_offset + col] * reference_inv_rms;
+            if (test_case.affine) {
+              const float normalized_half =
+                  b950::HalfBitsToFloat(b950::FloatToHalfBits(reference));
+              reference = normalized_half * quantized_weight[static_cast<size_t>(col)];
+            }
+            reference = b950::HalfBitsToFloat(b950::FloatToHalfBits(reference));
+            const double actual = b950::HalfBitsToFloat(host_output[row_offset + col]);
+            if (!std::isfinite(actual)) {
+              ++nonfinite_count;
+              continue;
+            }
+            const double absolute_error = std::fabs(actual - static_cast<double>(reference));
+            const double scaled_relative_error =
+                absolute_error / std::max(std::fabs(static_cast<double>(reference)), 1.0e-3);
+            max_abs_error = std::max(max_abs_error, absolute_error);
+            max_scaled_rel_error = std::max(max_scaled_rel_error, scaled_relative_error);
+          }
         }
+      });
+      for (const auto& metrics : partial) {
+        max_abs_error = std::max(max_abs_error, metrics.max_abs_error);
+        max_scaled_rel_error = std::max(max_scaled_rel_error, metrics.max_scaled_rel_error);
+        max_inv_abs_error = std::max(max_inv_abs_error, metrics.max_inv_abs_error);
+        max_inv_scaled_rel_error = std::max(max_inv_scaled_rel_error, metrics.max_inv_scaled_rel_error);
+        nonfinite_count += metrics.nonfinite_count;
       }
       checked_elements += host_input.size();
       checked_rows += static_cast<uint64_t>(rows_in_chunk);
