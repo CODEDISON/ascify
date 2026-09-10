@@ -387,7 +387,7 @@ translate "$fixtures/sample_helper_find_device_external_deferred.cu" \
   "$test_tmp/find-external-deferred"
 require_fixed '#include <helper_cuda.h>' \
   "$test_tmp/find-external-deferred.cpp"
-require_fixed 'return findCudaDevice(argc, argv);' \
+require_fixed 'return deferredExternalFindDevice(argc, argv);' \
   "$test_tmp/find-external-deferred.cpp"
 forbid_fixed 'sampleFindCudaDevice' \
   "$test_tmp/find-external-deferred.cpp"
