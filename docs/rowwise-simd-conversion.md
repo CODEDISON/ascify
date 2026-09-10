@@ -268,13 +268,23 @@ applies these additional checks:
 |---|---|
 | Softmax recompute | Non-null stream/input/output; positive non-overflowing extent; `4096 <= columns <= 256000`; input/output byte spans are disjoint or exactly in-place |
 | RMSNorm plain row-batch | No affine weight; positive extent; finite positive epsilon; `columns <= 3072` and divisible by 16; required pointer alignment and auxiliary non-aliasing; input/output disjoint or exactly in-place |
-| RMSNorm cached | Plain or affine; positive extent; finite positive epsilon; `columns <= 8192` and divisible by 8; required pointer alignment and auxiliary non-aliasing; input/output strictly non-overlapping |
+| RMSNorm cached | Plain or affine; positive extent; finite positive epsilon; `columns <= 16384` and divisible by 8; required pointer alignment and auxiliary non-aliasing; input/output strictly non-overlapping |
 | LayerNorm cached | Positive extent; finite positive epsilon; `columns <= 8192` and divisible by 8; 16-byte input/output alignment; aligned, distinct mean/inverse-variance outputs; input/output disjoint or exactly in-place |
 
 The RMSNorm selector checks the plain row-batch route before the cached route.
 Any call outside these domains returns `handled == false` and uses the retained
 whole-SIMT launch. Selector thresholds belong to recipe/ABI version 1 and must
 not be silently changed without new correctness and performance evidence.
+
+The cached RMSNorm extension to 16384 columns retains pipeline depth 1.
+Calls through 8192 columns keep their original 16384-byte row buffers and
+65600-byte launch capacity; wider calls use 32768-byte row buffers and a
+131136-byte launch capacity. The shared capacity assertions cover both the
+queue allocation and launch budget. Row-batch selection, FP32 reduction,
+plain FP16 rounding, two-step affine FP16 rounding, and the fixed grid policy
+are unchanged. This extension requires fresh target compilation, full
+correctness and performance evidence before promotion; host selector and
+capacity checks alone do not establish device correctness or speed.
 
 The public `_launch_v1` entry in each DSO repeats the same route predicate
 before it launches a kernel. This second check protects the ABI boundary even

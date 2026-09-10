@@ -8,6 +8,7 @@
 #include "acl/acl.h"
 #include "kernel_operator.h"
 #include "simt_api/asc_simt.h"
+#include "rmsnorm_cached_capacity_v1.hpp"
 #include <ascify/target/dav_c310/rowwise_simd_selectors_v1.hpp>
 
 #include <cmath>
@@ -21,23 +22,12 @@ static_assert(
         == ascify::target::dav_c310::rowwise_simd_v1::kHalfStorageBytes,
     "runtime and selector must agree on fp16 storage width");
 
-constexpr uint32_t kMaxColumns = 8192;
-constexpr uint32_t kPipelineDepth = 1;
+namespace capacity = ascify950_rmsnorm_cached_capacity_v1;
+using capacity::kMaxColumns;
+using capacity::kPipelineDepth;
+using capacity::kScalarSlotBytes;
 constexpr uint32_t kAdapterSimtThreads = 1024;
-constexpr uint32_t kScalarSlotBytes = 32;
-constexpr uint32_t kScalarSlotCount = 2;
-constexpr uint32_t kRowBytes = kMaxColumns * sizeof(half);
-constexpr uint32_t kConservativeUbBytes = 196608;
-constexpr uint32_t kMaximumAffineUbBytes =
-    2 * kPipelineDepth * kRowBytes + 2 * kRowBytes
-    + kScalarSlotCount * kScalarSlotBytes;
 constexpr int kDefaultAivCount = 56;
-
-static_assert(kRowBytes == 16384, "unexpected maximum RMSNorm row size");
-static_assert(kMaximumAffineUbBytes == 65600,
-              "unexpected affine RMSNorm UB budget");
-static_assert(kMaximumAffineUbBytes <= kConservativeUbBytes,
-              "cached RMSNorm exceeds conservative UB budget");
 
 __simd_vf__ inline void RmsSquareSumVF(
     __ubuf__ half* input, __ubuf__ float* sumSlot,
@@ -264,16 +254,20 @@ class RmsNormRegCachedKernel {
   __aicore__ inline void Init(
       GM_ADDR input, GM_ADDR output, GM_ADDR weight, GM_ADDR inverseRms,
       int64_t rows, uint32_t columns, float inverseColumns, float epsilon) {
+    // Preserve the existing allocation footprint for every <=8192-column
+    // call. Only the newly supported wide rows use the larger capacity.
+    const uint32_t rowBytes = columns <= capacity::kLegacyMaxColumns
+        ? capacity::Legacy::kRowBytes : capacity::Wide::kRowBytes;
     inputGm_.SetGlobalBuffer((__gm__ half*)input);
     outputGm_.SetGlobalBuffer((__gm__ half*)output);
     inverseRmsGm_.SetGlobalBuffer((__gm__ float*)inverseRms);
     if constexpr (kAffine) {
       weightGm_.SetGlobalBuffer((__gm__ half*)weight);
-      pipe_.InitBuffer(weightQueue_, kPipelineDepth, kRowBytes);
+      pipe_.InitBuffer(weightQueue_, kPipelineDepth, rowBytes);
     }
-    pipe_.InitBuffer(inputQueue_, kPipelineDepth, kRowBytes);
-    pipe_.InitBuffer(outputQueue_, kPipelineDepth, kRowBytes);
-    pipe_.InitBuffer(normalizedBuffer_, kRowBytes);
+    pipe_.InitBuffer(inputQueue_, kPipelineDepth, rowBytes);
+    pipe_.InitBuffer(outputQueue_, kPipelineDepth, rowBytes);
+    pipe_.InitBuffer(normalizedBuffer_, rowBytes);
     pipe_.InitBuffer(inverseQueue_, kPipelineDepth, kScalarSlotBytes);
     pipe_.InitBuffer(sumBuffer_, kScalarSlotBytes);
     rows_ = rows;
@@ -440,15 +434,18 @@ extern "C" aclError ascify950_rmsnorm_reg_cached_launch_v1(
   }
   const int gridBlocks = static_cast<int>(
       rows < kDefaultAivCount ? rows : kDefaultAivCount);
+  const uint32_t ubBytes = columns <= capacity::kLegacyMaxColumns
+      ? capacity::Legacy::kMaximumAffineUbBytes
+      : capacity::Wide::kMaximumAffineUbBytes;
   if (weight != nullptr) {
     rmsnorm_reg_cached_affine_kernel
-        <<<gridBlocks, kMaximumAffineUbBytes, stream>>>(
+        <<<gridBlocks, ubBytes, stream>>>(
             (GM_ADDR)input, (GM_ADDR)output, (GM_ADDR)weight,
             (GM_ADDR)inverseRms, rows, narrowColumns, inverseColumns,
             narrowEpsilon);
   } else {
     rmsnorm_reg_cached_plain_kernel
-        <<<gridBlocks, kMaximumAffineUbBytes, stream>>>(
+        <<<gridBlocks, ubBytes, stream>>>(
             (GM_ADDR)input, (GM_ADDR)output, (GM_ADDR)inverseRms, rows,
             narrowColumns, inverseColumns, narrowEpsilon);
   }

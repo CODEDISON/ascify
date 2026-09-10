@@ -14,7 +14,7 @@ constexpr int kSelectorAbiVersion = 1;
 constexpr uintptr_t kHalfStorageBytes = sizeof(uint16_t);
 constexpr int64_t kSoftmaxMinimumColumns = 4096;
 constexpr int64_t kSoftmaxMaximumColumns = 256000;
-constexpr int64_t kRmsNormCachedMaximumColumns = 8192;
+constexpr int64_t kRmsNormCachedMaximumColumns = 16384;
 constexpr int64_t kRmsNormPlainRowBatchMaximumColumns = 3072;
 constexpr int64_t kLayerNormCachedMaximumColumns = 8192;
 

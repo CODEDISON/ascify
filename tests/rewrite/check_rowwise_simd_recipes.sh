@@ -16,6 +16,7 @@ common_flags=(
 )
 
 "${compiler}" "${common_flags[@]}" \
+  -I"${repo_root}/runtime/dav_3510/rowwise/src" \
   "${repo_root}/tests/rewrite/rowwise_simd_selector_test.cpp" \
   -o "${test_build_dir}/rowwise_simd_selector_test"
 "${test_build_dir}/rowwise_simd_selector_test"
@@ -121,7 +122,7 @@ for mixed_source in \
 done
 grep -F 'static_cast<int>(blocks), kUbBytes, stream' \
   "${runtime_root}/src/softmax_reg_recompute.cce" >/dev/null
-grep -F '<<<gridBlocks, kMaximumAffineUbBytes, stream>>>' \
+grep -F '<<<gridBlocks, ubBytes, stream>>>' \
   "${runtime_root}/src/rmsnorm_reg_cached.cce" >/dev/null
 grep -F '<<<gridBlocks, kMaximumUbBytes, stream>>>' \
   "${runtime_root}/src/rmsnorm_reg_plain_rowbatch.cce" >/dev/null

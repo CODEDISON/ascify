@@ -3,6 +3,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <type_traits>
 
@@ -253,6 +254,47 @@ int main() {
       stream, layernorm_load, layernorm_store, 8, 1537, 1.0e-5,
       mean, inverse_variance, &compute);
   assert(!result.handled && layernorm_calls == 1);
+
+  // The widened column domain must reach the existing cached ABI through
+  // both typed adapters, including a partial vector tail. Other contracts
+  // still reject before any ABI call.
+  const int row_batch_calls_before_wide = row_batch_calls;
+  for (int64_t columns : {8192, 8200, 12288, 13312, 16376, 16384}) {
+    const Load wide_load{input, columns};
+    const PlainStore wide_plain{output, columns};
+    const AffineStore wide_affine{output, weight, columns};
+    int calls_before = cached_calls;
+    result = simd::RowwiseHybridFacadeV1::TryRmsNormHybrid(
+        stream, wide_load, wide_plain, 8, columns, 1.0e-5,
+        inverse_rms, &compute);
+    assert(result.handled && result.status == cached_status);
+    ++calls_before;
+    assert(cached_calls == calls_before);
+    result = simd::RowwiseHybridFacadeV1::TryRmsNormHybrid(
+        stream, wide_load, wide_affine, 8, columns, 1.0e-5,
+        inverse_rms, &compute);
+    assert(result.handled && result.status == cached_status);
+    ++calls_before;
+    assert(cached_calls == calls_before);
+
+    const PlainStore wide_bad_stride{output, columns - 1};
+    result = simd::RowwiseHybridFacadeV1::TryRmsNormHybrid(
+        stream, wide_load, wide_bad_stride, 8, columns, 1.0e-5,
+        inverse_rms, &compute);
+    assert(!result.handled && cached_calls == calls_before);
+    const AffineStore wide_missing_weight{output, nullptr, columns};
+    result = simd::RowwiseHybridFacadeV1::TryRmsNormHybrid(
+        stream, wide_load, wide_missing_weight, 8, columns, 1.0e-5,
+        inverse_rms, &compute);
+    assert(!result.handled && cached_calls == calls_before);
+  }
+  for (int64_t columns : {8193, 16383, 16385, 16392, 32768}) {
+    const int calls_before = cached_calls;
+    result = simd::TryRmsNormHybrid(
+        stream, input, output, weight, 8, columns, 1.0e-5, inverse_rms);
+    assert(!result.handled && cached_calls == calls_before);
+  }
+  assert(row_batch_calls == row_batch_calls_before_wide);
 
   return 0;
 }
