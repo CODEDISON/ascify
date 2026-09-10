@@ -1109,7 +1109,8 @@ require_fixed 'ASCIFY_TEST_STRINGIZE(checkCudaErrors)' \
   "$test_tmp/mixed-pp-raw.cpp"
 forbid_fixed 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS' \
   "$test_tmp/mixed-pp-raw.cpp"
-require_fixed 'residual raw PP use' "$test_tmp/mixed-pp-raw.stderr"
+require_fixed "observable #ifdef use of 'getLastCudaError'" \
+  "$test_tmp/mixed-pp-raw.stderr"
 require_fixed 'include kept' "$test_tmp/mixed-pp-raw.stderr"
 
 translate "$fixtures/sample_helper_pp_alias_invocation.cu" \
@@ -1402,13 +1403,13 @@ require_fixed '#include "sample_helper_external_pp.h"' \
   "$test_tmp/external-pp.cpp"
 forbid_fixed 'ASCIFY_NVIDIA_SAMPLE_GET_LAST_CUDA_ERROR' \
   "$test_tmp/external-pp.cpp"
-require_fixed "external #ifdef use of 'getLastCudaError'" \
+require_fixed "observable #ifdef use of 'getLastCudaError'" \
   "$test_tmp/external-pp.stderr"
-require_fixed "external defined use of 'checkCudaErrors'" \
+require_fixed "observable defined use of 'checkCudaErrors'" \
   "$test_tmp/external-pp.stderr"
-require_fixed "external #undef use of 'checkCudaErrors'" \
+require_fixed "observable #undef use of 'checkCudaErrors'" \
   "$test_tmp/external-pp.stderr"
-require_fixed "external #ifndef use of 'checkCudaErrors'" \
+require_fixed "observable #ifndef use of 'checkCudaErrors'" \
   "$test_tmp/external-pp.stderr"
 require_fixed 'include kept' "$test_tmp/external-pp.stderr"
 
@@ -1429,7 +1430,16 @@ for pp_case in ifdef defined undef stringize forward; do
     "$fixtures/nvidia_samples/Common" \
     "$test_tmp/pp-${pp_case}.cpp" "$test_tmp/pp-${pp_case}"
   require_fixed '#include <helper_cuda.h>' "$test_tmp/pp-${pp_case}.cpp"
-  require_fixed 'residual raw PP use' "$test_tmp/pp-${pp_case}.stderr"
+  # PP callbacks reject directive observations before the raw-token audit;
+  # stringization/forwarding are observed only by that later audit.
+  case "$pp_case" in
+    ifdef) pp_diagnostic="observable #ifdef use of 'checkCudaErrors'" ;;
+    defined) pp_diagnostic="observable defined use of 'getLastCudaError'" ;;
+    undef) pp_diagnostic="observable #undef use of 'checkCudaErrors'" ;;
+    stringize) pp_diagnostic="residual raw PP use of 'checkCudaErrors'" ;;
+    forward) pp_diagnostic="residual raw PP use of 'getLastCudaError'" ;;
+  esac
+  require_fixed "$pp_diagnostic" "$test_tmp/pp-${pp_case}.stderr"
   require_fixed 'include kept' "$test_tmp/pp-${pp_case}.stderr"
 done
 
