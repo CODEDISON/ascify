@@ -200,7 +200,8 @@ int main(int argc, char** argv) {
   char* workers_end = nullptr;
   const char* workers_arg = b950::GetArg(argc, argv, "--host-workers", "1");
   const unsigned long parsed_workers = std::strtoul(workers_arg, &workers_end, 10);
-  if (workers_end == workers_arg || *workers_end != '\0' || parsed_workers < 1
+  if (*workers_arg < '0' || *workers_arg > '9' || workers_end == workers_arg
+      || *workers_end != '\0' || parsed_workers < 1
       || parsed_workers > 64) {
     std::fprintf(stderr, "--host-workers must be an integer from 1 to 64\n");
     return 1;

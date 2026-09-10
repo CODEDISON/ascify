@@ -154,8 +154,25 @@ int main() {
                     self.assertEqual(actual, expected)
                     self.assertIn(f"host oracle workers: {workers}", result.stderr)
 
+    def test_actual_64_workers_preserve_complete_rows_and_tail_faults(self):
+        original = self.shapes
+        self.shapes = self.root / "parallel_rows.csv"
+        self.shapes.write_text("21,129,5,0\n24,129,5,1\n250,137,8,0\n918,137,8,1\n")
+        try:
+            for corruption in (None, "output", "nan"):
+                reference, expected = self.run_checker(100000, corruption)
+                for workers in (8, 16, 64):
+                    with self.subTest(workers=workers, corruption=corruption):
+                        result, actual = self.run_checker(100000, corruption, ("--host-workers", str(workers)))
+                        self.assertEqual(result.returncode, reference.returncode, result.stderr)
+                        self.assertEqual(actual, expected)
+                        self.assertIn("idx=21 elements=645 rows=129", result.stderr)
+                        self.assertIn("idx=918 elements=1096 rows=137", result.stderr)
+        finally:
+            self.shapes = original
+
     def test_invalid_workers_rejected_before_device_initialization(self):
-        for workers in ("0", "65", "-1", "oops", "2x", "99999999999999999999999"):
+        for workers in ("0", "65", "-1", "-18446744073709551615", "oops", "2x", "99999999999999999999999"):
             with self.subTest(workers=workers):
                 result, _ = self.run_checker(17, extra=("--host-workers", workers))
                 self.assertEqual(result.returncode, 1)
