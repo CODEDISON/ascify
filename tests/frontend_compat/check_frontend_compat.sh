@@ -64,16 +64,16 @@ require_fixed \
 require_fixed 'schema=ascify.frontend-compat-profile.v1' "$manifest"
 require_fixed 'profile=ascify-admitted-v1' "$manifest"
 require_fixed \
-  'file=cooperative_groups.h;bytes=2291;sha256=1d490bd085dbd3e339742854773ef57e73049f7d1ee2d83d02c573a3709366c4' \
+  'file=cooperative_groups.h;bytes=2481;sha256=3e3061687252e956483540e6d9f78364200dc6de07dd7dc5e103a5ae06311a04' \
   "$manifest"
 require_fixed \
   'file=cooperative_groups/reduce.h;bytes=101;sha256=75adbe65aeb5c2acfd63c9896376e67d270198e566080b9260a219ab99e2de8a' \
   "$manifest"
 require_fixed \
-  'file=host_math.h;bytes=900;sha256=fe115c0ee5be69d87f09e53b5a0f9f7649b468c1ceaf03fdb9df993052a5076c' \
+  'file=host_math.h;bytes=1458;sha256=a151400e55d4f484f8321b5d98384f3585fed01678cda680354cd331a664558d' \
   "$manifest"
 if [ "$(sha256_file "$header")" != \
-    '1d490bd085dbd3e339742854773ef57e73049f7d1ee2d83d02c573a3709366c4' ]; then
+    '3e3061687252e956483540e6d9f78364200dc6de07dd7dc5e103a5ae06311a04' ]; then
   echo "frontend admission header SHA-256 mismatch" >&2
   exit 1
 fi
@@ -83,7 +83,7 @@ if [ "$(sha256_file "$poison")" != \
   exit 1
 fi
 if [ "$(sha256_file "$host_math")" != \
-    'fe115c0ee5be69d87f09e53b5a0f9f7649b468c1ceaf03fdb9df993052a5076c' ]; then
+    'a151400e55d4f484f8321b5d98384f3585fed01678cda680354cd331a664558d' ]; then
   echo "frontend host math header SHA-256 mismatch" >&2
   exit 1
 fi
@@ -150,7 +150,7 @@ trap cleanup 0 1 2 15
 
 "$cxx" -std=c++17 -fsyntax-only -I"$profile_root" \
   "$test_root/tile32_positive.cpp"
-for reject_case in 1 2 3 4 5 6; do
+for reject_case in 1 2 3 4 5 6 7; do
   if "$cxx" -std=c++17 -fsyntax-only -I"$profile_root" \
       -DASCIFY_TILE_REJECT_CASE="$reject_case" \
       "$test_root/tile32_reject.cpp" \

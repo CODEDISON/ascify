@@ -21,6 +21,8 @@ constexpr char kAdmissionHeader[] = R"ASCIFY(#ifndef ASCIFY_FRONTEND_COMPAT_ADMI
 
 #include <type_traits>
 
+struct uint4;
+
 #if defined(__CUDACC__) || defined(__CUDA__)
 #define ASCIFY_FRONTEND_COMPAT_DEVICE_ __device__
 #else
@@ -68,6 +70,11 @@ class thread_block_tile {
                               std::is_same<T, unsigned int>::value ||
                               std::is_same<T, float>::value, T>::type
   shfl_xor(T value, unsigned int lane_mask) const;
+
+  template <typename T>
+  ASCIFY_FRONTEND_COMPAT_DEVICE_
+  typename std::enable_if<std::is_same<T, uint4>::value, T>::type
+  shfl_xor(T value, unsigned int lane_mask) const;
 };
 
 template <unsigned int Size>
@@ -90,11 +97,13 @@ constexpr char kHostMathHeader[] = R"ASCIFY(#ifndef ASCIFY_FRONTEND_COMPAT_ADMIT
 
 // CUDA's float max(a, b) returns fmaxf(a, b), including its NaN behavior.
 // Clang's CUDA wrapper exposes only the device overload. This opt-in parser
-// template admits exactly float/float host calls; no argument is narrowed.
+// templates admit float/float max and int/int min; no argument is narrowed.
 // Ascify rewrites references proven to use this declaration to the builtin.
 namespace ascify_frontend_compat_detail {
 template <bool> struct host_float_max_enabled {};
 template <> struct host_float_max_enabled<true> { using type = int; };
+template <bool> struct host_int_min_enabled {};
+template <> struct host_int_min_enabled<true> { using type = int; };
 }
 
 template <class A, class B,
@@ -107,23 +116,35 @@ inline float max(A a, B b) {
   return __builtin_fmaxf(a, b);
 }
 
+// Use value parameters: CUDA integer min returns a value and each actual
+// argument is evaluated once. The target spelling is proven separately.
+template <class A, class B,
+          typename ascify_frontend_compat_detail::host_int_min_enabled<
+              __is_same(A, int) && __is_same(B, int)>::type = 0>
+#if defined(__CUDACC__) || defined(__CUDA__)
+__attribute__((host))
+#endif
+inline int min(A a, B b) {
+  return a < b ? a : b;
+}
+
 #endif
 )ASCIFY";
 
 constexpr char kProfileManifest[] =
     "schema=ascify.frontend-compat-profile.v1\n"
     "profile=ascify-admitted-v1\n"
-    "file=cooperative_groups.h;bytes=2291;sha256=1d490bd085dbd3e339742854773ef57e73049f7d1ee2d83d02c573a3709366c4\n"
+    "file=cooperative_groups.h;bytes=2481;sha256=3e3061687252e956483540e6d9f78364200dc6de07dd7dc5e103a5ae06311a04\n"
     "file=cooperative_groups/reduce.h;bytes=101;sha256=75adbe65aeb5c2acfd63c9896376e67d270198e566080b9260a219ab99e2de8a\n"
-    "file=host_math.h;bytes=900;sha256=fe115c0ee5be69d87f09e53b5a0f9f7649b468c1ceaf03fdb9df993052a5076c\n";
+    "file=host_math.h;bytes=1458;sha256=a151400e55d4f484f8321b5d98384f3585fed01678cda680354cd331a664558d\n";
 
-static_assert(sizeof(kAdmissionHeader) - 1 == 2291,
+static_assert(sizeof(kAdmissionHeader) - 1 == 2481,
               "admission header identity drifted");
 static_assert(sizeof(kReductionPoison) - 1 == 101,
               "reduction poison identity drifted");
-static_assert(sizeof(kHostMathHeader) - 1 == 900,
+static_assert(sizeof(kHostMathHeader) - 1 == 1458,
               "host math header identity drifted");
-static_assert(sizeof(kProfileManifest) - 1 == 391,
+static_assert(sizeof(kProfileManifest) - 1 == 392,
               "frontend profile manifest identity drifted");
 
 struct RequiredProfileFile {
@@ -133,10 +154,10 @@ struct RequiredProfileFile {
 };
 
 constexpr RequiredProfileFile kRequiredProfileFiles[] = {
-    {"profile.manifest", 391, kProfileManifest},
-    {"cooperative_groups.h", 2291, kAdmissionHeader},
+    {"profile.manifest", 392, kProfileManifest},
+    {"cooperative_groups.h", 2481, kAdmissionHeader},
     {"cooperative_groups/reduce.h", 101, kReductionPoison},
-    {"host_math.h", 900, kHostMathHeader},
+    {"host_math.h", 1458, kHostMathHeader},
 };
 
 std::string pathString(const fs::path& path) {

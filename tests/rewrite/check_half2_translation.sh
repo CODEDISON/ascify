@@ -16,12 +16,17 @@ translate() {
 translate half2_compat_input
 "${PYTHON:-python3}" -B "$repo_root/tests/rewrite/check_half2_compat.py" \
   --translated "$work/half2_compat_input.cce"
-for rejected in half2_compat_reject half2_template_reject; do
+for rejected in half2_compat_reject half2_template_reject half2_macro_reject \
+                half2_builtin_base_reject; do
   if translate "$rejected"; then
     echo "unproven half2 expression unexpectedly converted: $rejected" >&2
     exit 1
   fi
   test ! -e "$work/$rejected.cce"
-  grep -F 'separate half rounding could not be preserved' "$work/$rejected.stderr" >/dev/null
+  case "$rejected" in
+    half2_template_reject) expected='does not admit template functions' ;;
+    *) expected='separate half rounding could not be preserved' ;;
+  esac
+  grep -F "$expected" "$work/$rejected.stderr" >/dev/null
 done
 echo "half2 source conversion and precision boundaries passed"

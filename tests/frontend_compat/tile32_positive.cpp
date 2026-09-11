@@ -1,5 +1,11 @@
 #include <cooperative_groups.h>
 
+struct alignas(16) uint4 { unsigned int x, y, z, w; };
+
+uint4 TilePackedRegisters(cooperative_groups::thread_block block, uint4 input) {
+  return cooperative_groups::tiled_partition<32>(block).shfl_xor(input, 3);
+}
+
 unsigned int TileRegisterOperations(cooperative_groups::thread_block block,
                                     unsigned int input) {
   const auto tile = cooperative_groups::tiled_partition<32>(block);

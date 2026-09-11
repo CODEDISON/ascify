@@ -107,6 +107,12 @@ if command -v "$cxx" >/dev/null 2>&1; then
     -I"$repo_root/include" \
     "$positive_test"
 
+  "$cxx" -std=c++17 -O2 \
+    -I"$legacy_stubs" -I"$repo_root/include" \
+    "$repo_root/tests/rewrite/cooperative_groups_uint4_test.cpp" \
+    -o "$test_tmp/uint4-shuffle"
+  "$test_tmp/uint4-shuffle"
+
   reject_case=1
   while [ "$reject_case" -le 2 ]; do
     reject_log="$test_tmp/reject-sync-$reject_case.log"

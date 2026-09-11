@@ -465,6 +465,50 @@ if command -v "$cxx" >/dev/null 2>&1; then
     "$test_tmp/find-cuda-then-functions.cpp"
 fi
 
+# Main-file MAX fallback remains inactive after helper removal only when a
+# retained exact image provider has already been observed. Do not authorize
+# altered bodies, missing providers, or later observable macro expansion.
+translate "$fixtures/sample_helper_find_device_max_fallback.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/find-max-fallback.cpp" "$test_tmp/find-max-fallback"
+require_fixed '#ifndef MAX' "$test_tmp/find-max-fallback.cpp"
+require_fixed '#define MAX(left, right) (left > right ? left : right)' \
+  "$test_tmp/find-max-fallback.cpp"
+require_fixed '#include <helper_functions.h>' "$test_tmp/find-max-fallback.cpp"
+require_fixed '::ascify::sampleFindCudaDevice(argc, argv)' \
+  "$test_tmp/find-max-fallback.cpp"
+forbid_fixed 'helper_cuda.h' "$test_tmp/find-max-fallback.cpp"
+require_fixed 'include removed' "$test_tmp/find-max-fallback.stderr"
+if command -v "$cxx" >/dev/null 2>&1; then
+  "$cxx" -std=c++17 -fsyntax-only -D__aicore__= \
+    -I"$repo_root/tests/rewrite/stubs" -I"$repo_root/include" \
+    -I"$fixtures/nvidia_samples/Common" "$test_tmp/find-max-fallback.cpp"
+fi
+for fallback in no_provider changed observation; do
+  translate "$fixtures/sample_helper_find_device_max_fallback_${fallback}.cu" \
+    "$fixtures/nvidia_samples/Common" \
+    "$test_tmp/find-max-fallback-${fallback}.cpp" \
+    "$test_tmp/find-max-fallback-${fallback}"
+  require_fixed '#include <helper_cuda.h>' \
+    "$test_tmp/find-max-fallback-${fallback}.cpp"
+  forbid_fixed 'sampleFindCudaDevice' \
+    "$test_tmp/find-max-fallback-${fallback}.cpp"
+  require_fixed 'include kept' "$test_tmp/find-max-fallback-${fallback}.stderr"
+done
+
+# Only the known ACL-error return domain is admitted. This does not assert
+# device symbol availability: SDK registration errors must still propagate.
+translate "$fixtures/sample_helper_new_runtime_status.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/new-runtime-status.cpp" "$test_tmp/new-runtime-status"
+require_fixed 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaGetDeviceProperties' \
+  "$test_tmp/new-runtime-status.cpp"
+require_fixed 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaMemcpyToSymbol' \
+  "$test_tmp/new-runtime-status.cpp"
+forbid_fixed 'helper_cuda.h' "$test_tmp/new-runtime-status.cpp"
+require_fixed 'check_rewrites=2' "$test_tmp/new-runtime-status.stderr"
+require_fixed 'include removed' "$test_tmp/new-runtime-status.stderr"
+
 # GCC standard headers use fixed visibility pragmas; CUDA's builtin headers
 # also use a semicolon after literal push/pop_macro. Admit these forms without
 # allowing ordinary headers to acquire system provenance after first entry.

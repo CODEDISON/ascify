@@ -10,3 +10,9 @@ __global__ void tile32_native_surface_probe(unsigned int* out) {
   value = tile.shfl_xor(value, 2);
   out[threadIdx.x] = value + tile.meta_group_rank() + tile.size();
 }
+
+__global__ void tile32_uint4_surface_probe(uint4* out, const uint4* in) {
+  const auto block = ascify_cg::this_thread_block();
+  const auto tile = ascify_cg::tiled_partition<32>(block);
+  out[threadIdx.x] = tile.shfl_xor(in[threadIdx.x], 3);
+}

@@ -14,5 +14,6 @@ int main() {
   (void)decltype(tile)::meta_group_rank();
   (void)tile.shfl_up(1U, 1);
   (void)tile.shfl_xor(2U, 1);
+  (void)tile.shfl_xor(uint4{0U, 0xffffffffU, 0x7f800000U, 0x80000000U}, 3);
   return 0;
 }

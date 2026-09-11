@@ -114,6 +114,7 @@ private:
       frozenNvidiaSampleDirectFunctionsRootIdentities;
   std::set<unsigned> frozenNvidiaSampleDirectFunctionsRootFileIds;
   bool frozenOfficialNvidiaSampleHelperFunctionsSeen = false;
+  bool frozenNvidiaSampleInternalImageMaxExpansionSeen = false;
   unsigned preprocessorConditionalDepth = 0;
   bool nvidiaSampleHelperUnsupportedMacroUse = false;
   bool nvidiaSampleHelperUnsupportedDeclarationUse = false;
@@ -200,6 +201,7 @@ private:
       llvm::StringRef useKind);
   bool isDirectFrozenFunctionsImageProviderInstance(
       clang::SourceLocation imageLocation);
+  bool admitFrozenHelperMaxFallback(const clang::Token &macroNameToken);
   void finalizeNvidiaSampleHelperClosure();
   // Calculate str's SourceLocation in SourceRange sr
   clang::SourceLocation GetSubstrLocation(const std::string &str, const clang::SourceRange &sr);
@@ -219,7 +221,7 @@ public:
   bool rewriteCudaDefaultDim3(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaHalf2DirectInit(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaHalf2Operator(const mat::MatchFinder::MatchResult &Result);
-  bool rewriteFrontendHostFloatMax(const mat::MatchFinder::MatchResult &Result);
+  bool rewriteFrontendHostMath(const mat::MatchFinder::MatchResult &Result);
   bool rewriteProvenGlobalAtomicCall(
       const mat::MatchFinder::MatchResult &Result);
   bool rewriteCanonicalWarpAddReduction(

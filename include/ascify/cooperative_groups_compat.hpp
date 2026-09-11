@@ -86,6 +86,21 @@ class thread_block_tile {
   shfl_xor(T value, unsigned int lane_mask) const {
     return native_.shfl_xor(value, lane_mask);
   }
+  template <typename T>
+  __SIMT_DEVICE_FUNCTIONS_DECL__
+  typename std::enable_if<std::is_same<T, uint4>::value, T>::type
+  shfl_xor(T value, unsigned int lane_mask) const {
+    // CUDA shuffles trivially copyable uint4 values as four 32-bit words.
+    // Apply the identical source-lane permutation to each native component.
+    static_assert(sizeof(unsigned int) == 4 && sizeof(uint4) == 16,
+                  "uint4 shuffle requires four 32-bit components");
+    uint4 result;
+    result.x = native_.shfl_xor(value.x, lane_mask);
+    result.y = native_.shfl_xor(value.y, lane_mask);
+    result.z = native_.shfl_xor(value.z, lane_mask);
+    result.w = native_.shfl_xor(value.w, lane_mask);
+    return result;
+  }
 };
 
 template <unsigned int Size>

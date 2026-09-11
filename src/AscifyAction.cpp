@@ -67,7 +67,7 @@ const StringRef sCudaGlobalScalarDoubleParam = "cudaGlobalScalarDoubleParam";
 const StringRef sCudaDefaultDim3 = "cudaDefaultDim3";
 const StringRef sCudaHalf2DirectInit = "cudaHalf2DirectInit";
 const StringRef sCudaHalf2Operator = "cudaHalf2Operator";
-const StringRef sFrontendHostFloatMax = "frontendHostFloatMax";
+const StringRef sFrontendHostMath = "frontendHostMath";
 const StringRef sProvenGlobalAtomicCall = "provenGlobalAtomicCall";
 const StringRef sCanonicalWarpAddReduction = "canonicalWarpAddReduction";
 const StringRef sCanonicalBinaryReducer = "canonicalBinaryReducer";
@@ -766,15 +766,19 @@ bool isAdmittedCudaRuntimeStatusCall(
     return false;
   const llvm::StringRef name = callee->getName();
   // This is a return-domain allowlist, not a general CUDA API allowlist.
-  // Every admitted name is implemented by ascify_cuda_compat.hpp with an
-  // aclError result. Occupancy, Driver APIs, library statuses, and arbitrary
-  // integer-valued calls stay outside the set even when wrapped by NVIDIA's
+  // Every admitted name is implemented by ascify_cuda_compat.hpp or its
+  // symbol adapter with an aclError result. Errors (including unavailable
+  // device symbol registration) remain errors; domain proof is not a claim
+  // that every runtime operation succeeds. Occupancy, Driver APIs, library
+  // statuses, and arbitrary integer-valued calls stay outside the set even
+  // when wrapped by NVIDIA's
   // generic checkCudaErrors macro.
   static const char *const admittedNames[] = {
       "cudaMalloc", "cudaFree", "cudaMemcpy", "cudaMemcpyAsync",
       "cudaMemset", "cudaMemsetAsync", "cudaMallocHost",
       "cudaFreeHost", "cudaGetDevice", "cudaSetDevice",
       "cudaGetDeviceCount", "cudaDeviceGetAttribute",
+      "cudaGetDeviceProperties", "cudaMemcpyToSymbol",
       "cudaDeviceSynchronize", "cudaDeviceReset",
       "cudaFuncGetAttributes", "cudaFuncSetAttribute",
       "cudaStreamCreate", "cudaStreamCreateWithFlags",
@@ -3208,7 +3212,13 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
       nvidiaSampleHelperUnsupportedMacroUse = true;
       llvm::errs()
           << "Ascify NVIDIA sample-helper closure: checkCudaErrors status "
-          << "domain not proven; macro and include kept\n";
+          << "domain not proven; macro and include kept";
+      const auto &sourceManager = getCompilerInstance().getSourceManager();
+      const auto location = sourceManager.getPresumedLoc(candidate.nameLocation);
+      if (location.isValid())
+        llvm::errs() << " at " << location.getFilename() << ":"
+                     << location.getLine() << ":" << location.getColumn();
+      llvm::errs() << "\n";
     }
   }
   return visitor.hasConflict() || compatNamespaceConflict;
@@ -3745,16 +3755,24 @@ bool AscifyAction::lowerCudaGlobalScalarDoubleParam(
   return true;
 }
 
-bool AscifyAction::rewriteFrontendHostFloatMax(
+bool AscifyAction::rewriteFrontendHostMath(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *reference =
-      Result.Nodes.getNodeAs<clang::DeclRefExpr>(sFrontendHostFloatMax);
+      Result.Nodes.getNodeAs<clang::DeclRefExpr>(sFrontendHostMath);
   if (!frontendCompatibility.enabled() || reference == nullptr ||
       Result.Context == nullptr || Result.SourceManager == nullptr)
     return false;
   const auto *callee = llvm::dyn_cast<clang::FunctionDecl>(reference->getDecl());
-  if (callee == nullptr || callee->getQualifiedNameAsString() != "max")
+  if (callee == nullptr ||
+      (callee->getQualifiedNameAsString() != "max" &&
+       callee->getQualifiedNameAsString() != "min"))
     return false;
+  const bool isMaximum = callee->getName() == "max";
+  const llvm::StringRef sourceName = isMaximum ? "max" : "min";
+  const auto argumentType = isMaximum ? clang::BuiltinType::Float
+                                      : clang::BuiltinType::Int;
+  const llvm::StringRef targetName = isMaximum ? "__builtin_fmaxf"
+                                              : "__builtin_elementwise_min";
   auto &sourceManager = *Result.SourceManager;
   const std::string expectedHeader =
       frontendCompatibility.canonicalRoot + "/host_math.h";
@@ -3765,10 +3783,11 @@ bool AscifyAction::rewriteFrontendHostFloatMax(
     auto &diagnostics = getCompilerInstance().getDiagnostics();
     const unsigned id = diagnostics.getCustomDiagID(
         clang::DiagnosticsEngine::Error,
-        "Ascify frontend host max requires a direct, non-macro float/float "
+        "Ascify frontend host %0 requires a direct, non-macro %1 "
         "call with no qualifier or global :: in a non-template host function; "
         "this use is not admitted");
-    diagnostics.Report(reference->getLocation(), id);
+    diagnostics.Report(reference->getLocation(), id)
+        << sourceName << (isMaximum ? "float/float" : "int/int");
     return false;
   };
   // A using-declaration can expose the same product function as ns::max.
@@ -3784,18 +3803,40 @@ bool AscifyAction::rewriteFrontendHostFloatMax(
       return reject();
   }
   auto &context = *Result.Context;
-  const clang::FunctionDecl *function =
-      enclosingNonLambdaFunction(reference, context);
+  // A local initializer has VarDecl between its expression and the owning
+  // function. The general statement-only walker intentionally does not cross
+  // that declaration boundary. Prove this host context without widening the
+  // atomic/half2 rules that use that walker.
+  const clang::FunctionDecl *function = nullptr;
+  const clang::Stmt *ancestor = reference;
+  std::set<const clang::Stmt *> visited;
+  while (ancestor != nullptr && visited.insert(ancestor).second) {
+    const auto parents = context.getParents(*ancestor);
+    if (parents.size() != 1 || parents[0].get<clang::LambdaExpr>() != nullptr)
+      break;
+    if (const auto *owner = parents[0].get<clang::FunctionDecl>()) {
+      function = owner;
+      break;
+    }
+    if (const auto *variable = parents[0].get<clang::VarDecl>()) {
+      if (variable->isLocalVarDecl())
+        function = llvm::dyn_cast<clang::FunctionDecl>(variable->getDeclContext());
+      break;
+    }
+    ancestor = parents[0].get<clang::Stmt>();
+  }
+  const auto *method = llvm::dyn_cast_or_null<clang::CXXMethodDecl>(function);
   if (frontendHostMathBuiltinMacroDefined || function == nullptr ||
+      (method != nullptr && method->getParent()->isLambda()) ||
       function->hasAttr<clang::CUDADeviceAttr>() ||
       function->hasAttr<clang::CUDAGlobalAttr>() ||
       function->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
       reference->hasExplicitTemplateArgs() ||
       callee->getNumParams() != 2 ||
-      !callee->getReturnType()->isSpecificBuiltinType(clang::BuiltinType::Float))
+      !callee->getReturnType()->isSpecificBuiltinType(argumentType))
     return reject();
   for (const auto *parameter : callee->parameters()) {
-    if (!parameter->getType()->isSpecificBuiltinType(clang::BuiltinType::Float))
+    if (!parameter->getType()->isSpecificBuiltinType(argumentType))
       return reject();
   }
 
@@ -3825,17 +3866,19 @@ bool AscifyAction::rewriteFrontendHostFloatMax(
   const auto &languageOptions = getCompilerInstance().getLangOpts();
   if (clang::Lexer::getSourceText(
           clang::CharSourceRange::getTokenRange(location, location),
-          sourceManager, languageOptions) != "max")
+          sourceManager, languageOptions) != sourceName)
     return reject();
   const unsigned offset = sourceManager.getFileOffset(location);
   if (!rewrittenFrontendHostMathOffsets.insert(offset).second)
     return true;
   const clang::SourceLocation end = clang::Lexer::getLocForEndOfToken(
       location, 0, sourceManager, languageOptions);
-  // CUDA's own float overload uses fmaxf. The builtin preserves that floating
-  // behavior and cannot bind to a user variable/overload named fmaxf.
+  // Builtins preserve CUDA value semantics without binding to user overloads.
+  // Both substitutions leave the argument expressions evaluated exactly once.
+  const std::string replacementName = reference->hasQualifier()
+      ? targetName.str() : "::" + targetName.str();
   const ct::Replacement replacement(sourceManager, location, 3,
-                                     "__builtin_fmaxf");
+                                     replacementName);
   return insertSemanticReplacement(replacement,
       clang::FullSourceLoc(location, sourceManager), location, end);
 }
@@ -3916,6 +3959,87 @@ bool AscifyAction::rewriteCudaHalf2Operator(
 
   class LeafProof : public clang::RecursiveASTVisitor<LeafProof> {
    public:
+    explicit LeafProof(clang::ASTContext &context) : context_(context) {}
+    bool TraversePseudoObjectExpr(clang::PseudoObjectExpr *expression) {
+      // CUDA execution coordinates use compiler-owned property getter calls.
+      // Prove the complete builtin/property identity before bypassing those
+      // implicit calls; explicit user calls and other properties stay rejected.
+      if (expression == nullptr || expression->getBeginLoc().isMacroID() ||
+          expression->getEndLoc().isMacroID())
+        return false;
+      const auto *call = llvm::dyn_cast<clang::CallExpr>(
+          expression->getResultExpr()->IgnoreParenImpCasts());
+      const auto *method = call == nullptr ? nullptr :
+          llvm::dyn_cast_or_null<clang::CXXMethodDecl>(call->getDirectCallee());
+      if (method == nullptr || call->getNumArgs() != 0 ||
+          !call->getType()->isSpecificBuiltinType(clang::BuiltinType::UInt) ||
+          (method->getName() != "__fetch_builtin_x" &&
+           method->getName() != "__fetch_builtin_y" &&
+           method->getName() != "__fetch_builtin_z"))
+        return false;
+      const auto *property = llvm::dyn_cast<clang::MSPropertyRefExpr>(
+          expression->getSyntacticForm()->IgnoreParenImpCasts());
+      if (property == nullptr || property->isArrow() ||
+          method->getName() != "__fetch_builtin_" +
+                                   property->getPropertyDecl()->getName().str())
+        return false;
+      // Sema captures the property base in an OpaqueValueExpr. Only a direct
+      // builtin variable (optionally parenthesized) is admitted, so a call or
+      // macro hidden in a comma/property base cannot bypass the leaf checks.
+      const clang::Expr *base = property->getBaseExpr();
+      while (base != nullptr) {
+        if (base->getBeginLoc().isMacroID() || base->getEndLoc().isMacroID())
+          return false;
+        if (const auto *opaque = llvm::dyn_cast<clang::OpaqueValueExpr>(base))
+          base = opaque->getSourceExpr();
+        else if (const auto *paren = llvm::dyn_cast<clang::ParenExpr>(base))
+          base = paren->getSubExpr();
+        else if (const auto *cast = llvm::dyn_cast<clang::ImplicitCastExpr>(base))
+          base = cast->getSubExpr();
+        else
+          break;
+      }
+      const auto *baseReference =
+          llvm::dyn_cast_or_null<clang::DeclRefExpr>(base);
+      if (baseReference == nullptr)
+        return false;
+      class References : public clang::RecursiveASTVisitor<References> {
+       public:
+        std::set<const clang::VarDecl *> variables;
+        bool VisitDeclRefExpr(clang::DeclRefExpr *reference) {
+          if (const auto *variable =
+                  llvm::dyn_cast<clang::VarDecl>(reference->getDecl()))
+            variables.insert(variable->getCanonicalDecl());
+          return true;
+        }
+      } references;
+      references.TraverseStmt(expression);
+      if (references.variables.size() != 1)
+        return false;
+      const auto *variable = *references.variables.begin();
+      if (baseReference->getDecl()->getCanonicalDecl() != variable)
+        return false;
+      const auto name = variable->getName();
+      if (name != "threadIdx" && name != "blockIdx" &&
+          name != "blockDim" && name != "gridDim")
+        return false;
+      const auto *record = variable->getType()->getAsCXXRecordDecl();
+      if (record == nullptr || record->getQualifiedNameAsString() !=
+              "__cuda_builtin_" + name.str() + "_t" ||
+          method->getParent()->getCanonicalDecl() != record->getCanonicalDecl())
+        return false;
+      auto &sourceManager = context_.getSourceManager();
+      for (auto location : {variable->getLocation(), record->getLocation(),
+                            method->getLocation(),
+                            property->getPropertyDecl()->getLocation()}) {
+        location = sourceManager.getExpansionLoc(location);
+        if (!sourceManager.isInSystemHeader(location) ||
+            llvm::sys::path::filename(sourceManager.getFilename(location)) !=
+                "__clang_cuda_builtin_vars.h")
+          return false;
+      }
+      return true;
+    }
     bool VisitExpr(clang::Expr *expression) {
       return !expression->getBeginLoc().isMacroID() &&
              !expression->getEndLoc().isMacroID();
@@ -3927,6 +4051,8 @@ bool AscifyAction::rewriteCudaHalf2Operator(
       const auto found = CUDA_RENAMES_MAP().find(name);
       return found == CUDA_RENAMES_MAP().end() || found->second.dppName == name;
     }
+   private:
+    clang::ASTContext &context_;
   };
   auto render = [&](auto &&self, const clang::Expr *expression,
                     std::string &result) -> bool {
@@ -3956,7 +4082,7 @@ bool AscifyAction::rewriteCudaHalf2Operator(
                left + ", " + right + ")";
       return true;
     }
-    LeafProof proof;
+    LeafProof proof(*Result.Context);
     if (!proof.TraverseStmt(const_cast<clang::Expr *>(expression)))
       return false;
     result = clang::Lexer::getSourceText(
@@ -4492,9 +4618,9 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
       this);
   if (frontendCompatibility.enabled()) {
     Finder->addMatcher(
-        mat::declRefExpr(mat::to(mat::functionDecl(mat::hasName("max"))),
+        mat::declRefExpr(mat::to(mat::functionDecl(mat::hasAnyName("max", "min"))),
                          mat::isExpansionInMainFile())
-            .bind(sFrontendHostFloatMax),
+            .bind(sFrontendHostMath),
         this);
   }
   // Keep this matcher independent of API spelling and perform the CUDA API,
@@ -4594,7 +4720,7 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
       MacroNameTok.getIdentifierInfo()->getName();
   // Rewritten builtin tokens are preprocessed again by the target compiler.
   // Refuse a translation unit that gives that output name macro semantics.
-  if (name == "__builtin_fmaxf")
+  if (name == "__builtin_fmaxf" || name == "__builtin_elementwise_min")
     frontendHostMathBuiltinMacroDefined = true;
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
@@ -4776,8 +4902,10 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
       admittedFrozenInternalMaxExpansion =
           isDirectFrozenFunctionsImageProviderInstance(macroLocation);
     }
-    if (admittedFrozenInternalMaxExpansion)
+    if (admittedFrozenInternalMaxExpansion) {
+      frozenNvidiaSampleInternalImageMaxExpansionSeen = true;
       return;
+    }
     // Ignore implementation-internal expansions from the recognized helper,
     // but never remove the helper when an arbitrary local/user header relies
     // on one of its macros: this prototype does not rewrite that header.
@@ -4994,6 +5122,80 @@ void AscifyAction::auditRawPublishedCompatTokensInFile(
   }
 }
 
+bool AscifyAction::admitFrozenHelperMaxFallback(
+    const clang::Token &macroNameToken) {
+  // This does not admit general observations of MAX. A retained, frozen image
+  // provider has already executed its internal MAX use. Removing helper_cuda
+  // therefore leaves MAX defined by that same provider before this main-file
+  // fallback. Only this exact, inactive three-directive fallback is admitted;
+  // its tokens remain unchanged and every other PP/token audit still applies.
+  if (!frozenNvidiaSampleInternalImageMaxExpansionSeen ||
+      preprocessorConditionalDepth != 1 ||
+      macroNameToken.getLocation().isMacroID())
+    return false;
+  auto &sourceManager = getCompilerInstance().getSourceManager();
+  auto &preprocessor = getCompilerInstance().getPreprocessor();
+  const auto location = macroNameToken.getLocation();
+  if (location.isInvalid() || !sourceManager.isWrittenInMainFile(location))
+    return false;
+  const auto *macroInfo = preprocessor.getMacroDefinition(
+      macroNameToken.getIdentifierInfo()).getMacroInfo();
+  if (macroInfo == nullptr ||
+      frozenNvidiaSampleHelperFileRole(
+          sourceManager, macroInfo->getDefinitionLoc()) !=
+          FrozenOfficialNvidiaSampleHelperCuda ||
+      !activeFrozenHelperCudaMaxBodyMatches(*macroInfo, preprocessor))
+    return false;
+  const auto file = sourceManager.getFileID(location);
+  bool invalid = false;
+  const auto buffer = sourceManager.getBufferData(file, &invalid);
+  if (invalid)
+    return false;
+  unsigned lineStart = sourceManager.getFileOffset(location);
+  while (lineStart != 0 && buffer[lineStart - 1] != '\n' &&
+         buffer[lineStart - 1] != '\r')
+    --lineStart;
+  clang::Lexer lexer(sourceManager.getLocForStartOfFile(file),
+                     getCompilerInstance().getLangOpts(), buffer.begin(),
+                     buffer.begin() + lineStart, buffer.end());
+  std::vector<clang::Token> tokens;
+  std::vector<std::string> spellings;
+  for (unsigned i = 0; i != 23; ++i) {
+    clang::Token token;
+    lexer.LexFromRawLexer(token);
+    tokens.push_back(token);
+    spellings.push_back(token.is(clang::tok::eof)
+                            ? "" : preprocessor.getSpelling(token));
+    if (token.is(clang::tok::eof))
+      break;
+  }
+  if (tokens.size() != 23 || !tokens[7].isAnyIdentifier() ||
+      !tokens[9].isAnyIdentifier() || spellings[7] == spellings[9])
+    return false;
+  const auto &a = spellings[7];
+  const auto &b = spellings[9];
+  const std::vector<std::string> expected = {
+      "#", "ifndef", "MAX", "#", "define", "MAX", "(", a, ",", b,
+      ")", "(", a, ">", b, "?", a, ":", b, ")", "#", "endif"};
+  if (!std::equal(expected.begin(), expected.end(), spellings.begin()) ||
+      tokens[2].getLocation() != location ||
+      sourceManager.getFileOffset(tokens[6].getLocation()) !=
+          sourceManager.getFileOffset(tokens[5].getLocation()) + 3 ||
+      !tokens[3].isAtStartOfLine() || !tokens[20].isAtStartOfLine() ||
+      (!tokens[22].is(clang::tok::eof) && !tokens[22].isAtStartOfLine()))
+    return false;
+  // No newline may turn a replacement-list token into a separate directive
+  // or statement. The two # tokens above are the only later line starts.
+  for (unsigned i = 1; i != 22; ++i)
+    if (i != 3 && i != 20 && tokens[i].isAtStartOfLine())
+      return false;
+  nvidiaSampleHelperNormalMacroOffsets.insert(
+      sourceManager.getFileOffset(tokens[2].getLocation()));
+  nvidiaSampleHelperNormalMacroOffsets.insert(
+      sourceManager.getFileOffset(tokens[5].getLocation()));
+  return true;
+}
+
 void AscifyAction::auditExternalNvidiaSampleHelperPreprocessorUse(
     clang::SourceLocation location,
     const clang::Token &macroNameToken,
@@ -5009,6 +5211,9 @@ void AscifyAction::auditExternalNvidiaSampleHelperPreprocessorUse(
       !hasCudaCompatHeaderBeforeNvidiaHelper &&
       isAscifyCudaCompatPublishedMacro(name);
   if (!observableHelper && !downstreamCompatPublication)
+    return;
+  if (name == "MAX" && directive == "#ifndef" &&
+      admitFrozenHelperMaxFallback(macroNameToken))
     return;
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
@@ -5885,8 +6090,8 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
     (void)rewriteCudaHalf2Operator(Result);
     return;
   }
-  if (Result.Nodes.getNodeAs<clang::DeclRefExpr>(sFrontendHostFloatMax) != nullptr) {
-    (void)rewriteFrontendHostFloatMax(Result);
+  if (Result.Nodes.getNodeAs<clang::DeclRefExpr>(sFrontendHostMath) != nullptr) {
+    (void)rewriteFrontendHostMath(Result);
     return;
   }
   if (Result.Nodes.getNodeAs<clang::CallExpr>(

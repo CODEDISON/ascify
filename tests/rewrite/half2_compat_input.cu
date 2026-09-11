@@ -9,6 +9,7 @@ __global__ void Half2Arithmetic(half2* output, const half2* a, const half2* b) {
   output[2] = a[2] * b[2] + initialized;
   output[3] = __float2half2_rn(3.0f);
   output[4] = (0, a[4]) + b[4];
+  output[5] = a[threadIdx.x] + b[threadIdx.x];
 }
 
 // A user-defined namesake and host constructors are outside device lowering.

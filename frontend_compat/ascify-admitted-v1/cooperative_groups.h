@@ -3,6 +3,8 @@
 
 #include <type_traits>
 
+struct uint4;
+
 #if defined(__CUDACC__) || defined(__CUDA__)
 #define ASCIFY_FRONTEND_COMPAT_DEVICE_ __device__
 #else
@@ -49,6 +51,11 @@ class thread_block_tile {
   typename std::enable_if<std::is_same<T, int>::value ||
                               std::is_same<T, unsigned int>::value ||
                               std::is_same<T, float>::value, T>::type
+  shfl_xor(T value, unsigned int lane_mask) const;
+
+  template <typename T>
+  ASCIFY_FRONTEND_COMPAT_DEVICE_
+  typename std::enable_if<std::is_same<T, uint4>::value, T>::type
   shfl_xor(T value, unsigned int lane_mask) const;
 };
 

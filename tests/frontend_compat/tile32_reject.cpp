@@ -17,6 +17,10 @@ void RejectUnprovenTileOperation(cooperative_groups::thread_block block) {
 #elif ASCIFY_TILE_REJECT_CASE == 6
   const auto tile = cooperative_groups::tiled_partition<32>(block);
   (void)tile.shfl_up(1.0, 1);
+#elif ASCIFY_TILE_REJECT_CASE == 7
+  struct Convertible { operator uint4() const; } value;
+  const auto tile = cooperative_groups::tiled_partition<32>(block);
+  (void)tile.shfl_xor(value, 1);
 #else
 #error "Unknown negative case"
 #endif
