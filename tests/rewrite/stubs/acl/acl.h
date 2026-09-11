@@ -359,6 +359,22 @@ inline aclError aclrtGetDeviceInfo(uint32_t, aclrtDevAttr, int64_t* value) {
 }
 #endif
 
+#if defined(ASCIFY_TEST_ACL_CONTROLLABLE_DEVICE_QUERY)
+extern const char* ascify_test_soc_name;
+inline const char* aclrtGetSocName() { return ascify_test_soc_name; }
+#else
+inline const char* aclrtGetSocName() { return "Ascify test device"; }
+#endif
+
+// Symbol-specific behavior is checked separately with controllable SDK calls.
+inline aclError aclrtGetSymbolSize(const void*, size_t*) {
+  return ACL_ERROR_FEATURE_UNSUPPORTED;
+}
+inline aclError aclrtMemcpyToSymbol(const void*, const void*, size_t, size_t,
+                                    aclrtMemcpyKind) {
+  return ACL_ERROR_FEATURE_UNSUPPORTED;
+}
+
 inline aclError aclrtPeekAtLastError(aclrtLastErrLevel) {
   return ACL_SUCCESS;
 }

@@ -1,0 +1,34 @@
+// Small DT verification of the newly admitted full-warp vote semantics.
+#include <ascify/ascify_cuda_compat.hpp>
+
+ASCIFY_GLOBAL void voteProbe(const int* input, int* output) {
+  const unsigned i = threadIdx.x;
+  output[i] = ascify::any_sync(UINT32_MAX, input[i]);
+  output[96 + i] = ascify::all_sync(UINT32_MAX, input[i]);
+}
+
+int main() {
+  int input[96] = {}, output[192] = {};
+  for (int i = 32; i < 64; ++i) input[i] = i == 47 ? -7 : 0;
+  for (int i = 64; i < 96; ++i) input[i] = i % 2 ? INT_MIN : INT_MAX;
+  if (ascify::cudaSetDevice(0) != ACL_SUCCESS) return 1;
+  ascify::cudaDeviceProp properties = {};
+  if (ascify::cudaGetDeviceProperties(&properties, 0) != ACL_SUCCESS) return 2;
+  printf("device=%s vector_cores=%d\n", properties.name, properties.multiProcessorCount);
+  int *device_input = nullptr, *device_output = nullptr;
+  if (ascify::cudaMalloc(&device_input, sizeof(input)) != ACL_SUCCESS) return 3;
+  if (ascify::cudaMalloc(&device_output, sizeof(output)) != ACL_SUCCESS) return 4;
+  if (ascify::cudaMemcpy(device_input, input, sizeof(input), ACL_MEMCPY_HOST_TO_DEVICE) != ACL_SUCCESS) return 5;
+  voteProbe<<<dim3(1), dim3(96)>>>(device_input, device_output);
+  if (ascify::cudaDeviceSynchronize() != ACL_SUCCESS) return 6;
+  if (ascify::cudaMemcpy(output, device_output, sizeof(output), ACL_MEMCPY_DEVICE_TO_HOST) != ACL_SUCCESS) return 7;
+  int errors = 0;
+  for (int i = 0; i < 96; ++i) {
+    errors += output[i] != (i >= 32);
+    errors += output[96 + i] != (i >= 64);
+  }
+  const aclError free_output = ascify::cudaFree(device_output);
+  const aclError free_input = ascify::cudaFree(device_input);
+  printf("full_warp_votes checked=192 errors=%d\n", errors);
+  return errors || free_output != ACL_SUCCESS || free_input != ACL_SUCCESS ? 8 : 0;
+}

@@ -1,0 +1,13 @@
+// Companion input for symbol_compat_dt_probe.cce. Root runs this only on DT.
+#include <ascify/symbol_compat.hpp>
+
+__constant__ unsigned int ascifySymbolExternal[4];
+
+ASCIFY_GLOBAL void ascifySymbolReadExternal(float *output) {
+  const unsigned i = threadIdx.x;
+  if (i < 4) output[i] = static_cast<float>(ascifySymbolExternal[i]);
+}
+
+extern "C" void ascifySymbolLaunchExternal(float *output) {
+  ascifySymbolReadExternal<<<dim3(1), dim3(4), 0, nullptr>>>(output);
+}

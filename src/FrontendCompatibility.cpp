@@ -19,6 +19,8 @@ namespace fs = std::filesystem;
 constexpr char kAdmissionHeader[] = R"ASCIFY(#ifndef ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_COOPERATIVE_GROUPS_H_
 #define ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_COOPERATIVE_GROUPS_H_
 
+#include <type_traits>
+
 #if defined(__CUDACC__) || defined(__CUDA__)
 #define ASCIFY_FRONTEND_COMPAT_DEVICE_ __device__
 #else
@@ -38,6 +40,40 @@ ASCIFY_FRONTEND_COMPAT_DEVICE_ inline void sync(const thread_block& group) {
   group.sync();
 }
 
+// Only the full-warp, register-only tile surface verified against CANN 9.1.
+// Tile synchronization is deliberately absent: the native tile sync is only
+// a block memory fence, which is not proof of CUDA's collective barrier.
+template <unsigned int Size, typename ParentT = void>
+class thread_block_tile {
+  static_assert(Size == 32, "Ascify admits only full-warp tile size 32");
+  static_assert(std::is_same<ParentT, thread_block>::value,
+                "Ascify admits only tiles partitioned from a thread block");
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ thread_block_tile();
+
+ public:
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int thread_rank();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static constexpr unsigned int size() { return Size; }
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int meta_group_rank();
+
+  template <typename T>
+  ASCIFY_FRONTEND_COMPAT_DEVICE_
+  typename std::enable_if<std::is_same<T, int>::value ||
+                              std::is_same<T, unsigned int>::value ||
+                              std::is_same<T, float>::value, T>::type
+  shfl_up(T value, unsigned int delta) const;
+
+  template <typename T>
+  ASCIFY_FRONTEND_COMPAT_DEVICE_
+  typename std::enable_if<std::is_same<T, int>::value ||
+                              std::is_same<T, unsigned int>::value ||
+                              std::is_same<T, float>::value, T>::type
+  shfl_xor(T value, unsigned int lane_mask) const;
+};
+
+template <unsigned int Size>
+ASCIFY_FRONTEND_COMPAT_DEVICE_ thread_block_tile<Size, thread_block>
+tiled_partition(const thread_block& parent);
+
 }  // namespace cooperative_groups
 
 #undef ASCIFY_FRONTEND_COMPAT_DEVICE_
@@ -49,19 +85,45 @@ constexpr char kReductionPoison[] =
     "#error \"Ascify frontend compatibility ascify-admitted-v1 does not "
     "admit cooperative_groups/reduce.h\"\n";
 
+constexpr char kHostMathHeader[] = R"ASCIFY(#ifndef ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_HOST_MATH_H_
+#define ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_HOST_MATH_H_
+
+// CUDA's float max(a, b) returns fmaxf(a, b), including its NaN behavior.
+// Clang's CUDA wrapper exposes only the device overload. This opt-in parser
+// template admits exactly float/float host calls; no argument is narrowed.
+// Ascify rewrites references proven to use this declaration to the builtin.
+namespace ascify_frontend_compat_detail {
+template <bool> struct host_float_max_enabled {};
+template <> struct host_float_max_enabled<true> { using type = int; };
+}
+
+template <class A, class B,
+          typename ascify_frontend_compat_detail::host_float_max_enabled<
+              __is_same(A, float) && __is_same(B, float)>::type = 0>
+#if defined(__CUDACC__) || defined(__CUDA__)
+__attribute__((host))
+#endif
+inline float max(A a, B b) {
+  return __builtin_fmaxf(a, b);
+}
+
+#endif
+)ASCIFY";
+
 constexpr char kProfileManifest[] =
     "schema=ascify.frontend-compat-profile.v1\n"
     "profile=ascify-admitted-v1\n"
-    "file=cooperative_groups.h;bytes=702;sha256="
-    "2f494aad929396ac870a469c58b783da183d99de2a965fb22e190bae91414657\n"
-    "file=cooperative_groups/reduce.h;bytes=101;sha256="
-    "75adbe65aeb5c2acfd63c9896376e67d270198e566080b9260a219ab99e2de8a\n";
+    "file=cooperative_groups.h;bytes=2291;sha256=1d490bd085dbd3e339742854773ef57e73049f7d1ee2d83d02c573a3709366c4\n"
+    "file=cooperative_groups/reduce.h;bytes=101;sha256=75adbe65aeb5c2acfd63c9896376e67d270198e566080b9260a219ab99e2de8a\n"
+    "file=host_math.h;bytes=900;sha256=fe115c0ee5be69d87f09e53b5a0f9f7649b468c1ceaf03fdb9df993052a5076c\n";
 
-static_assert(sizeof(kAdmissionHeader) - 1 == 702,
+static_assert(sizeof(kAdmissionHeader) - 1 == 2291,
               "admission header identity drifted");
 static_assert(sizeof(kReductionPoison) - 1 == 101,
               "reduction poison identity drifted");
-static_assert(sizeof(kProfileManifest) - 1 == 291,
+static_assert(sizeof(kHostMathHeader) - 1 == 900,
+              "host math header identity drifted");
+static_assert(sizeof(kProfileManifest) - 1 == 391,
               "frontend profile manifest identity drifted");
 
 struct RequiredProfileFile {
@@ -71,9 +133,10 @@ struct RequiredProfileFile {
 };
 
 constexpr RequiredProfileFile kRequiredProfileFiles[] = {
-    {"profile.manifest", 291, kProfileManifest},
-    {"cooperative_groups.h", 702, kAdmissionHeader},
+    {"profile.manifest", 391, kProfileManifest},
+    {"cooperative_groups.h", 2291, kAdmissionHeader},
     {"cooperative_groups/reduce.h", 101, kReductionPoison},
+    {"host_math.h", 900, kHostMathHeader},
 };
 
 std::string pathString(const fs::path& path) {
@@ -315,6 +378,13 @@ bool ConfigureFrontendCompatibility(
   tool.appendArgumentsAdjuster(clang::tooling::getInsertArgumentAdjuster(
       includeArgument.c_str(),
       clang::tooling::ArgumentInsertPosition::BEGIN));
+  // This verified, explicitly selected parser surface must also apply to
+  // host code that never includes cooperative_groups.h. It is not emitted
+  // into translated output; proven float calls are rewritten semantically.
+  const clang::tooling::CommandLineArguments hostMathArguments{
+      "-include", root + "/host_math.h"};
+  tool.appendArgumentsAdjuster(clang::tooling::getInsertArgumentAdjuster(
+      hostMathArguments, clang::tooling::ArgumentInsertPosition::END));
   config.profile = profile;
   config.canonicalRoot = root;
   return true;

@@ -1,0 +1,12 @@
+#include <ascify/cooperative_groups_compat.hpp>
+
+__global__ void tile32_native_surface_probe(unsigned int* out) {
+  const auto block = ascify_cg::this_thread_block();
+  const auto tile = ascify_cg::tiled_partition<32>(block);
+  static_assert(std::is_same<decltype(tile.thread_rank()), unsigned int>::value);
+  static_assert(std::is_same<decltype(tile.size()), unsigned int>::value);
+  unsigned int value = tile.thread_rank();
+  value = tile.shfl_up(value, 1);
+  value = tile.shfl_xor(value, 2);
+  out[threadIdx.x] = value + tile.meta_group_rank() + tile.size();
+}

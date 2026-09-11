@@ -65,6 +65,9 @@ const std::string s_string_literal = "[string literal]";
 const StringRef sCudaLaunchKernel = "cudaLaunchKernel";
 const StringRef sCudaGlobalScalarDoubleParam = "cudaGlobalScalarDoubleParam";
 const StringRef sCudaDefaultDim3 = "cudaDefaultDim3";
+const StringRef sCudaHalf2DirectInit = "cudaHalf2DirectInit";
+const StringRef sCudaHalf2Operator = "cudaHalf2Operator";
+const StringRef sFrontendHostFloatMax = "frontendHostFloatMax";
 const StringRef sProvenGlobalAtomicCall = "provenGlobalAtomicCall";
 const StringRef sCanonicalWarpAddReduction = "canonicalWarpAddReduction";
 const StringRef sCanonicalBinaryReducer = "canonicalBinaryReducer";
@@ -671,12 +674,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 43500)
+  if (contents.size() != 45554)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "c1f87bd416aa4f389171593bd5e47894999d05407e5935d3151fbcd2aa6438c9");
+      "f3c23d99bb9751eb611d5184cbb73e8031e137361e0e00290ff1a3812792d37d");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -703,12 +706,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 43500)
+  if (invalidBuffer || contents.size() != 45554)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "c1f87bd416aa4f389171593bd5e47894999d05407e5935d3151fbcd2aa6438c9");
+      "f3c23d99bb9751eb611d5184cbb73e8031e137361e0e00290ff1a3812792d37d");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -1335,6 +1338,7 @@ static bool requiresCudaCompatHeader(llvm::StringRef name) {
          name == "cudaMalloc" ||
          name == "cudaFree" ||
          name == "cudaMemcpy" ||
+         name == "cudaMemcpyToSymbol" ||
          name == "cudaMemcpyAsync" ||
          name == "cudaMemset" ||
          name == "cudaMemsetAsync" ||
@@ -1348,6 +1352,10 @@ static bool requiresCudaCompatHeader(llvm::StringRef name) {
          name == "cudaGetLastError" ||
          name == "cudaGetErrorString" ||
          name == "cudaDeviceGetAttribute" ||
+         name == "cudaDeviceProp" ||
+         name == "cudaGetDeviceProperties" ||
+         name == "__any_sync" ||
+         name == "__all_sync" ||
          name == "cudaStreamCreate" ||
          name == "cudaStreamCreateWithFlags" ||
          name == "cudaStreamDefault" ||
@@ -3737,6 +3745,333 @@ bool AscifyAction::lowerCudaGlobalScalarDoubleParam(
   return true;
 }
 
+bool AscifyAction::rewriteFrontendHostFloatMax(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *reference =
+      Result.Nodes.getNodeAs<clang::DeclRefExpr>(sFrontendHostFloatMax);
+  if (!frontendCompatibility.enabled() || reference == nullptr ||
+      Result.Context == nullptr || Result.SourceManager == nullptr)
+    return false;
+  const auto *callee = llvm::dyn_cast<clang::FunctionDecl>(reference->getDecl());
+  if (callee == nullptr || callee->getQualifiedNameAsString() != "max")
+    return false;
+  auto &sourceManager = *Result.SourceManager;
+  const std::string expectedHeader =
+      frontendCompatibility.canonicalRoot + "/host_math.h";
+  if (sourceManager.getFilename(callee->getLocation()) != expectedHeader)
+    return false;  // User and CUDA device overloads retain their identities.
+
+  auto reject = [&]() {
+    auto &diagnostics = getCompilerInstance().getDiagnostics();
+    const unsigned id = diagnostics.getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "Ascify frontend host max requires a direct, non-macro float/float "
+        "call with no qualifier or global :: in a non-template host function; "
+        "this use is not admitted");
+    diagnostics.Report(reference->getLocation(), id);
+    return false;
+  };
+  // A using-declaration can expose the same product function as ns::max.
+  // Replacing only its name would leave ns::__builtin_fmaxf, which is not a
+  // builtin. Admit only unqualified max and the literal global ::max form.
+  if (reference->hasQualifier()) {
+    const auto qualifierRange = reference->getQualifierLoc().getSourceRange();
+    if (qualifierRange.getBegin().isMacroID() ||
+        qualifierRange.getEnd().isMacroID() ||
+        clang::Lexer::getSourceText(
+            clang::CharSourceRange::getTokenRange(qualifierRange),
+            sourceManager, getCompilerInstance().getLangOpts()) != "::")
+      return reject();
+  }
+  auto &context = *Result.Context;
+  const clang::FunctionDecl *function =
+      enclosingNonLambdaFunction(reference, context);
+  if (frontendHostMathBuiltinMacroDefined || function == nullptr ||
+      function->hasAttr<clang::CUDADeviceAttr>() ||
+      function->hasAttr<clang::CUDAGlobalAttr>() ||
+      function->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      reference->hasExplicitTemplateArgs() ||
+      callee->getNumParams() != 2 ||
+      !callee->getReturnType()->isSpecificBuiltinType(clang::BuiltinType::Float))
+    return reject();
+  for (const auto *parameter : callee->parameters()) {
+    if (!parameter->getType()->isSpecificBuiltinType(clang::BuiltinType::Float))
+      return reject();
+  }
+
+  const clang::Expr *current = reference;
+  const clang::CallExpr *call = nullptr;
+  for (unsigned depth = 0; depth != 16; ++depth) {
+    const auto parents = context.getParents(*current);
+    if (parents.size() != 1)
+      break;
+    if (const auto *parentCall = parents[0].get<clang::CallExpr>()) {
+      if (parentCall->getCallee()->IgnoreParenImpCasts() == reference &&
+          parentCall->getDirectCallee() == callee)
+        call = parentCall;
+      break;
+    }
+    const auto *parentExpression = parents[0].get<clang::Expr>();
+    if (parentExpression == nullptr ||
+        (!llvm::isa<clang::ParenExpr>(parentExpression) &&
+         !llvm::isa<clang::ImplicitCastExpr>(parentExpression)))
+      break;
+    current = parentExpression;
+  }
+  const clang::SourceLocation location = reference->getLocation();
+  if (call == nullptr || call->getNumArgs() != 2 || location.isInvalid() ||
+      location.isMacroID() || !sourceManager.isWrittenInMainFile(location))
+    return reject();
+  const auto &languageOptions = getCompilerInstance().getLangOpts();
+  if (clang::Lexer::getSourceText(
+          clang::CharSourceRange::getTokenRange(location, location),
+          sourceManager, languageOptions) != "max")
+    return reject();
+  const unsigned offset = sourceManager.getFileOffset(location);
+  if (!rewrittenFrontendHostMathOffsets.insert(offset).second)
+    return true;
+  const clang::SourceLocation end = clang::Lexer::getLocForEndOfToken(
+      location, 0, sourceManager, languageOptions);
+  // CUDA's own float overload uses fmaxf. The builtin preserves that floating
+  // behavior and cannot bind to a user variable/overload named fmaxf.
+  const ct::Replacement replacement(sourceManager, location, 3,
+                                     "__builtin_fmaxf");
+  return insertSemanticReplacement(replacement,
+      clang::FullSourceLoc(location, sourceManager), location, end);
+}
+
+bool AscifyAction::rewriteCudaHalf2Operator(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *matched =
+      Result.Nodes.getNodeAs<clang::CXXOperatorCallExpr>(sCudaHalf2Operator);
+  if (matched == nullptr || Result.Context == nullptr ||
+      Result.SourceManager == nullptr)
+    return false;
+  auto &sourceManager = *Result.SourceManager;
+  const auto &languageOptions = getCompilerInstance().getLangOpts();
+  auto proven = [&](const clang::CXXOperatorCallExpr *call) {
+    if (call == nullptr || call->getNumArgs() != 2 ||
+        (call->getOperator() != clang::OO_Plus &&
+         call->getOperator() != clang::OO_Star))
+      return false;
+    const auto *callee = call->getDirectCallee();
+    const auto *record = call->getType()->getAsCXXRecordDecl();
+    if (callee == nullptr || record == nullptr ||
+        (record->getQualifiedNameAsString() != "half2" &&
+         record->getQualifiedNameAsString() != "__half2"))
+      return false;
+    for (const auto location : {callee->getLocation(), record->getLocation()}) {
+      const auto header =
+          llvm::sys::path::filename(sourceManager.getFilename(location));
+      if (!sourceManager.isInSystemHeader(location) ||
+          (header != "cuda_fp16.h" && header != "cuda_fp16.hpp"))
+        return false;
+    }
+    return true;
+  };
+  if (!proven(matched))
+    return false;
+  const auto *function = enclosingNonLambdaFunction(matched, *Result.Context);
+  if (function == nullptr ||
+      (!function->hasAttr<clang::CUDADeviceAttr>() &&
+       !function->hasAttr<clang::CUDAGlobalAttr>()))
+    return false;
+  if (function->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate) {
+    auto &diagnostics = getCompilerInstance().getDiagnostics();
+    const unsigned id = diagnostics.getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "Ascify half2 operator lowering does not admit template functions; "
+        "other instantiations must retain their arithmetic");
+    diagnostics.Report(matched->getExprLoc(), id);
+    return false;
+  }
+
+  // Rewrite the outermost admitted expression once, irrespective of matcher
+  // visitation order. Native CUDA half2 operators round after each operation;
+  // keeping explicit CANN x2 intrinsics prevents multiply/add contraction.
+  const clang::CXXOperatorCallExpr *root = matched;
+  const clang::Expr *current = matched;
+  for (;;) {
+    const auto parents = Result.Context->getParents(*current);
+    if (parents.size() != 1)
+      break;
+    const auto *parent = parents[0].get<clang::Expr>();
+    if (const auto *operation =
+            llvm::dyn_cast_or_null<clang::CXXOperatorCallExpr>(parent)) {
+      if (!proven(operation))
+        break;
+      root = operation;
+    } else if (parent == nullptr ||
+               (!llvm::isa<clang::ParenExpr>(parent) &&
+                !llvm::isa<clang::ImplicitCastExpr>(parent) &&
+                !llvm::isa<clang::MaterializeTemporaryExpr>(parent) &&
+                !llvm::isa<clang::CXXBindTemporaryExpr>(parent) &&
+                !(llvm::isa<clang::CXXConstructExpr>(parent) &&
+                  llvm::cast<clang::CXXConstructExpr>(parent)
+                      ->getConstructor()->isCopyOrMoveConstructor()))) {
+      break;
+    }
+    current = parent;
+  }
+
+  class LeafProof : public clang::RecursiveASTVisitor<LeafProof> {
+   public:
+    bool VisitExpr(clang::Expr *expression) {
+      return !expression->getBeginLoc().isMacroID() &&
+             !expression->getEndLoc().isMacroID();
+    }
+    bool VisitCallExpr(clang::CallExpr *) { return false; }
+    bool VisitCXXConstructExpr(clang::CXXConstructExpr *) { return false; }
+    bool VisitDeclRefExpr(clang::DeclRefExpr *reference) {
+      const auto name = reference->getDecl()->getName();
+      const auto found = CUDA_RENAMES_MAP().find(name);
+      return found == CUDA_RENAMES_MAP().end() || found->second.dppName == name;
+    }
+  };
+  auto render = [&](auto &&self, const clang::Expr *expression,
+                    std::string &result) -> bool {
+    expression = expression->IgnoreParenImpCasts();
+    if (const auto *temporary =
+            llvm::dyn_cast<clang::MaterializeTemporaryExpr>(expression))
+      return self(self, temporary->getSubExpr(), result);
+    if (const auto *temporary =
+            llvm::dyn_cast<clang::CXXBindTemporaryExpr>(expression))
+      return self(self, temporary->getSubExpr(), result);
+    if (const auto *copy = llvm::dyn_cast<clang::CXXConstructExpr>(expression)) {
+      if (copy->getNumArgs() == 1 &&
+          copy->getConstructor()->isCopyOrMoveConstructor())
+        return self(self, copy->getArg(0), result);
+      return false;
+    }
+    if (const auto *operation =
+            llvm::dyn_cast<clang::CXXOperatorCallExpr>(expression)) {
+      if (!proven(operation))
+        return false;
+      std::string left, right;
+      if (!self(self, operation->getArg(0), left) ||
+          !self(self, operation->getArg(1), right))
+        return false;
+      result = (operation->getOperator() == clang::OO_Plus ? "__haddx2(" :
+                                                               "__hmulx2(") +
+               left + ", " + right + ")";
+      return true;
+    }
+    LeafProof proof;
+    if (!proof.TraverseStmt(const_cast<clang::Expr *>(expression)))
+      return false;
+    result = clang::Lexer::getSourceText(
+        clang::CharSourceRange::getTokenRange(expression->getSourceRange()),
+        sourceManager, languageOptions).str();
+    if (result.empty())
+      return false;
+    result = "(" + result + ")";
+    return true;
+  };
+  const auto begin = root->getBeginLoc();
+  const auto last = root->getEndLoc();
+  auto reject = [&]() {
+    auto &diagnostics = getCompilerInstance().getDiagnostics();
+    const unsigned id = diagnostics.getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "Ascify half2 arithmetic requires a direct SDK operator expression "
+        "with non-macro operands and no additional calls or CUDA renames; "
+        "separate half rounding could not be preserved");
+    diagnostics.Report(root->getExprLoc(), id);
+    return false;
+  };
+  if (begin.isInvalid() || last.isInvalid() || begin.isMacroID() ||
+      last.isMacroID() || !sourceManager.isWrittenInMainFile(begin))
+    return reject();
+  std::string replacementText;
+  if (!render(render, root, replacementText))
+    return reject();
+  const unsigned offset = sourceManager.getFileOffset(begin);
+  if (!rewrittenCudaHalf2OperatorOffsets.insert(offset).second)
+    return true;
+  const auto end = clang::Lexer::getLocForEndOfToken(
+      last, 0, sourceManager, languageOptions);
+  const ct::Replacement replacement(sourceManager,
+      clang::CharSourceRange::getCharRange(begin, end), replacementText);
+  return insertSemanticReplacement(replacement,
+      clang::FullSourceLoc(begin, sourceManager), begin, end);
+}
+
+bool AscifyAction::rewriteCudaHalf2DirectInit(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *variable =
+      Result.Nodes.getNodeAs<clang::VarDecl>(sCudaHalf2DirectInit);
+  if (variable == nullptr || Result.SourceManager == nullptr ||
+      variable->isImplicit() || !variable->isLocalVarDecl() ||
+      variable->getInitStyle() != clang::VarDecl::CallInit ||
+      variable->getInit() == nullptr)
+    return false;
+  const auto *function =
+      llvm::dyn_cast<clang::FunctionDecl>(variable->getDeclContext());
+  if (function == nullptr ||
+      (!function->hasAttr<clang::CUDADeviceAttr>() &&
+       !function->hasAttr<clang::CUDAGlobalAttr>()))
+    return false;
+
+  const auto *construction = llvm::dyn_cast<clang::CXXConstructExpr>(
+      variable->getInit()->IgnoreParenImpCasts());
+  const auto *record = variable->getType()->getAsCXXRecordDecl();
+  if (construction == nullptr || construction->getNumArgs() != 2 ||
+      record == nullptr ||
+      (record->getQualifiedNameAsString() != "half2" &&
+       record->getQualifiedNameAsString() != "__half2"))
+    return false;
+
+  auto &sourceManager = *Result.SourceManager;
+  const auto declarationLocation = record->getLocation();
+  const llvm::StringRef header =
+      llvm::sys::path::filename(sourceManager.getFilename(declarationLocation));
+  if (!sourceManager.isInSystemHeader(declarationLocation) ||
+      (header != "cuda_fp16.h" && header != "cuda_fp16.hpp"))
+    return false;
+  if (function->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate) {
+    auto &diagnostics = getCompilerInstance().getDiagnostics();
+    const unsigned id = diagnostics.getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "Ascify half2 constructor lowering does not admit template functions");
+    diagnostics.Report(variable->getLocation(), id);
+    return false;
+  }
+  const clang::SourceLocation name = variable->getLocation();
+  if (name.isInvalid() || name.isMacroID() ||
+      !sourceManager.isWrittenInMainFile(name) ||
+      construction->getBeginLoc().isMacroID() ||
+      construction->getEndLoc().isMacroID())
+    return false;
+  for (const clang::Expr *argument : construction->arguments()) {
+    if (argument->getBeginLoc().isMacroID() ||
+        argument->getEndLoc().isMacroID())
+      return false;
+  }
+
+  const auto &languageOptions = getCompilerInstance().getLangOpts();
+  const auto nameEnd = clang::Lexer::getLocForEndOfToken(
+      name, 0, sourceManager, languageOptions);
+  clang::Token opening;
+  if (nameEnd.isInvalid() ||
+      clang::Lexer::getRawToken(nameEnd, opening, sourceManager,
+                               languageOptions, true) ||
+      opening.getKind() != clang::tok::l_paren)
+    return false;
+  const auto location = opening.getLocation();
+  const unsigned offset = sourceManager.getFileOffset(location);
+  if (!rewrittenCudaHalf2DirectInitOffsets.insert(offset).second)
+    return true;
+  // CANN's native half2 is a vector, not CUDA's class with a two-half
+  // constructor. The half/half facade preserves component conversion and
+  // copying. Replacing only '(' leaves argument evaluation and rewrites intact.
+  const auto end = clang::Lexer::getLocForEndOfToken(
+      location, 0, sourceManager, languageOptions);
+  const ct::Replacement replacement(sourceManager, location, 1,
+                                     " = ::ascify::make_half2_from_halves(");
+  return insertSemanticReplacement(replacement,
+      clang::FullSourceLoc(location, sourceManager), location, end);
+}
+
 bool AscifyAction::rewriteCudaDefaultDim3(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *variable =
@@ -4148,6 +4483,20 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
       mat::varDecl(mat::isExpansionInMainFile())
           .bind(sCudaDefaultDim3),
       this);
+  Finder->addMatcher(
+      mat::varDecl(mat::isExpansionInMainFile()).bind(sCudaHalf2DirectInit),
+      this);
+  Finder->addMatcher(
+      mat::cxxOperatorCallExpr(mat::isExpansionInMainFile())
+          .bind(sCudaHalf2Operator),
+      this);
+  if (frontendCompatibility.enabled()) {
+    Finder->addMatcher(
+        mat::declRefExpr(mat::to(mat::functionDecl(mat::hasName("max"))),
+                         mat::isExpansionInMainFile())
+            .bind(sFrontendHostFloatMax),
+        this);
+  }
   // Keep this matcher independent of API spelling and perform the CUDA API,
   // scalar type, enclosing-kernel, and address-provenance proof in the
   // callback. A failed proof makes no edit, so shared/local/helper pointers
@@ -4243,6 +4592,10 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
     return;
   const llvm::StringRef name =
       MacroNameTok.getIdentifierInfo()->getName();
+  // Rewritten builtin tokens are preprocessed again by the target compiler.
+  // Refuse a translation unit that gives that output name macro semantics.
+  if (name == "__builtin_fmaxf")
+    frontendHostMathBuiltinMacroDefined = true;
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
   const bool fromCompat = locationComesFromAscifyCudaCompat(
@@ -5522,6 +5875,18 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
   }
   if (Result.Nodes.getNodeAs<clang::VarDecl>(sCudaDefaultDim3) != nullptr) {
     (void)rewriteCudaDefaultDim3(Result);
+    return;
+  }
+  if (Result.Nodes.getNodeAs<clang::VarDecl>(sCudaHalf2DirectInit) != nullptr) {
+    (void)rewriteCudaHalf2DirectInit(Result);
+    return;
+  }
+  if (Result.Nodes.getNodeAs<clang::CXXOperatorCallExpr>(sCudaHalf2Operator) != nullptr) {
+    (void)rewriteCudaHalf2Operator(Result);
+    return;
+  }
+  if (Result.Nodes.getNodeAs<clang::DeclRefExpr>(sFrontendHostFloatMax) != nullptr) {
+    (void)rewriteFrontendHostFloatMax(Result);
     return;
   }
   if (Result.Nodes.getNodeAs<clang::CallExpr>(

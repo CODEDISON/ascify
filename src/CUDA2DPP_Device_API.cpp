@@ -49,6 +49,10 @@ const std::map<llvm::StringRef, dppCounter> CUDA_DEVICE_FUNCTION_MAP = [] {
   m["__shfl_up_sync"]    = {"ascify::shfl_up_sync",   CONV_DEVICE_FUNC, API_RUNTIME, 0};
   m["__shfl_xor_sync"]   = {"ascify::shfl_xor_sync",  CONV_DEVICE_FUNC, API_RUNTIME, 0};
   m["__shfl_sync"]       = {"ascify::shfl_sync",      CONV_DEVICE_FUNC, API_RUNTIME, 0};
+  m["__any_sync"]        = {"ascify::any_sync",       CONV_DEVICE_FUNC, API_RUNTIME, 0};
+  m["__all_sync"]        = {"ascify::all_sync",       CONV_DEVICE_FUNC, API_RUNTIME, 0};
+  // The facade retains CUDA tile result types while using native CANN groups.
+  m["cooperative_groups"] = {"ascify_cg",           CONV_DEVICE_FUNC, API_RUNTIME, 0};
   // Keep synchronization behind the dual-header-family compatibility layer.
   // Public 8.5 deliberately rejects block vote collectives that its aggregate
   // SIMT interface does not expose.
@@ -77,8 +81,16 @@ const std::map<llvm::StringRef, dppCounter> CUDA_DEVICE_FUNCTION_MAP = [] {
   m["__frcp_rn"]          = {"__frcp_rn",         CONV_DEVICE_FUNC, API_RUNTIME, 0};
   m["__float2half_rn"]    = {"__float2half_rn",    CONV_DEVICE_FUNC, API_RUNTIME, 0};
   m["__half2float"]       = {"__half2float",       CONV_DEVICE_FUNC, API_RUNTIME, 0};
-  m["__float2half2_rn"]   = {"__float2half2_rn",   CONV_DEVICE_FUNC, API_RUNTIME, 0};
-  m["__half22float2"]     = {"__half22float2",     CONV_DEVICE_FUNC, API_RUNTIME, 0};
+  m["__float2half2_rn"]   = {"ascify::float2half2_rn", CONV_DEVICE_FUNC, API_RUNTIME, 0};
+  m["__half22float2"]     = {"ascify::half22float2", CONV_DEVICE_FUNC, API_RUNTIME, 0};
+  // The installed CANN 9.1 SIMT surface names paired half arithmetic x2.
+  // Keep fused __hfma2 distinct from separately rounded multiply/add.
+  m["__hadd2"]           = {"__haddx2",          CONV_DEVICE_FUNC, API_RUNTIME, 0};
+  m["__hmul2"]           = {"__hmulx2",          CONV_DEVICE_FUNC, API_RUNTIME, 0};
+  m["__hfma2"]           = {"__hfmax2",          CONV_DEVICE_FUNC, API_RUNTIME, 0};
+  m["__floats2half2_rn"]  = {"__floats2half2_rn", CONV_DEVICE_FUNC, API_RUNTIME, 0};
+  m["__low2float"]       = {"__low2float",       CONV_DEVICE_FUNC, API_RUNTIME, 0};
+  m["__high2float"]      = {"__high2float",      CONV_DEVICE_FUNC, API_RUNTIME, 0};
   m["__int_as_float"]     = {"__int_as_float",     CONV_DEVICE_FUNC, API_RUNTIME, 0};
   m["__float_as_int"]     = {"__float_as_int",     CONV_DEVICE_FUNC, API_RUNTIME, 0};
   m["__longlong_as_double"] = {"__longlong_as_double", CONV_DEVICE_FUNC, API_RUNTIME, 0};

@@ -27,6 +27,8 @@ using SEC = runtime::CUDA_RUNTIME_API_SECTIONS;
 // Map of all CUDA Runtime API functions
 const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   std::map<llvm::StringRef,  dppCounter> m;
+  m["cudaMemcpyToSymbol"] = {"ascify::cudaMemcpyToSymbol", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaGetDeviceProperties"] = {"ascify::cudaGetDeviceProperties", CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
   // Memory management
   // CUDA and ACL memory APIs differ in allocation policy, destination bounds,
   // and async argument order.  Preserve CUDA call shapes and adapt them in the

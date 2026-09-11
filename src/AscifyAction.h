@@ -80,6 +80,8 @@ private:
   ct::Replacements *replacements = nullptr;
   LocalHeaderRewriteContext *localHeaderContext = nullptr;
   ascify::FrontendCompatibilityConfig frontendCompatibility;
+  std::set<unsigned> rewrittenFrontendHostMathOffsets;
+  bool frontendHostMathBuiltinMacroDefined = false;
   std::map<std::string, clang::SourceLocation> Ifndefs;
   std::vector<clang::SourceRange> SkippedSourceRanges;
   std::vector<SemanticRewriteRange> SemanticRewriteRanges;
@@ -161,6 +163,8 @@ private:
   std::deque<clang::Token> rawTokenWindow;
   std::set<unsigned> loweredDeviceDoubleParamOffsets;
   std::set<unsigned> rewrittenCudaDefaultDim3Offsets;
+  std::set<unsigned> rewrittenCudaHalf2DirectInitOffsets;
+  std::set<unsigned> rewrittenCudaHalf2OperatorOffsets;
   std::set<unsigned> rewrittenGlobalAtomicOffsets;
   std::set<unsigned> rewrittenWarpAddReductionOffsets;
   std::set<unsigned> taggedCanonicalReducerOffsets;
@@ -213,6 +217,9 @@ public:
   bool cudaLaunchKernel(const mat::MatchFinder::MatchResult &Result);
   bool lowerCudaGlobalScalarDoubleParam(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaDefaultDim3(const mat::MatchFinder::MatchResult &Result);
+  bool rewriteCudaHalf2DirectInit(const mat::MatchFinder::MatchResult &Result);
+  bool rewriteCudaHalf2Operator(const mat::MatchFinder::MatchResult &Result);
+  bool rewriteFrontendHostFloatMax(const mat::MatchFinder::MatchResult &Result);
   bool rewriteProvenGlobalAtomicCall(
       const mat::MatchFinder::MatchResult &Result);
   bool rewriteCanonicalWarpAddReduction(

@@ -4,6 +4,9 @@
 
 ### Added
 
+- Narrow CUDA Samples adapters for host float max, half2 operations, full-warp
+  tile/vote operations, partial device properties, and registered symbol
+  copies, with explicit source and target boundaries documented in ADR 0021.
 - English and Chinese user guides with simple steps for Linux setup, clean
   GitHub clone, build, install, first CUDA source conversion, result checks,
   mode selection, and common problems.

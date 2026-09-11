@@ -43,6 +43,7 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_TYPE_NAME_MAP = [] {
   m["cudaEvent_t"]                = {"aclrtEvent",                       CONV_TYPE, API_RUNTIME, SEC::EVENT};
   // Device attributes. Values beyond VECTOR_CORE_NUM drift between public ACL
   // and frozen RTS headers, so generated code names only Ascify constants.
+  m["cudaDeviceProp"] = {"ascify::cudaDeviceProp", CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};
   m["cudaDevAttrMultiProcessorCount"]                 = {"ACL_DEV_ATTR_VECTOR_CORE_NUM",               CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};
   m["cudaDevAttrMaxThreadsPerMultiProcessor"]         = {"ascify::cudaDevAttrMaxThreadsPerVectorCore", CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};
   m["cudaDevAttrMaxSharedMemoryPerBlock"]             = {"ascify::cudaDevAttrLocalMemoryPerVectorCore", CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};

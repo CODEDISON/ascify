@@ -1,0 +1,117 @@
+// Synthetic DT correctness probe, not a CUDA20 conversion or performance row.
+// Build/link together with symbol_compat_dt_external.cce using the real CCEC.
+#include <ascify/symbol_compat.hpp>
+
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
+
+__constant__ float ascifySymbolArray[8];
+static __constant__ unsigned int ascifySymbolTable[2][4];
+extern __constant__ unsigned int ascifySymbolExternal[4];
+extern "C" void ascifySymbolLaunchExternal(float *output);
+
+ASCIFY_GLOBAL void ascifySymbolReadLocal(float *output) {
+  const unsigned i = threadIdx.x;
+  if (i < 8) {
+    output[i] = ascifySymbolArray[i];
+    output[8 + i] = static_cast<float>(ascifySymbolTable[i / 4][i % 4]);
+  }
+}
+
+#define SYMBOL_CHECK(call)                                                    \
+  do {                                                                      \
+    const aclError status = (call);                                          \
+    if (status != ACL_SUCCESS) {                                             \
+      std::fprintf(stderr, "symbol probe line %d status=%d: %s\n", __LINE__,   \
+                   static_cast<int>(status), #call);                        \
+      return 1;                                                             \
+    }                                                                       \
+  } while (0)
+
+int main(int argc, char **argv) {
+  const int device = argc == 2 ? std::atoi(argv[1]) : 0;
+  for (unsigned pass = 0; pass < 2; ++pass) {
+    SYMBOL_CHECK(ascify::cudaSetDevice(device));
+    float source[8];
+    unsigned table[2][4];
+    unsigned external[4];
+    float expected[22];
+    expected[0] = expected[21] = -919.0f;
+    for (unsigned i = 0; i < 8; ++i) {
+      source[i] = static_cast<float>(pass * 100 + i + 1);
+      table[i / 4][i % 4] = pass * 100 + i + 10;
+      expected[i + 1] = source[i];
+      expected[i + 9] = static_cast<float>(table[i / 4][i % 4]);
+    }
+    for (unsigned i = 0; i < 4; ++i) {
+      external[i] = pass * 100 + i + 20;
+      expected[i + 17] = static_cast<float>(external[i]);
+    }
+    SYMBOL_CHECK(ascify::cudaMemcpyToSymbol(ascifySymbolArray, source,
+                                            sizeof(source)));
+    SYMBOL_CHECK(ascify::cudaMemcpyToSymbol(ascifySymbolTable, table,
+                                            sizeof(table)));
+    // Host token reference and device definition belong to different TUs.
+    SYMBOL_CHECK(ascify::cudaMemcpyToSymbol(ascifySymbolExternal, external,
+                                            sizeof(external)));
+    const float replacement[2] = {123.0f + pass, 124.0f + pass};
+    const unsigned table_replacement = 251 + pass;
+    SYMBOL_CHECK(ascify::cudaMemcpyToSymbol(ascifySymbolArray, replacement,
+                                            sizeof(replacement),
+                                            2 * sizeof(float)));
+    SYMBOL_CHECK(ascify::cudaMemcpyToSymbol(ascifySymbolTable, &table_replacement,
+                                            sizeof(table_replacement),
+                                            5 * sizeof(unsigned)));
+    expected[3] = replacement[0];
+    expected[4] = replacement[1];
+    expected[14] = static_cast<float>(table_replacement);
+
+    const float device_replacement = 375.0f + pass;
+    float *device_source = nullptr;
+    SYMBOL_CHECK(ascify::cudaMalloc(&device_source, sizeof(device_replacement)));
+    SYMBOL_CHECK(ascify::cudaMemcpy(device_source, &device_replacement,
+                                    sizeof(device_replacement),
+                                    ACL_MEMCPY_HOST_TO_DEVICE));
+    SYMBOL_CHECK(ascify::cudaMemcpyToSymbol(ascifySymbolArray, device_source,
+                                            sizeof(device_replacement),
+                                            7 * sizeof(float),
+                                            ACL_MEMCPY_DEVICE_TO_DEVICE));
+    SYMBOL_CHECK(ascify::cudaFree(device_source));
+    expected[8] = device_replacement;
+
+    const aclError invalid_range = ascify::cudaMemcpyToSymbol(
+        ascifySymbolArray, source, 2, std::numeric_limits<std::size_t>::max());
+    if (invalid_range != ACL_ERROR_RT_PARAM_INVALID) {
+      std::fprintf(stderr, "symbol invalid range unexpectedly returned %d\n",
+                   static_cast<int>(invalid_range));
+      return 1;
+    }
+
+    float actual[22];
+    for (auto &x : actual) x = -919.0f;
+    float *output = nullptr;
+    SYMBOL_CHECK(ascify::cudaMalloc(&output, sizeof(actual)));
+    SYMBOL_CHECK(ascify::cudaMemcpy(output, actual, sizeof(actual),
+                                    ACL_MEMCPY_HOST_TO_DEVICE));
+    ascifySymbolReadLocal<<<dim3(1), dim3(8), 0, nullptr>>>(output + 1);
+    ascifySymbolLaunchExternal(output + 17);
+    SYMBOL_CHECK(ascify::cudaDeviceSynchronize());
+    SYMBOL_CHECK(ascify::cudaMemcpy(actual, output, sizeof(actual),
+                                    ACL_MEMCPY_DEVICE_TO_HOST));
+    for (unsigned i = 0; i < 22; ++i) {
+      if (actual[i] != expected[i]) {
+        std::fprintf(stderr, "symbol pass=%u index=%u actual=%g expected=%g\n",
+                     pass, i, actual[i], expected[i]);
+        return 1;
+      }
+    }
+    SYMBOL_CHECK(ascify::cudaFree(output));
+    SYMBOL_CHECK(ascify::cudaDeviceReset());
+    std::printf("synthetic symbol DT pass=%u array=8 static-table=8 "
+                "cross-TU=4 guards=2 partial-copy=passed D2D=passed reset=passed\n", pass);
+  }
+  return 0;
+}
+
+#undef SYMBOL_CHECK

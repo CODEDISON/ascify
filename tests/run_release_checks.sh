@@ -26,6 +26,12 @@ run_check "canonical reducer static contract" \
   sh "$rewrite_dir/check_canonical_reducer_rewrite.sh"
 run_check "SIMT compatibility static contract" \
   sh "$rewrite_dir/check_simt_compat.sh"
+run_check "partial device properties and warp vote contracts" \
+  sh "$rewrite_dir/check_device_properties.sh"
+run_check "registered symbol copy argument and error contracts" \
+  bash "$rewrite_dir/check_symbol_compat.sh"
+run_check "host float max semantic admission" \
+  "$python" -B tests/frontend_compat/check_frontend_host_math.py
 run_check "target ABI compatibility static contract" \
   sh "$rewrite_dir/check_target_abi_compat.sh"
 run_check "NVIDIA sample-helper compatibility contract" \
@@ -106,6 +112,10 @@ run_check "real Ascify NVIDIA sample-helper frontend closure" \
 
 run_check "real ascify local-header publication negatives" \
   sh "$rewrite_dir/check_local_header_integration.sh"
+run_check "half2 syntax and separate rounding conversion" \
+  sh "$rewrite_dir/check_half2_translation.sh"
+run_check "inherited parent helper conversion boundary" \
+  "$python" -B "$rewrite_dir/check_inherited_sample_helper_context.py"
 
 translate_fixture() {
   input=$1

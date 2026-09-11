@@ -1,18 +1,14 @@
-#include <ascify/cooperative_groups_compat.hpp>
+#include <cooperative_groups.h>
 
-namespace cg = ascify_cg;
-
-int main() {
-  const cg::thread_block block = cg::this_thread_block();
-  cg::sync(block);
-  const auto tile = cg::tiled_partition<32>(block);
+unsigned int TileRegisterOperations(cooperative_groups::thread_block block,
+                                    unsigned int input) {
+  const auto tile = cooperative_groups::tiled_partition<32>(block);
   static_assert(std::is_same<decltype(tile.thread_rank()), unsigned int>::value);
   static_assert(std::is_same<decltype(tile.size()), unsigned int>::value);
   static_assert(std::is_same<decltype(tile.meta_group_rank()), unsigned int>::value);
   static_assert(decltype(tile)::size() == 32);
   (void)decltype(tile)::thread_rank();
   (void)decltype(tile)::meta_group_rank();
-  (void)tile.shfl_up(1U, 1);
-  (void)tile.shfl_xor(2U, 1);
-  return 0;
+  return tile.shfl_up(input, 1) + tile.shfl_xor(input, 2) +
+         tile.thread_rank() + tile.meta_group_rank() + tile.size();
 }

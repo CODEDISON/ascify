@@ -926,7 +926,9 @@ bool ascifySourceWithLocalHeaderClosure(
                             false, &headerContext);
     if (!ok || plan.failed()) {
       plan.markFailed(index, "local-header translation failed: " +
-                                 node.sourcePath);
+                                 node.sourcePath +
+                                 " (standalone header parse; parent "
+                                 "macro/declaration context is not replayed)");
       break;
     }
     plan.markStaged(index);

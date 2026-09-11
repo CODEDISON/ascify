@@ -7,6 +7,7 @@ profile_root="$repo_root/frontend_compat/ascify-admitted-v1"
 manifest="$profile_root/profile.manifest"
 header="$profile_root/cooperative_groups.h"
 poison="$profile_root/cooperative_groups/reduce.h"
+host_math="$profile_root/host_math.h"
 
 search_fixed() {
   needle=$1
@@ -54,8 +55,8 @@ require_fixed 'thread_block this_thread_block();' "$header"
 require_fixed 'inline void sync(const thread_block& group)' "$header"
 require_fixed 'group.sync();' "$header"
 for forbidden in \
-  'template' 'coalesced_group' 'thread_block_tile' 'reduce' 'ballot' \
-  'shfl' '__shared__' 'dynamic_shared' 'nv/target'; do
+  'coalesced_group' 'reduce' 'ballot' \
+  '__shared__' 'dynamic_shared' 'nv/target'; do
   forbid_fixed "$forbidden" "$header"
 done
 require_fixed \
@@ -63,13 +64,16 @@ require_fixed \
 require_fixed 'schema=ascify.frontend-compat-profile.v1' "$manifest"
 require_fixed 'profile=ascify-admitted-v1' "$manifest"
 require_fixed \
-  'file=cooperative_groups.h;bytes=702;sha256=2f494aad929396ac870a469c58b783da183d99de2a965fb22e190bae91414657' \
+  'file=cooperative_groups.h;bytes=2291;sha256=1d490bd085dbd3e339742854773ef57e73049f7d1ee2d83d02c573a3709366c4' \
   "$manifest"
 require_fixed \
   'file=cooperative_groups/reduce.h;bytes=101;sha256=75adbe65aeb5c2acfd63c9896376e67d270198e566080b9260a219ab99e2de8a' \
   "$manifest"
+require_fixed \
+  'file=host_math.h;bytes=900;sha256=fe115c0ee5be69d87f09e53b5a0f9f7649b468c1ceaf03fdb9df993052a5076c' \
+  "$manifest"
 if [ "$(sha256_file "$header")" != \
-    '2f494aad929396ac870a469c58b783da183d99de2a965fb22e190bae91414657' ]; then
+    '1d490bd085dbd3e339742854773ef57e73049f7d1ee2d83d02c573a3709366c4' ]; then
   echo "frontend admission header SHA-256 mismatch" >&2
   exit 1
 fi
@@ -78,11 +82,17 @@ if [ "$(sha256_file "$poison")" != \
   echo "frontend reduction poison SHA-256 mismatch" >&2
   exit 1
 fi
+if [ "$(sha256_file "$host_math")" != \
+    'fe115c0ee5be69d87f09e53b5a0f9f7649b468c1ceaf03fdb9df993052a5076c' ]; then
+  echo "frontend host math header SHA-256 mismatch" >&2
+  exit 1
+fi
 
 profile_files=$(find "$profile_root" -type f -print | LC_ALL=C sort)
 expected_files=$(printf '%s\n' \
   "$header" \
   "$poison" \
+  "$host_math" \
   "$manifest" | LC_ALL=C sort)
 if [ "$profile_files" != "$expected_files" ]; then
   echo "frontend compatibility profile contains an unmanifested file" >&2
@@ -137,6 +147,18 @@ trap cleanup 0 1 2 15
 
 "$cxx" -std=c++17 -fsyntax-only -I"$profile_root" \
   "$test_root/block_sync_positive.cpp"
+
+"$cxx" -std=c++17 -fsyntax-only -I"$profile_root" \
+  "$test_root/tile32_positive.cpp"
+for reject_case in 1 2 3 4 5 6; do
+  if "$cxx" -std=c++17 -fsyntax-only -I"$profile_root" \
+      -DASCIFY_TILE_REJECT_CASE="$reject_case" \
+      "$test_root/tile32_reject.cpp" \
+      >"$test_tmp/tile-$reject_case.stdout" 2>"$test_tmp/tile-$reject_case.stderr"; then
+    echo "unsupported tile operation $reject_case compiled unexpectedly" >&2
+    exit 1
+  fi
+done
 
 for negative in generic_sync_reject tile_name_reject; do
   if "$cxx" -std=c++17 -fsyntax-only -I"$profile_root" \

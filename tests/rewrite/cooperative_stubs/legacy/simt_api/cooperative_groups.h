@@ -7,16 +7,23 @@ namespace cooperative_groups {
 
 struct thread_block {
   void sync() const {}
+  static unsigned int thread_rank();
 };
 
 struct coalesced_group {
   void sync() const {}
 };
 
-template <unsigned int Size>
+template <unsigned int Size, typename ParentT = void>
 struct thread_block_tile {
   void sync() const {}
+  static unsigned long long thread_rank();
+  template <typename T> T shfl_up(T, unsigned int) const;
+  template <typename T> T shfl_xor(T, unsigned int) const;
 };
+
+template <unsigned int Size>
+thread_block_tile<Size, thread_block> tiled_partition(const thread_block&);
 
 inline thread_block this_thread_block() { return {}; }
 

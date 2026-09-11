@@ -1,0 +1,19 @@
+#include <simt_api/device_functions.h>
+#include <simt_api/asc_fp16.h>
+
+// Compile with the installed CANN compiler. No launch or host fallback.
+__global__ void half2_native_surface_probe(half2* out, const half2* in) {
+  half2 initialized = make_half2(0.0f, 0.0f);
+  half2 x = in[0];
+  half2 y = in[1];
+  out[0] = __haddx2(x, y);
+  out[1] = __hmulx2(x, y);
+  out[2] = __hfmax2(x, y, initialized);
+  out[3] = x * y + initialized;
+  out[4] = __floats2half2_rn(__low2float(x), __high2float(y));
+}
+
+void half2_host_initialization_probe(half2* out, float x, float y) {
+  out[0].x = x;
+  out[0].y = y;
+}

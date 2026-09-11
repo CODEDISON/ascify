@@ -24,6 +24,7 @@ THE SOFTWARE.
 
 // Maps CUDA header names to DPP header names
 const std::map <llvm::StringRef, dppCounter> CUDA_INCLUDE_MAP {
+  {"cuda_fp16.h", {"ascify/half2_compat.hpp", CONV_INCLUDE_CUDA_MAIN_H, API_RUNTIME, 0}},
   // CUDA includes -> Ascend ACL headers
   // Verified against CANN 9.0.0: acl_runtime.h does not exist; use acl/acl.h
   {"cuda.h",                                                {"acl/acl.h",                                                                                                  CONV_INCLUDE_CUDA_MAIN_H,    API_DRIVER, 0}},

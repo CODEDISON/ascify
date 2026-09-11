@@ -937,6 +937,48 @@ inline aclError cudaDeviceGetAttribute(int* value, aclrtDevAttr attribute, int d
   return status;
 }
 
+// A deliberately partial property surface. CUDA SM versions and CUDA core
+// counts have no portable meaning on an NPU; code reading those fields must
+// fail target compilation instead of receiving invented NVIDIA capabilities.
+struct cudaDeviceProp {
+  char name[256];
+  int multiProcessorCount;
+};
+
+inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) {
+  if (properties == nullptr || device < 0) {
+    return ACL_ERROR_RT_PARAM_INVALID;
+  }
+  const aclError initialized = detail::runtime_manager.ensureInitialized();
+  if (initialized != ACL_SUCCESS) {
+    return detail::rememberLifecycleError(initialized);
+  }
+  // GetSocName describes the bound device. Never silently return the current
+  // device's name for a different requested device, or rebind the caller.
+  int32_t current = -1;
+  aclError status = aclrtGetDevice(&current);
+  if (status != ACL_SUCCESS) { return status; }
+  if (current != device) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  int64_t cores = 0;
+  status = aclrtGetDeviceInfo(static_cast<uint32_t>(device),
+                            ACL_DEV_ATTR_VECTOR_CORE_NUM, &cores);
+  if (status != ACL_SUCCESS) { return status; }
+  if (cores <= 0 || cores > INT_MAX) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  const char* const soc_name = aclrtGetSocName();
+  if (soc_name == nullptr || soc_name[0] == '\0') {
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  }
+  cudaDeviceProp result = {};
+  size_t index = 0;
+  while (index + 1 < sizeof(result.name) && soc_name[index] != '\0') {
+    result.name[index] = soc_name[index];
+    ++index;
+  }
+  result.multiProcessorCount = static_cast<int>(cores);
+  *properties = result;
+  return ACL_SUCCESS;
+}
+
 // CUDA's API has no arguments. CANN requires the error scope explicitly.
 inline aclError cudaPeekAtLastError() {
   const aclError pending = detail::pendingLifecycleErrorForThread();
@@ -1023,6 +1065,16 @@ __aicore__ ASCIFY_FORCEINLINE void syncwarp(uint32_t mask = UINT32_MAX) {
   // Both target families execute a warp in lockstep and expose no warp-only
   // barrier. A full-warp synchronization is a no-op; a partial mask is not.
   detail::requireFullWarpMask(mask);
+}
+
+__aicore__ ASCIFY_FORCEINLINE int any_sync(uint32_t mask, int predicate) {
+  detail::requireFullWarpMask(mask);
+  return warp_reduce_max(int32_t{predicate != 0});
+}
+
+__aicore__ ASCIFY_FORCEINLINE int all_sync(uint32_t mask, int predicate) {
+  detail::requireFullWarpMask(mask);
+  return warp_reduce_min(int32_t{predicate != 0});
 }
 
 template<typename T>
@@ -1137,5 +1189,7 @@ __aicore__ ASCIFY_FORCEINLINE void threadfence_system() {
 }
 
 }  // namespace ascify
+
+#include "symbol_compat.hpp"
 
 #endif  // ASCIFY_ASCIFY_CUDA_COMPAT_HPP
