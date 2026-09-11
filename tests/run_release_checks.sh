@@ -30,6 +30,8 @@ run_check "partial device properties and warp vote contracts" \
   sh "$rewrite_dir/check_device_properties.sh"
 run_check "registered symbol copy argument and error contracts" \
   bash "$rewrite_dir/check_symbol_compat.sh"
+run_check "half2 parser ADL and dependent builtin lookup" \
+  "$python" -B tests/rewrite/check_half2_parse_lookup.py
 run_check "host float max semantic admission" \
   "$python" -B tests/frontend_compat/check_frontend_host_math.py
 run_check "target ABI compatibility static contract" \

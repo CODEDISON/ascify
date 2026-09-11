@@ -23,6 +23,13 @@ multiply and add retain separate half rounding through explicit intrinsics;
 unsupported macro, side-effect, or template contexts must not be rewritten
 into a different computation. Parsing declarations are not arithmetic
 implementations and must never enter a device numerical test as substitutes.
+The phase-one FP16 parser profile declares infix half2 add/multiply as hidden
+friends. Concrete half2 expressions resolve them through ADL; unrelated
+dependent arithmetic keeps builtin AST operators rather than acquiring global
+half2 overload candidates. Explicit globally qualified operator lookup remains
+outside this parser profile. This isolates a parsing precondition and does not
+change the performance recipe or arithmetic implementation. The AST regression
+checks both legitimate ADL and a global-redeclaration negative control.
 
 The device-property adapter exposes the current device's real SoC name and
 vector-core count. It has no `major`, `minor`, or CUDA core-count emulation.

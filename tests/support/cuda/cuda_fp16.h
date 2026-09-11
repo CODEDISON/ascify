@@ -22,12 +22,14 @@ struct alignas(4) half2 {
   half y;
   ASCIFY_PARSE_HALF_HD half2() = default;
   ASCIFY_PARSE_HALF_HD half2(half, half);
+  // Infix half2 arithmetic uses ADL. Keep these declarations out of ordinary
+  // lookup so unrelated dependent float templates retain builtin operators.
+  friend ASCIFY_PARSE_HALF_HD half2 operator+(half2, half2);
+  friend ASCIFY_PARSE_HALF_HD half2 operator*(half2, half2);
 };
 
 using __half2 = half2;
 
-ASCIFY_PARSE_HALF_HD half2 operator+(half2, half2);
-ASCIFY_PARSE_HALF_HD half2 operator*(half2, half2);
 ASCIFY_PARSE_HALF_HD half2 __hadd2(half2, half2);
 ASCIFY_PARSE_HALF_HD half2 __hmul2(half2, half2);
 ASCIFY_PARSE_HALF_HD half2 __hfma2(half2, half2, half2);
