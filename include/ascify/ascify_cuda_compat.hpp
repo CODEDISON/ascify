@@ -342,9 +342,9 @@ class RuntimeManager {
     // ordinary destructor is registered before aclInit creates CANN's own
     // process-exit state. Running ACL teardown from that late destructor can
     // therefore observe already-destroyed CANN internals. Register a dedicated
-    // callback only after aclInit returns: process-exit LIFO order then runs
-    // this cleanup before CANN teardown, and the ordinary destructor becomes
-    // an idempotent no-op.
+    // callback after aclInit for initialization-only paths. Device binding
+    // can construct additional SDK exit state; bindDevice registers a later
+    // callback after that operation. Both callbacks are idempotent.
     exit_cleanup_manager_ = this;
     if (registerExitCleanup(&RuntimeManager::runExitCleanup) == 0) {
       cleanup_registered_ = true;
@@ -366,7 +366,34 @@ class RuntimeManager {
 
     RuntimeLockGuard guard(lock_);
     if (shutdown_) { return ACL_ERROR_REPEAT_FINALIZE; }
+    if (initialization_status_ != ACL_SUCCESS) {
+      return initialization_status_;
+    }
     const aclError status = aclrtSetDevice(device);
+    if (!device_cleanup_registered_) {
+      // CANN's profiling singleton can be constructed lazily by SetDevice,
+      // after our aclInit callback was registered. Register after the call so
+      // LIFO teardown resets devices before that singleton is destroyed.
+      // A failed attempt can also construct partial SDK state: protect it,
+      // but do not assume that the next successful attempt creates no more.
+      if (registerExitCleanup(&RuntimeManager::runExitCleanup) == 0) {
+        device_cleanup_registered_ = status == ACL_SUCCESS;
+      } else {
+        // Before the first successful registration no binding is tracked.
+        // Roll back now, while SDK state is live, and cache the failure. The
+        // older callback must not retry ACL teardown after SDK destruction.
+        const aclError reset =
+            status == ACL_SUCCESS ? aclrtResetDevice(device) : ACL_SUCCESS;
+        const bool finalize = owns_acl_initialization_;
+        owns_acl_initialization_ = false;
+        const aclError rollback = finalize ? aclFinalize() : ACL_SUCCESS;
+        initialization_status_ =
+            reset != ACL_SUCCESS ? reset :
+            rollback != ACL_SUCCESS ? rollback :
+            status != ACL_SUCCESS ? status : ACL_ERROR_BAD_ALLOC;
+        return initialization_status_;
+      }
+    }
     if (status != ACL_SUCCESS) { return status; }
     for (size_t index = 0; index < active_device_count_; ++index) {
       if (active_devices_[index] == device) { return ACL_SUCCESS; }
@@ -389,6 +416,9 @@ class RuntimeManager {
 
     RuntimeLockGuard guard(lock_);
     if (shutdown_) { return ACL_ERROR_REPEAT_FINALIZE; }
+    if (initialization_status_ != ACL_SUCCESS) {
+      return initialization_status_;
+    }
     const aclError status = aclrtResetDevice(device);
     if (status == ACL_SUCCESS) {
       for (size_t index = 0; index < active_device_count_; ++index) {
@@ -452,6 +482,7 @@ class RuntimeManager {
   bool owns_acl_initialization_ = false;
   bool shutdown_ = false;
   bool cleanup_registered_ = false;
+  bool device_cleanup_registered_ = false;
   aclError initialization_status_ = ACL_SUCCESS;
   int32_t active_devices_[kTrackedDeviceCapacity] = {};
   size_t active_device_count_ = 0;

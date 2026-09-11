@@ -3,6 +3,7 @@
 - Status: Accepted; clean build, translated fixtures and target regression are release gates
 - Date: 2026-08-24
 - Scope: CUDA-shaped runtime lifecycle implemented by the installed ACL compatibility layer
+- Callback ordering is superseded by [ADR-0024](0024-order-cleanup-after-lazy-device-initialization.md); the ownership and binding contracts below remain in effect.
 
 ## Context
 

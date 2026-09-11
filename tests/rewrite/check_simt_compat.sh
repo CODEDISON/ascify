@@ -339,6 +339,14 @@ if command -v "$cxx" >/dev/null 2>&1; then
   "$test_tmp/runtime-lifecycle" registration-failure-owned
   "$test_tmp/runtime-lifecycle" registration-failure-borrowed
   "$test_tmp/runtime-lifecycle" registration-rollback-error
+  for lifecycle_case in \
+    late-registration-owned late-registration-borrowed \
+    late-registration-reset-error late-registration-finalize-error \
+    late-registration-bind-error \
+    exit-order-owned exit-order-borrowed exit-order-init-only \
+    exit-order-failed-bind exit-order-retry exit-order-late-failure; do
+    "$test_tmp/runtime-lifecycle" "$lifecycle_case"
+  done
 
   "$cxx" -std=c++17 \
     -I"$repo_root/tests/rewrite/stubs" \

@@ -78,8 +78,14 @@ extern int ascify_test_record_event_calls;
 extern aclrtStream ascify_test_default_stream;
 extern aclrtStream ascify_test_recorded_event_stream;
 extern int32_t ascify_test_reset_devices[80];
+#ifdef ASCIFY_TEST_ACL_LIFECYCLE_EXIT_ORDER
+extern void ascify_test_lifecycle_operation(const char* operation);
+#endif
 
 inline aclError aclInit(const char*) {
+#ifdef ASCIFY_TEST_ACL_LIFECYCLE_EXIT_ORDER
+  ascify_test_lifecycle_operation("init");
+#endif
   ++ascify_test_init_calls;
   if (ascify_test_init_status == ACL_SUCCESS) {
     ascify_test_acl_initialized = true;
@@ -88,6 +94,9 @@ inline aclError aclInit(const char*) {
 }
 
 inline aclError aclFinalize() {
+#ifdef ASCIFY_TEST_ACL_LIFECYCLE_EXIT_ORDER
+  ascify_test_lifecycle_operation("finalize");
+#endif
   ++ascify_test_finalize_calls;
   if (ascify_test_finalize_status == ACL_SUCCESS) {
     ascify_test_acl_initialized = false;
@@ -96,6 +105,9 @@ inline aclError aclFinalize() {
 }
 
 inline aclError aclrtSetDevice(int32_t device) {
+#ifdef ASCIFY_TEST_ACL_LIFECYCLE_EXIT_ORDER
+  ascify_test_lifecycle_operation("set");
+#endif
   ++ascify_test_set_device_calls;
   if (!ascify_test_acl_initialized) { return ACL_ERROR_RT_CONTEXT_NULL; }
   if (ascify_test_set_device_status == ACL_SUCCESS) {
@@ -113,6 +125,9 @@ inline aclError aclrtGetDevice(int32_t* device) {
 }
 
 inline aclError aclrtResetDevice(int32_t device) {
+#ifdef ASCIFY_TEST_ACL_LIFECYCLE_EXIT_ORDER
+  ascify_test_lifecycle_operation("reset");
+#endif
   const int call = ascify_test_reset_device_calls++;
   if (call < 80) { ascify_test_reset_devices[call] = device; }
   if (ascify_test_reset_device_status == ACL_SUCCESS &&
