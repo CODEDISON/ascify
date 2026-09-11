@@ -29,6 +29,9 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   std::map<llvm::StringRef,  dppCounter> m;
   m["cudaMemcpyToSymbol"] = {"ascify::cudaMemcpyToSymbol", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["cudaGetDeviceProperties"] = {"ascify::cudaGetDeviceProperties", CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
+  // The admitted CUDA SDK aliases the public spelling to this exact symbol.
+  // Do not normalize arbitrary version suffixes.
+  m["cudaGetDeviceProperties_v2"] = {"ascify::cudaGetDeviceProperties", CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
   // Memory management
   // CUDA and ACL memory APIs differ in allocation policy, destination bounds,
   // and async argument order.  Preserve CUDA call shapes and adapt them in the

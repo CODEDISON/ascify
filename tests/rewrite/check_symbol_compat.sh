@@ -4,7 +4,7 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 test_tmp=$(mktemp -d "${TMPDIR:-/tmp}/ascify-symbol-test.XXXXXX")
 trap 'rm -rf "$test_tmp"' EXIT
 cxx=${CXX:-c++}
-args=(-std=c++17 -Wall -Wextra -Werror -I"$repo_root/tests/rewrite/symbol_stubs" -I"$repo_root/include")
+args=(-std=c++17 -Wall -Wextra -Werror -Werror=return-type -I"$repo_root/tests/rewrite/symbol_stubs" -I"$repo_root/include")
 "$cxx" "${args[@]}" "$repo_root/tests/rewrite/symbol_compat_test.cpp" -o "$test_tmp/contracts"
 "$test_tmp/contracts"
 
@@ -20,6 +20,8 @@ int check(float &symbol) {
 #endif
 int main() { return 0; }
 EOF
+# GCC checks the non-void template body before its dependent assertion can
+# reject an instantiation. Including an unused adapter must still be valid.
 "$cxx" "${args[@]}" -fsyntax-only "$test_tmp/old-sdk.cpp"
 if "$cxx" "${args[@]}" -DINVOKE_SYMBOL_COPY -fsyntax-only "$test_tmp/old-sdk.cpp" > "$test_tmp/old-sdk.log" 2>&1; then
   echo 'error: unadmitted SDK unexpectedly accepted a symbol copy' >&2

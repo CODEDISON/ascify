@@ -56,6 +56,7 @@ inline aclError cudaMemcpyToSymbol(
   static_assert(!std::is_same<T, T>::value,
                 "Ascify symbol copies require the admitted CANN 9.1 "
                 "legacy SIMT / ACL 1.17 symbol API");
+  __builtin_unreachable();
 #endif
 }
 

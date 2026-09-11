@@ -506,8 +506,19 @@ require_fixed 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaGetDevicePrope
 require_fixed 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaMemcpyToSymbol' \
   "$test_tmp/new-runtime-status.cpp"
 forbid_fixed 'helper_cuda.h' "$test_tmp/new-runtime-status.cpp"
-require_fixed 'check_rewrites=2' "$test_tmp/new-runtime-status.stderr"
+require_fixed 'check_rewrites=3' "$test_tmp/new-runtime-status.stderr"
 require_fixed 'include removed' "$test_tmp/new-runtime-status.stderr"
+
+forbid_fixed 'cudaGetDeviceProperties_v2' "$test_tmp/new-runtime-status.cpp"
+translate "$fixtures/sample_helper_runtime_status_v2_user_redeclaration.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/runtime-status-v2-redecl.cpp" "$test_tmp/runtime-status-v2-redecl"
+require_fixed '#include <helper_cuda.h>' "$test_tmp/runtime-status-v2-redecl.cpp"
+forbid_fixed 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(' \
+  "$test_tmp/runtime-status-v2-redecl.cpp"
+require_fixed 'status domain not proven' "$test_tmp/runtime-status-v2-redecl.stderr"
+require_fixed 'include kept' "$test_tmp/runtime-status-v2-redecl.stderr"
+
 
 # GCC standard headers use fixed visibility pragmas; CUDA's builtin headers
 # also use a semicolon after literal push/pop_macro. Admit these forms without

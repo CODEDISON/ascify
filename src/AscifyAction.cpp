@@ -778,7 +778,8 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaMemset", "cudaMemsetAsync", "cudaMallocHost",
       "cudaFreeHost", "cudaGetDevice", "cudaSetDevice",
       "cudaGetDeviceCount", "cudaDeviceGetAttribute",
-      "cudaGetDeviceProperties", "cudaMemcpyToSymbol",
+      "cudaGetDeviceProperties", "cudaGetDeviceProperties_v2",
+      "cudaMemcpyToSymbol",
       "cudaDeviceSynchronize", "cudaDeviceReset",
       "cudaFuncGetAttributes", "cudaFuncSetAttribute",
       "cudaStreamCreate", "cudaStreamCreateWithFlags",
@@ -1358,6 +1359,7 @@ static bool requiresCudaCompatHeader(llvm::StringRef name) {
          name == "cudaDeviceGetAttribute" ||
          name == "cudaDeviceProp" ||
          name == "cudaGetDeviceProperties" ||
+         name == "cudaGetDeviceProperties_v2" ||
          name == "__any_sync" ||
          name == "__all_sync" ||
          name == "cudaStreamCreate" ||

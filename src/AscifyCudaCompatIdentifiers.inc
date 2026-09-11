@@ -62,6 +62,7 @@
     "__aicore__",
     "__attribute__",
     "__builtin_trap",
+    "__builtin_unreachable",
     "__global__",
     "__gm__",
     "__has_include",
