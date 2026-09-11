@@ -11,7 +11,9 @@ The opt-in frontend profile admits host `max(float, float)` with CUDA's
 `fmaxf` semantics, exact host `min(int, int)`, and the verified register
 operations of a 32-thread tile.
 Host double/mixed-type max, tile synchronization, other tile sizes, and the
-unimplemented cooperative reduction header remain outside this admission.
+cooperative reduction header were outside the initial admission.
+ADR 0023 extends this boundary with authenticated single-warp reduction and
+explicitly delimited already-converged masks.
 Target tile adapters preserve source return types instead of exposing a
 wider native type that would change overload resolution. A `uint4` shuffle
 performs four independent native 32-bit register transfers, preserving every

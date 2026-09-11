@@ -20,7 +20,6 @@ constexpr char kAdmissionHeader[] = R"ASCIFY(#ifndef ASCIFY_FRONTEND_COMPAT_ADMI
 #define ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_COOPERATIVE_GROUPS_H_
 
 #include <type_traits>
-
 struct uint4;
 
 #if defined(__CUDACC__) || defined(__CUDA__)
@@ -30,67 +29,100 @@ struct uint4;
 #endif
 
 namespace cooperative_groups {
-
 class thread_block {
  public:
-  ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static void sync();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int thread_rank();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int size();
 };
-
 ASCIFY_FRONTEND_COMPAT_DEVICE_ thread_block this_thread_block();
-
 ASCIFY_FRONTEND_COMPAT_DEVICE_ inline void sync(const thread_block& group) {
   group.sync();
 }
 
-// Only the full-warp, register-only tile surface verified against CANN 9.1.
-// Tile synchronization is deliberately absent: the native tile sync is only
-// a block memory fence, which is not proof of CUDA's collective barrier.
-template <unsigned int Size, typename ParentT = void>
-class thread_block_tile {
-  static_assert(Size == 32, "Ascify admits only full-warp tile size 32");
-  static_assert(std::is_same<ParentT, thread_block>::value,
-                "Ascify admits only tiles partitioned from a thread block");
-  ASCIFY_FRONTEND_COMPAT_DEVICE_ thread_block_tile();
-
+template <unsigned int Size, typename ParentT = void> class thread_block_tile;
+namespace ascify_detail {
+// Register collectives only. A native tile fence is not a collective barrier.
+template <unsigned int Size> class tile_register_operations {
+  static_assert(Size == 32, "Ascify admits only full-warp tile size 32; multi-warp subgroup synchronization is not implemented");
+ protected:
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ tile_register_operations();
  public:
   ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int thread_rank();
   ASCIFY_FRONTEND_COMPAT_DEVICE_ static constexpr unsigned int size() { return Size; }
-  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int meta_group_rank();
-
-  template <typename T>
-  ASCIFY_FRONTEND_COMPAT_DEVICE_
+  template <typename T> ASCIFY_FRONTEND_COMPAT_DEVICE_
   typename std::enable_if<std::is_same<T, int>::value ||
-                              std::is_same<T, unsigned int>::value ||
-                              std::is_same<T, float>::value, T>::type
+      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
   shfl_up(T value, unsigned int delta) const;
-
-  template <typename T>
-  ASCIFY_FRONTEND_COMPAT_DEVICE_
+  template <typename T> ASCIFY_FRONTEND_COMPAT_DEVICE_
   typename std::enable_if<std::is_same<T, int>::value ||
-                              std::is_same<T, unsigned int>::value ||
-                              std::is_same<T, float>::value, T>::type
+      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
+  shfl(T value, int source_rank) const;
+  template <typename T> ASCIFY_FRONTEND_COMPAT_DEVICE_
+  typename std::enable_if<std::is_same<T, int>::value ||
+      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
+  shfl_down(T value, unsigned int delta) const;
+  template <typename T> ASCIFY_FRONTEND_COMPAT_DEVICE_
+  typename std::enable_if<std::is_same<T, int>::value ||
+      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value ||
+      std::is_same<T, uint4>::value, T>::type
   shfl_xor(T value, unsigned int lane_mask) const;
+};
+}  // namespace ascify_detail
 
-  template <typename T>
-  ASCIFY_FRONTEND_COMPAT_DEVICE_
-  typename std::enable_if<std::is_same<T, uint4>::value, T>::type
-  shfl_xor(T value, unsigned int lane_mask) const;
+template <unsigned int Size, typename ParentT>
+class thread_block_tile : public ascify_detail::tile_register_operations<Size> {
+  static_assert(std::is_same<ParentT, thread_block>::value,
+                "Ascify admits only tiles partitioned from a thread block");
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ thread_block_tile();
+ public:
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ operator thread_block_tile<Size, void>() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int meta_group_rank();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int meta_group_size();
+};
+template <unsigned int Size>
+class thread_block_tile<Size, void> : public ascify_detail::tile_register_operations<Size> {
+ public:
+  template <typename ParentT, typename std::enable_if<
+      std::is_same<ParentT, thread_block>::value, int>::type = 0>
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ thread_block_tile(const thread_block_tile<Size, ParentT>&);
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned int meta_group_rank() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned int meta_group_size() const;
 };
 
 template <unsigned int Size>
 ASCIFY_FRONTEND_COMPAT_DEVICE_ thread_block_tile<Size, thread_block>
 tiled_partition(const thread_block& parent);
-
 }  // namespace cooperative_groups
-
 #undef ASCIFY_FRONTEND_COMPAT_DEVICE_
-
-#endif  // ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_COOPERATIVE_GROUPS_H_
+#endif
 )ASCIFY";
 
-constexpr char kReductionPoison[] =
-    "#error \"Ascify frontend compatibility ascify-admitted-v1 does not "
-    "admit cooperative_groups/reduce.h\"\n";
+constexpr char kReductionHeader[] = R"ASCIFY(#ifndef ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_REDUCE_H_
+#define ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_REDUCE_H_
+#include <cooperative_groups.h>
+#if defined(__CUDACC__) || defined(__CUDA__)
+#define ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_ __device__
+#else
+#define ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_
+#endif
+namespace cooperative_groups {
+template <typename T> struct plus {
+  static_assert(std::is_same<T, int>::value || std::is_same<T, float>::value,
+                "Ascify cooperative plus supports only int and float");
+  ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_ T operator()(T left, T right) const;
+};
+// The target implements a register-only all-reduction for a complete tile32.
+// No arbitrary functor, block reduction, or multi-warp scratch is admitted.
+template <unsigned int Size, typename ParentT, typename T>
+ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_
+typename std::enable_if<Size == 32 && (std::is_same<T, int>::value ||
+                                    std::is_same<T, float>::value), T>::type
+reduce(const thread_block_tile<Size, ParentT>& group, T value, plus<T> operation);
+}  // namespace cooperative_groups
+#undef ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_
+#endif
+)ASCIFY";
 
 constexpr char kHostMathHeader[] = R"ASCIFY(#ifndef ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_HOST_MATH_H_
 #define ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_HOST_MATH_H_
@@ -134,17 +166,17 @@ inline int min(A a, B b) {
 constexpr char kProfileManifest[] =
     "schema=ascify.frontend-compat-profile.v1\n"
     "profile=ascify-admitted-v1\n"
-    "file=cooperative_groups.h;bytes=2481;sha256=3e3061687252e956483540e6d9f78364200dc6de07dd7dc5e103a5ae06311a04\n"
-    "file=cooperative_groups/reduce.h;bytes=101;sha256=75adbe65aeb5c2acfd63c9896376e67d270198e566080b9260a219ab99e2de8a\n"
+    "file=cooperative_groups.h;bytes=3657;sha256=721a97aebb2a0638efd47a4fbabb65a8da2f0dc3e29ea89398055bda85b7d86b\n"
+    "file=cooperative_groups/reduce.h;bytes=1165;sha256=d26aa794a4ef51f027893e010522d1dc82c4e0d86daaa3f4bdd2fd0e741d5d74\n"
     "file=host_math.h;bytes=1458;sha256=a151400e55d4f484f8321b5d98384f3585fed01678cda680354cd331a664558d\n";
 
-static_assert(sizeof(kAdmissionHeader) - 1 == 2481,
+static_assert(sizeof(kAdmissionHeader) - 1 == 3657,
               "admission header identity drifted");
-static_assert(sizeof(kReductionPoison) - 1 == 101,
-              "reduction poison identity drifted");
+static_assert(sizeof(kReductionHeader) - 1 == 1165,
+              "reduction header identity drifted");
 static_assert(sizeof(kHostMathHeader) - 1 == 1458,
               "host math header identity drifted");
-static_assert(sizeof(kProfileManifest) - 1 == 392,
+static_assert(sizeof(kProfileManifest) - 1 == 393,
               "frontend profile manifest identity drifted");
 
 struct RequiredProfileFile {
@@ -154,9 +186,9 @@ struct RequiredProfileFile {
 };
 
 constexpr RequiredProfileFile kRequiredProfileFiles[] = {
-    {"profile.manifest", 392, kProfileManifest},
-    {"cooperative_groups.h", 2481, kAdmissionHeader},
-    {"cooperative_groups/reduce.h", 101, kReductionPoison},
+    {"profile.manifest", 393, kProfileManifest},
+    {"cooperative_groups.h", 3657, kAdmissionHeader},
+    {"cooperative_groups/reduce.h", 1165, kReductionHeader},
     {"host_math.h", 1458, kHostMathHeader},
 };
 
@@ -347,6 +379,7 @@ bool ResolveFrontendCompatibilityRoot(
 enum class CooperativeGroupsIncludeKind {
   Other,
   ExactAdmissionHeader,
+  ExactReductionHeader,
   Unadmitted,
 };
 
@@ -356,6 +389,8 @@ CooperativeGroupsIncludeKind classifyCooperativeGroupsInclude(
   std::replace(normalized.begin(), normalized.end(), '\\', '/');
   if (normalized == "cooperative_groups.h")
     return CooperativeGroupsIncludeKind::ExactAdmissionHeader;
+  if (normalized == "cooperative_groups/reduce.h")
+    return CooperativeGroupsIncludeKind::ExactReductionHeader;
   const fs::path path(normalized);
   if (path.filename() == "cooperative_groups.h" ||
       normalized == "cooperative_groups" ||
@@ -429,9 +464,12 @@ bool ValidateFrontendCompatibilityInclude(
             includeSpelling + "'";
     return false;
   }
+  const char* admittedHeader =
+      kind == CooperativeGroupsIncludeKind::ExactReductionHeader
+          ? "cooperative_groups/reduce.h" : "cooperative_groups.h";
   if (resolvedPath.empty()) {
     error = "frontend compatibility profile '" + config.profile +
-            "' could not prove the selected cooperative_groups.h source";
+            "' could not prove the selected " + admittedHeader + " source";
     return false;
   }
 
@@ -439,15 +477,15 @@ bool ValidateFrontendCompatibilityInclude(
   const fs::path actual = fs::canonical(resolvedPath, filesystemError);
   if (filesystemError) {
     error = "frontend compatibility profile '" + config.profile +
-            "' cannot canonicalize selected cooperative_groups.h: " +
+            "' cannot canonicalize selected " + admittedHeader + ": " +
             filesystemError.message();
     return false;
   }
   const fs::path expected =
-      fs::path(config.canonicalRoot) / "cooperative_groups.h";
+      fs::path(config.canonicalRoot) / admittedHeader;
   if (actual != expected) {
     error = "frontend compatibility profile '" + config.profile +
-            "' requires cooperative_groups.h from its verified profile; got " +
+            "' requires " + admittedHeader + " from its verified profile; got " +
             pathString(actual);
     return false;
   }

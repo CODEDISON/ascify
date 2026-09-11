@@ -4,6 +4,13 @@
 
 ### Added
 
+- Single-warp int/float cooperative reductions with typed tile metadata and
+  identical result bits across lanes, plus legacy CANN ballot/down-shuffle
+  adapters for masks that match the currently active lanes. Generic multi-warp
+  synchronization and device FP64 remain explicit boundaries (ADR 0023).
+- Context-preserving conversion of directly included CUDA leaf headers that
+  inherit NVIDIA sample-helper macros, with expanded-token and macro-state
+  checks before joint conversion and transactional publication (ADR 0022).
 - Narrow CUDA Samples adapters for host float max, half2 operations, full-warp
   tile/vote operations, partial device properties, and registered symbol
   copies, with explicit source and target boundaries documented in ADR 0021.

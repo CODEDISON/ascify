@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <regex>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -14,6 +15,9 @@
 
 #include "ArgParse.h"
 #include "LLVMCompat.h"
+#if LLVM_VERSION_MAJOR >= 13
+#include "llvm/Support/SHA256.h"
+#endif
 
 using namespace clang;
 using namespace clang::tooling;
@@ -33,6 +37,33 @@ bool readFile(const std::string &path, std::string &out) {
     return false;
   out = buffer.get()->getBuffer().str();
   return true;
+}
+
+std::string inputSha256(llvm::StringRef contents) {
+#if LLVM_VERSION_MAJOR >= 13
+  llvm::SHA256 digest;
+  digest.update(contents);
+  const auto bytes = digest.final();
+  static const char hex[] = "0123456789abcdef";
+  std::string result;
+  for (const auto byte : bytes) {
+    const unsigned value = static_cast<unsigned char>(byte);
+    result += hex[value >> 4];
+    result += hex[value & 15];
+  }
+  return result;
+#else
+  return {};
+#endif
+}
+
+std::string lineFilename(const std::string &path) {
+  std::string escaped;
+  for (const char c : path) {
+    if (c == '\\' || c == '"') escaped += '\\';
+    escaped += c;
+  }
+  return escaped;
 }
 
 bool existsAndIsRegular(const std::string &path) {
@@ -64,7 +95,23 @@ bool writeManifest(const std::string &path,
     out << "header=" << node.sourcePath << "\t" << node.artifactPath
         << "\n";
   }
-  return true;
+  if (!plan.contextInlines().empty()) {
+    const auto &proof = plan.contextEvidence();
+    out << "context_proof=expanded-tokens-and-final-macros-v1\n";
+    out << "context_tokens_sha256=" << proof.tokenSha256 << "\n";
+    out << "context_macros_sha256=" << proof.macroSha256 << "\n";
+    for (const auto &input : proof.fileSha256)
+      out << "context_input=" << input.first << "\t" << input.second << "\n";
+    for (const auto &edge : proof.originalEdges)
+      out << "context_original_edge=" << edge.parentSourcePath << "\t"
+          << edge.childSourcePath << "\t" << edge.sourceOffset << "\t"
+          << edge.originalSpelling << "\n";
+    for (const auto &item : plan.contextInlines())
+      out << "context_inline=" << item.sourcePath << "\t" << item.sourceSha256
+          << "\t" << item.includeOffset << "\n";
+  }
+  out.close();
+  return !out.has_error();
 }
 
 bool ownedBundle(const std::string &path) {
@@ -516,7 +563,9 @@ LocalHeaderIncludeDecision LocalHeaderClosurePlan::observeInclude(
     const std::string &originalSpelling,
     const std::string &resolvedPath,
     bool isAngled,
-    bool isLiteral) {
+    bool isLiteral,
+    unsigned resumeLine,
+    const std::string &resumeFile) {
   LocalHeaderIncludeDecision decision;
   if (mode_ == LocalHeaderClosureMode::Disabled)
     return decision;
@@ -672,8 +721,41 @@ LocalHeaderIncludeDecision LocalHeaderClosurePlan::observeInclude(
   else
     ++stats_.redirectedHeaderEdges;
   edges_.push_back({canonicalExisting(parentSourcePath), originalSpelling,
-                    canonical, decision.emittedSpelling, sourceOffset});
+                    canonical, decision.emittedSpelling, sourceOffset,
+                    resumeLine, resumeFile});
   return decision;
+}
+
+bool LocalHeaderClosurePlan::isSelectedRootHeader(const std::string &path) const {
+  const auto found = nodeBySource_.find(canonicalExisting(path));
+  return found != nodeBySource_.end() && nodes_[found->second].depth == 1;
+}
+
+void LocalHeaderClosurePlan::requireInheritedHelperContext(const std::string &path) {
+  if (mode_ == LocalHeaderClosureMode::Recursive && isSelectedRootHeader(path))
+    inheritedHelperHeaders_.insert(canonicalExisting(path));
+}
+
+void LocalHeaderClosurePlan::retainContextEvidence(
+    const LocalHeaderInputEvidence &evidence,
+    const std::vector<LocalHeaderContextInline> &inlined) {
+  contextEvidence_ = evidence;
+  contextInlines_ = inlined;
+  for (const auto &file : evidence.fileSha256)
+    dependencySources_.insert(file.first);
+}
+
+bool LocalHeaderClosurePlan::verifyContextInputs() {
+  for (const auto &file : contextEvidence_.fileSha256) {
+    std::string contents;
+    if (canonicalExisting(file.first) != file.first ||
+        !readFile(file.first, contents) || file.second.empty() ||
+        inputSha256(contents) != file.second) {
+      fail("contextual local-header input changed or cannot be verified: " + file.first);
+      return false;
+    }
+  }
+  return !failed_;
 }
 
 bool LocalHeaderClosurePlan::nextDiscovered(std::size_t &index) const {
@@ -886,11 +968,18 @@ bool ascifySourceWithLocalHeaderClosure(
   const fs::path stagedRoot = staging / "root.dpp";
   const fs::path stagedBundle = staging / "headers";
 
+  std::string originalInput;
+  if (recursive && !readFile(plan.rootSourcePath(), originalInput)) {
+    llvm::sys::fs::remove_directories(stagingRoot);
+    return false;
+  }
+  LocalHeaderInputEvidence discoveryEvidence;
   LocalHeaderRewriteContext rootContext;
   rootContext.plan = &plan;
   rootContext.sourcePath = plan.rootSourcePath();
   rootContext.artifactPath = plan.rootArtifactPath();
   rootContext.depth = 0;
+  rootContext.inputEvidence = recursive ? &discoveryEvidence : nullptr;
   bool ok = ascifySingleSource(
       mainSourceAbsPath, pathString(stagedRoot), compDB, OptionsParserPtr,
       ascify_exe, mainSourceAbsPath, false, &rootContext);
@@ -901,6 +990,151 @@ bool ascifySourceWithLocalHeaderClosure(
                  << "\n";
     llvm::sys::fs::remove_directories(stagingRoot);
     return false;
+  }
+
+  // A selected leaf that uses a recognized parent helper cannot be converted
+  // in a fresh standalone frontend. Prove a same-position virtual expansion
+  // instead; neither the discovery output nor a failed joint edit is published.
+  if (recursive && !plan.inheritedHelperHeaders().empty()) {
+    auto contextualize = [&]() -> bool {
+      if (TargetRecipe != "none") {
+        plan.fail("contextual local headers do not admit target recipes");
+        return false;
+      }
+      std::string currentInput;
+      if (!readFile(plan.rootSourcePath(), currentInput) || currentInput != originalInput) {
+        plan.fail("contextual root input changed during discovery");
+        return false;
+      }
+      LocalHeaderClosurePlan originalPlan(mainSourceAbsPath, pathString(finalRoot),
+                                         pathString(finalBundle), LocalHeaderClosureMode::Recursive);
+      LocalHeaderInputEvidence originalEvidence;
+      LocalHeaderRewriteContext originalContext;
+      originalContext.plan = &originalPlan;
+      originalContext.sourcePath = originalPlan.rootSourcePath();
+      originalContext.artifactPath = originalPlan.rootArtifactPath();
+      originalContext.virtualInput = &originalInput;
+      originalContext.inputEvidence = &originalEvidence;
+      if (!ascifySingleSource(mainSourceAbsPath, pathString(stagedRoot), compDB,
+                              OptionsParserPtr, ascify_exe, mainSourceAbsPath, false,
+                              &originalContext) || originalPlan.failed()) {
+        plan.fail("original include-context proof parse failed");
+        return false;
+      }
+      if (originalPlan.inheritedHelperHeaders() != plan.inheritedHelperHeaders()) {
+        plan.fail("inherited-helper include graph changed during discovery");
+        return false;
+      }
+      struct InlineEdit { std::size_t begin, end; std::string text; };
+      std::vector<InlineEdit> edits;
+      std::vector<LocalHeaderContextInline> inlined;
+      for (const auto &path : originalPlan.inheritedHelperHeaders()) {
+        const LocalHeaderEdge *selected = nullptr;
+        unsigned edgeCount = 0;
+        for (const auto &edge : originalEvidence.originalEdges)
+          if (edge.childSourcePath == path) ++edgeCount;
+        for (const auto &edge : originalPlan.edges())
+          if (edge.childSourcePath == path) selected = &edge;
+        if (edgeCount != 1 || selected == nullptr ||
+            selected->parentSourcePath != originalPlan.rootSourcePath() ||
+            originalEvidence.fileEntries[path] != 1) {
+          plan.fail("contextual local header requires one direct include occurrence: " + path);
+          return false;
+        }
+        if (originalEvidence.pragmaFiles.count(path) ||
+            originalEvidence.quotedIncludeParents.count(path)) {
+          plan.fail("contextual local header requires a leaf without pragmas: " + path);
+          return false;
+        }
+        std::string contents;
+        if (!readFile(path, contents) || originalEvidence.fileSha256[path].empty() ||
+            inputSha256(contents) != originalEvidence.fileSha256[path] ||
+            originalEvidence.fileSha256[path] != discoveryEvidence.fileSha256[path]) {
+          plan.fail("contextual local header changed or has no source identity: " + path);
+          return false;
+        }
+        const auto offset = selected->sourceOffset;
+        if (offset >= originalInput.size() || selected->resumeLine == 0 ||
+            selected->resumeFile.find_first_of("\r\n") != std::string::npos ||
+            path.find_first_of("\r\n\t") != std::string::npos ||
+            contents.empty() || contents.back() != '\n') {
+          plan.fail("contextual include has no reproducible source-line boundary: " + path);
+          return false;
+        }
+        const auto previous = originalInput.rfind('\n', offset);
+        const auto begin = previous == std::string::npos ? 0 : previous + 1;
+        const auto newline = originalInput.find('\n', offset);
+        const auto end = newline == std::string::npos ? originalInput.size() : newline + 1;
+        const std::string line = originalInput.substr(begin, end - begin);
+        std::smatch includeMatch;
+        static const std::regex literalLine(
+            R"re(^[ \t]*#[ \t]*include[ \t]+"([^"\r\n]+)"[ \t]*(//[^\r\n]*)?\r?\n?$)re");
+        if (!std::regex_match(line, includeMatch, literalLine) ||
+            includeMatch[1].str() != selected->originalSpelling ||
+            (begin > 1 && originalInput[begin - 2] == '\\')) {
+          plan.fail("contextual include must be a single literal directive line: " + path);
+          return false;
+        }
+        std::string replacement = "#line 1 \"" + lineFilename(path) + "\"\n" + contents;
+        replacement += "#line " + std::to_string(selected->resumeLine) + " \"" +
+                       lineFilename(selected->resumeFile) + "\"\n";
+        edits.push_back({begin, end, std::move(replacement)});
+        inlined.push_back({path, originalEvidence.fileSha256[path], offset});
+      }
+      if (edits.empty()) {
+        plan.fail("contextual local header has no proven inline candidate");
+        return false;
+      }
+      std::sort(edits.begin(), edits.end(), [](const InlineEdit &a, const InlineEdit &b) {
+        return a.begin > b.begin;
+      });
+      std::string flattened = originalInput;
+      for (const auto &edit : edits) flattened.replace(edit.begin, edit.end - edit.begin, edit.text);
+      LocalHeaderClosurePlan jointPlan(mainSourceAbsPath, pathString(finalRoot),
+                                      pathString(finalBundle), LocalHeaderClosureMode::Recursive);
+      LocalHeaderInputEvidence jointEvidence;
+      LocalHeaderRewriteContext jointContext;
+      jointContext.plan = &jointPlan;
+      jointContext.sourcePath = jointPlan.rootSourcePath();
+      jointContext.artifactPath = jointPlan.rootArtifactPath();
+      jointContext.virtualInput = &flattened;
+      jointContext.inputEvidence = &jointEvidence;
+      jointContext.requireHelperTransaction = true;
+      if (!ascifySingleSource(mainSourceAbsPath, pathString(stagedRoot), compDB,
+                              OptionsParserPtr, ascify_exe, mainSourceAbsPath, false,
+                              &jointContext) || jointPlan.failed() ||
+          !jointContext.helperTransactionCommitted) {
+        plan.fail("contextual joint helper transaction could not be proven");
+        return false;
+      }
+      if (originalEvidence.tokenSha256.empty() || originalEvidence.macroSha256.empty() ||
+          originalEvidence.tokenSha256 != jointEvidence.tokenSha256 ||
+          originalEvidence.macroSha256 != jointEvidence.macroSha256) {
+        plan.fail("contextual local-header expanded tokens or final macro state differ");
+        return false;
+      }
+      for (const auto &file : jointEvidence.fileSha256) {
+        if (!originalEvidence.fileSha256.count(file.first) ||
+            originalEvidence.fileSha256.at(file.first) != file.second) {
+          plan.fail("contextual expansion changed a dependency input: " + file.first);
+          return false;
+        }
+      }
+      jointPlan.retainContextEvidence(originalEvidence, inlined);
+      if (!jointPlan.verifyContextInputs()) {
+        plan.fail(jointPlan.failureReason());
+        return false;
+      }
+      plan = std::move(jointPlan);
+      llvm::outs() << sAscify << "Proven contextual local-header expansion: "
+                   << inlined.size() << " leaf header(s), joint helper transaction\n";
+      return true;
+    };
+    if (!contextualize()) {
+      llvm::errs() << sAscify << sError << plan.failureReason() << "\n";
+      llvm::sys::fs::remove_directories(stagingRoot);
+      return false;
+    }
   }
 
   std::size_t index = 0;
@@ -934,7 +1168,7 @@ bool ascifySourceWithLocalHeaderClosure(
     plan.markStaged(index);
   }
 
-  if (!plan.validateArtifactIsolation(inplace)) {
+  if (!plan.verifyContextInputs() || !plan.validateArtifactIsolation(inplace)) {
     llvm::errs() << sAscify << sError
                  << "Local-header artifact isolation failed: "
                  << plan.failureReason() << "\n";
@@ -956,7 +1190,7 @@ bool ascifySourceWithLocalHeaderClosure(
     return true;
   }
 
-  if (!plan.nodes().empty()) {
+  if (plan.hasPublishedBundle()) {
     const std::error_code bundleEc = llvm::sys::fs::create_directories(
         pathString(stagedBundle));
     if (bundleEc ||
@@ -971,7 +1205,7 @@ bool ascifySourceWithLocalHeaderClosure(
 
   if (!publishClosure(pathString(stagedRoot), pathString(stagedBundle),
                       pathString(finalRoot), pathString(finalBundle),
-                      !plan.nodes().empty())) {
+                      plan.hasPublishedBundle())) {
     llvm::sys::fs::remove_directories(stagingRoot);
     return false;
   }

@@ -258,6 +258,38 @@ bool ascifySingleSource(const std::string &srcPath,
                                const std::string &mainContextPath,
                                bool preserveTemp,
                                LocalHeaderRewriteContext *localHeaderContext) {
+  if (localHeaderContext != nullptr &&
+      localHeaderContext->virtualInput != nullptr) {
+    // Reparse a verified contextual input at the original root identity.
+    // No physical source is overwritten: only apply edits to the memory
+    // buffer, then write the existing unpublished staging destination.
+    ct::RefactoringTool Tool(
+        compDB ? *compDB : OptionsParserPtr->getCompilations(), srcPath);
+    Tool.mapVirtualFile(srcPath, *localHeaderContext->virtualInput);
+    ct::Replacements &edits = llcompat::getReplacements(Tool, srcPath);
+    ascify::FrontendCompatibilityConfig frontendCompatibility;
+    if (!appendArgumentsAdjusters(Tool, mainContextPath, ascify_exe_path,
+                                  frontendCompatibility))
+      return false;
+    ReplacementsFrontendActionFactory<AscifyAction> factory(
+        &edits, localHeaderContext, frontendCompatibility);
+    if (Tool.run(&factory))
+      return false;
+    auto rewritten = ct::applyAllReplacements(
+        *localHeaderContext->virtualInput, edits);
+    if (!rewritten) {
+      llvm::errs() << sAscify << sError << llvm::toString(rewritten.takeError())
+                   << "\n";
+      return false;
+    }
+    std::error_code writeError;
+    llvm::raw_fd_ostream out(dstPath, writeError);
+    if (writeError)
+      return false;
+    out << *rewritten;
+    out.close();
+    return !out.has_error();
+  }
   std::error_code EC;
   SmallString<128> tmpFile;
   StringRef srcFileName = sys::path::filename(srcPath);

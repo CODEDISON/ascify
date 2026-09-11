@@ -1,0 +1,262 @@
+// DT-only verification; compile with the current real legacy CANN recipe.
+// Run under the runner's time limit: an accidental block barrier in reduce()
+// must not make the even-warp-only test wait indefinitely for bypassing warps.
+#include <ascify/ascify_cuda_compat.hpp>
+#include <ascify/cooperative_groups_compat.hpp>
+#include <string.h>
+
+namespace cg = ascify_cg;
+
+struct ReductionObservation {
+  unsigned int block_rank;
+  unsigned int block_size;
+  unsigned int tile_rank;
+  unsigned int tile_size;
+  unsigned int typed_meta_rank;
+  unsigned int typed_meta_size;
+  unsigned int erased_meta_rank;
+  unsigned int erased_meta_size;
+  unsigned int erased_rank;
+  unsigned int erased_size;
+  unsigned int participated;
+  int typed_i;
+  int erased_i;
+  float typed_f;
+  float erased_f;
+};
+
+ASCIFY_GLOBAL void cooperativeReduceProbe(const int* integers,
+                                          const float* floats,
+                                          ReductionObservation* output,
+                                          unsigned int even_warps_only) {
+  const auto block = cg::this_thread_block();
+  const auto typed = cg::tiled_partition<32>(block);
+  const cg::thread_block_tile<32> erased = typed;
+  static_assert(std::is_same<decltype(block.thread_rank()), unsigned int>::value,
+                "block rank must preserve CUDA unsigned-int lookup");
+  static_assert(std::is_same<decltype(block.size()), unsigned int>::value,
+                "block size must preserve CUDA unsigned-int lookup");
+  static_assert(std::is_same<decltype(typed.thread_rank()), unsigned int>::value,
+                "typed tile rank must be unsigned int");
+  static_assert(std::is_same<decltype(typed.size()), unsigned int>::value,
+                "typed tile size must be unsigned int");
+  static_assert(std::is_same<decltype(erased.thread_rank()), unsigned int>::value,
+                "erased tile rank must be unsigned int");
+  static_assert(std::is_same<decltype(erased.size()), unsigned int>::value,
+                "erased tile size must be unsigned int");
+
+  // Index output independently of the API under test. Incorrect block rank
+  // must be observable as data, rather than merely permuting output slots.
+  const unsigned int linear = threadIdx.x + 8U * threadIdx.y + 32U * threadIdx.z;
+  const unsigned int index = blockIdx.x * 64U + linear;
+  ReductionObservation result;
+  result.block_rank = block.thread_rank();
+  result.block_size = block.size();
+  result.tile_rank = typed.thread_rank();
+  result.tile_size = typed.size();
+  result.typed_meta_rank = typed.meta_group_rank();
+  result.typed_meta_size = typed.meta_group_size();
+  result.erased_meta_rank = erased.meta_group_rank();
+  result.erased_meta_size = erased.meta_group_size();
+  result.erased_rank = erased.thread_rank();
+  result.erased_size = erased.size();
+  result.participated = even_warps_only == 0 || (linear / 32U) % 2U == 0;
+  if (result.participated != 0) {
+    result.typed_i = cg::reduce(typed, integers[index], cg::plus<int>());
+    result.erased_i = cg::reduce(erased, integers[index], cg::plus<int>());
+    result.typed_f = cg::reduce(typed, floats[index], cg::plus<float>());
+    result.erased_f = cg::reduce(erased, floats[index], cg::plus<float>());
+  } else {
+    result.typed_i = result.erased_i = -100000 - static_cast<int>(index);
+    result.typed_f = result.erased_f = -2048.0f - 0.5f * index;
+  }
+  output[index] = result;
+}
+
+ASCIFY_GLOBAL void cooperativeReduceRejectProbe(int* output) {
+  const auto block = cg::this_thread_block();
+  const auto tile = cg::tiled_partition<32>(block);
+  const unsigned int linear = threadIdx.x + 8U * threadIdx.y + 32U * threadIdx.z;
+  if (tile.thread_rank() < 16) {
+    output[linear] = cg::reduce(tile, 1, cg::plus<int>());
+  } else {
+    output[linear] = -1;
+  }
+}
+
+static uint32_t float_bits(float value) {
+  uint32_t bits;
+  memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+static float rounded_float_add(float left, float right) {
+  volatile float rounded = left + right;
+  return rounded;
+}
+
+// One host tree per warp computes the final scalar. This deliberately does
+// not emulate each GPU lane or use any shuffle helper in the oracle.
+static float float_tree_sum(const float* input) {
+  float work[32];
+  memcpy(work, input, sizeof(work));
+  for (unsigned int stride = 16; stride != 0; stride /= 2) {
+    for (unsigned int i = 0; i < stride; ++i) {
+      work[i] = rounded_float_add(work[i], work[i + stride]);
+    }
+  }
+  return work[0];
+}
+
+static float float_fixture(unsigned int warp, unsigned int lane) {
+  const unsigned int pattern = warp % 8U;
+  switch (pattern) {
+    case 0:
+      return (static_cast<int>(lane) - 15) * 0.5f;
+    case 1:
+      // The small term added to lane 0 at the first tree level is rounded
+      // away before cancellation. Double accumulation keeps it visible.
+      if (lane == 0) return 16777216.0f;
+      if (lane == 16) return 1.0f;
+      if (lane == 8) return -16777216.0f;
+      return (lane & 1U) != 0 ? 0.125f : -0.125f;
+    case 2:
+      if (lane % 4U == 0) return 1048576.0f;
+      if (lane % 4U == 1) return -1048576.0f;
+      return lane % 4U == 2 ? 0.00390625f : -0.001953125f;
+    case 3:
+      return (lane & 1U) != 0 ? -static_cast<float>(lane + 1U)
+                             : static_cast<float>(lane + 1U);
+    case 4:
+      return (lane & 1U) != 0 ? -0.0f : 0.0f;
+    case 5:
+      return (static_cast<int>(lane % 5U) - 2) *
+             static_cast<float>(1U << (lane % 18U)) * 0.015625f;
+    case 6:
+      return -(static_cast<float>(lane) * 0.25f +
+               static_cast<float>(warp + 1U) * 0.0078125f);
+    default:
+      return (31.0f - static_cast<float>(lane)) * 0.125f;
+  }
+}
+
+int main(int argc, char** argv) {
+  const bool negative = argc == 2 && strcmp(argv[1], "partial-participation") == 0;
+  if (argc > 1 && !negative) return 64;
+  if (ascify::cudaSetDevice(0) != ACL_SUCCESS) return 1;
+  if (negative) {
+    int* device_output = nullptr;
+    if (ascify::cudaMalloc(&device_output, 64 * sizeof(int)) != ACL_SUCCESS)
+      return 2;
+    cooperativeReduceRejectProbe<<<dim3(1), dim3(8, 4, 2)>>>(device_output);
+    const aclError status = ascify::cudaDeviceSynchronize();
+    printf("cg_reduce partial-participation expected_device_rejection=1 status=%d\n",
+           static_cast<int>(status));
+    // A device trap may invalidate this context. Run this mode in its own
+    // process, after the positive test, and do not reuse it for another case.
+    return status == ACL_SUCCESS ? 3 : 0;
+  }
+
+  constexpr unsigned int blocks = 8;
+  constexpr unsigned int count = blocks * 64;
+  int integers[count];
+  float floats[count];
+  int64_t integer_sums[count / 32];
+  float tree_sums[count / 32];
+  double mathematical_sums[count / 32];
+  for (unsigned int warp = 0; warp < count / 32; ++warp) {
+    int64_t exact_integer = 0;
+    double mathematical = 0.0;
+    for (unsigned int lane = 0; lane < 32; ++lane) {
+      const unsigned int index = warp * 32 + lane;
+      integers[index] = static_cast<int>((warp + 1) * 1000 + lane * 17) - 9000;
+      floats[index] = float_fixture(warp, lane);
+      exact_integer += integers[index];
+      mathematical += static_cast<double>(floats[index]);
+    }
+    integer_sums[warp] = exact_integer;
+    mathematical_sums[warp] = mathematical;
+    tree_sums[warp] = float_tree_sum(floats + warp * 32);
+  }
+
+  int* device_integers = nullptr;
+  float* device_floats = nullptr;
+  ReductionObservation* device_output = nullptr;
+  ReductionObservation output[2 * count];
+  memset(output, 0xa5, sizeof(output));
+  if (ascify::cudaMalloc(&device_integers, sizeof(integers)) != ACL_SUCCESS) return 4;
+  if (ascify::cudaMalloc(&device_floats, sizeof(floats)) != ACL_SUCCESS) return 5;
+  if (ascify::cudaMalloc(&device_output, sizeof(output)) != ACL_SUCCESS) return 6;
+  if (ascify::cudaMemcpy(device_integers, integers, sizeof(integers),
+                        ACL_MEMCPY_HOST_TO_DEVICE) != ACL_SUCCESS) return 7;
+  if (ascify::cudaMemcpy(device_floats, floats, sizeof(floats),
+                        ACL_MEMCPY_HOST_TO_DEVICE) != ACL_SUCCESS) return 8;
+  if (ascify::cudaMemcpy(device_output, output, sizeof(output),
+                        ACL_MEMCPY_HOST_TO_DEVICE) != ACL_SUCCESS) return 9;
+  cooperativeReduceProbe<<<dim3(blocks), dim3(8, 4, 2)>>>(
+      device_integers, device_floats, device_output, 0);
+  cooperativeReduceProbe<<<dim3(blocks), dim3(8, 4, 2)>>>(
+      device_integers, device_floats, device_output + count, 1);
+  if (ascify::cudaDeviceSynchronize() != ACL_SUCCESS) return 10;
+  if (ascify::cudaMemcpy(output, device_output, sizeof(output),
+                        ACL_MEMCPY_DEVICE_TO_HOST) != ACL_SUCCESS) return 11;
+
+  unsigned int errors = 0;
+  for (unsigned int mode = 0; mode < 2; ++mode) {
+    unsigned int active_lanes = 0, bypass_lanes = 0, bit_mismatches = 0;
+    double max_abs_error = 0.0;
+    for (unsigned int warp = 0; warp < count / 32; ++warp) {
+      const bool participates = mode == 0 || (warp & 1U) == 0;
+      const ReductionObservation first = output[mode * count + warp * 32];
+      const uint32_t reference_bits = float_bits(tree_sums[warp]);
+      for (unsigned int lane = 0; lane < 32; ++lane) {
+        const unsigned int index = warp * 32 + lane;
+        const ReductionObservation got = output[mode * count + index];
+        errors += got.block_rank != index % 64;
+        errors += got.block_size != 64;
+        errors += got.tile_rank != lane || got.erased_rank != lane;
+        errors += got.tile_size != 32 || got.erased_size != 32;
+        errors += got.typed_meta_rank != warp % 2 || got.erased_meta_rank != warp % 2;
+        errors += got.typed_meta_size != 2 || got.erased_meta_size != 2;
+        errors += got.participated != static_cast<unsigned int>(participates);
+        if (!participates) {
+          ++bypass_lanes;
+          const int expected_i = -100000 - static_cast<int>(index);
+          const uint32_t expected_f = float_bits(-2048.0f - 0.5f * index);
+          errors += got.typed_i != expected_i || got.erased_i != expected_i;
+          errors += float_bits(got.typed_f) != expected_f ||
+                    float_bits(got.erased_f) != expected_f;
+          continue;
+        }
+        ++active_lanes;
+        errors += got.typed_i != integer_sums[warp] ||
+                  got.erased_i != integer_sums[warp];
+        errors += float_bits(got.typed_f) != reference_bits ||
+                  float_bits(got.erased_f) != reference_bits;
+        bit_mismatches += float_bits(got.typed_f) != float_bits(first.typed_f) ||
+                          float_bits(got.erased_f) != float_bits(first.typed_f);
+      }
+      if (participates) {
+        const double abs_error = fabs(static_cast<double>(first.typed_f) -
+                                      mathematical_sums[warp]);
+        if (abs_error > max_abs_error) max_abs_error = abs_error;
+        printf("cg_reduce mode=%s warp=%u float_result=%.9g tree=%.9g "
+               "tree_bits=0x%08x double_sum=%.17g abs_error=%.17g\n",
+               mode == 0 ? "all" : "even", warp,
+               static_cast<double>(first.typed_f), static_cast<double>(tree_sums[warp]),
+               static_cast<unsigned int>(reference_bits), mathematical_sums[warp], abs_error);
+      }
+    }
+    errors += bit_mismatches;
+    printf("cg_reduce mode=%s shape=8x4x2 blocks=%u active_lanes=%u "
+           "bypass_lanes=%u all_lane_bit_mismatches=%u max_abs_error=%.17g\n",
+           mode == 0 ? "all" : "even", blocks, active_lanes, bypass_lanes,
+           bit_mismatches, max_abs_error);
+  }
+  const aclError free_output = ascify::cudaFree(device_output);
+  const aclError free_floats = ascify::cudaFree(device_floats);
+  const aclError free_integers = ascify::cudaFree(device_integers);
+  printf("cg_reduce observations=%u errors=%u\n", 2 * count, errors);
+  return errors || free_output != ACL_SUCCESS || free_floats != ACL_SUCCESS ||
+         free_integers != ACL_SUCCESS ? 12 : 0;
+}

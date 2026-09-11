@@ -1,0 +1,150 @@
+// Run only on the DT legacy SIMT target. Host stubs cannot validate convergence.
+#include <ascify/ascify_cuda_compat.hpp>
+#include <ascify/masked_warp_compat.hpp>
+#include <string.h>
+
+struct WarpCase {
+  uint32_t mask;
+  unsigned int delta;
+  int width;
+};
+
+struct WarpObservation {
+  uint32_t active;
+  uint32_t ballot;
+  uint32_t shuffled_u;
+  int32_t shuffled_i;
+  float shuffled_f;
+};
+
+ASCIFY_GLOBAL void maskedWarpProbe(const WarpCase* cases,
+                                  WarpObservation* output) {
+  const unsigned tid = threadIdx.x;
+  const unsigned lane = tid & 31U;
+  const unsigned index = blockIdx.x * 256U + tid;
+  const WarpCase test = cases[blockIdx.x * 8U + tid / 32U];
+  if ((test.mask & (uint32_t{1} << lane)) != 0) {
+    output[index].active = asc_activemask();
+    output[index].ballot = ascify::ballot_sync(
+        test.mask, (lane & 1U) != 0 ? -7 : 0);
+    output[index].shuffled_u = ascify::shfl_down_sync(
+        test.mask, uint32_t{0x80000000U} | tid, test.delta, test.width);
+    output[index].shuffled_i = ascify::shfl_down_sync(
+        test.mask, int32_t{-1000} + static_cast<int32_t>(tid),
+        test.delta, test.width);
+    output[index].shuffled_f = ascify::shfl_down_sync(
+        test.mask, 1000.0f + 0.5f * tid, test.delta, test.width);
+  }
+}
+
+ASCIFY_GLOBAL void maskedWarpRejectProbe(int mode, uint32_t* output) {
+  const unsigned lane = threadIdx.x;
+  uint32_t mask = UINT32_MAX;
+  if (mode == 1 && lane == 0) mask = 0xfffffffeU;
+  if (mode == 2 && lane >= 16) return;
+  if (mode == 3) mask = 0x0000ffffU;
+  if (mode == 4) mask = lane < 16 ? 0x0000ffffU : 0xffff0000U;
+  if (mode == 5) mask = 0;
+  if (mode == 6) {
+    output[lane] = ascify::shfl_down_sync(
+        mask, uint32_t{1}, 1, 3);
+  } else {
+    output[lane] = ascify::ballot_sync(mask, 1);
+  }
+}
+
+int main(int argc, char** argv) {
+  int negative_mode = 0;
+  const char* modes[] = {"", "inconsistent-mask", "unconverged-mask",
+                        "subset-mask", "disjoint-masks", "zero-mask",
+                        "invalid-width"};
+  if (argc > 1) {
+    for (int i = 1; i <= 6; ++i) {
+      if (strcmp(argv[1], modes[i]) == 0) negative_mode = i;
+    }
+    if (negative_mode == 0) return 64;
+  }
+  if (ascify::cudaSetDevice(0) != ACL_SUCCESS) return 1;
+  if (negative_mode != 0) {
+    uint32_t* device_output = nullptr;
+    if (ascify::cudaMalloc(&device_output, 32 * sizeof(uint32_t)) != ACL_SUCCESS)
+      return 2;
+    maskedWarpRejectProbe<<<dim3(1), dim3(32)>>>(negative_mode, device_output);
+    const aclError status = ascify::cudaDeviceSynchronize();
+    printf("masked_warp mode=%s expected_device_rejection=1 status=%d\n",
+           modes[negative_mode], static_cast<int>(status));
+    // Each negative case must run in a fresh process: a deliberate device trap
+    // can invalidate the current context. A successful kernel is a test failure.
+    return status == ACL_SUCCESS ? 3 : 0;
+  }
+
+  const uint32_t masks[] = {UINT32_MAX, 0x0000ffffU, 0x000000ffU,
+                            0x0000000fU, 0x55555555U, 0xaaaaaaaaU,
+                            0x00000001U, 0x80000000U};
+  const unsigned deltas[] = {0, 1, 2, 7, 16, 31, 32};
+  constexpr unsigned blocks = 6 * 7;
+  constexpr unsigned threads = 256;
+  WarpCase cases[blocks * 8];
+  WarpObservation* output = static_cast<WarpObservation*>(
+      malloc(blocks * threads * sizeof(WarpObservation)));
+  if (output == nullptr) return 4;
+  memset(output, 0xa5, blocks * threads * sizeof(WarpObservation));
+  for (unsigned block = 0; block < blocks; ++block) {
+    for (unsigned warp = 0; warp < 8; ++warp) {
+      cases[block * 8 + warp] =
+          WarpCase{masks[warp], deltas[block % 7], 1 << (block / 7)};
+    }
+  }
+  WarpCase* device_cases = nullptr;
+  WarpObservation* device_output = nullptr;
+  if (ascify::cudaMalloc(&device_cases, sizeof(cases)) != ACL_SUCCESS) return 5;
+  if (ascify::cudaMalloc(&device_output,
+      blocks * threads * sizeof(WarpObservation)) != ACL_SUCCESS) return 6;
+  if (ascify::cudaMemcpy(device_cases, cases, sizeof(cases),
+                        ACL_MEMCPY_HOST_TO_DEVICE) != ACL_SUCCESS) return 7;
+  if (ascify::cudaMemcpy(device_output, output,
+      blocks * threads * sizeof(WarpObservation),
+      ACL_MEMCPY_HOST_TO_DEVICE) != ACL_SUCCESS) return 8;
+  maskedWarpProbe<<<dim3(blocks), dim3(threads)>>>(device_cases, device_output);
+  if (ascify::cudaDeviceSynchronize() != ACL_SUCCESS) return 9;
+  if (ascify::cudaMemcpy(output, device_output,
+      blocks * threads * sizeof(WarpObservation),
+      ACL_MEMCPY_DEVICE_TO_HOST) != ACL_SUCCESS) return 10;
+
+  unsigned errors = 0, defined_shuffles = 0, undefined_shuffles = 0;
+  for (unsigned block = 0; block < blocks; ++block) {
+    for (unsigned tid = 0; tid < threads; ++tid) {
+      const unsigned lane = tid & 31U;
+      const WarpCase test = cases[block * 8 + tid / 32U];
+      const WarpObservation got = output[block * threads + tid];
+      if ((test.mask & (uint32_t{1} << lane)) == 0) {
+        WarpObservation untouched;
+        memset(&untouched, 0xa5, sizeof(untouched));
+        errors += memcmp(&untouched, &got, sizeof(got)) != 0;
+        continue;
+      }
+      errors += got.active != test.mask;
+      errors += got.ballot != (test.mask & 0xaaaaaaaaU);
+      unsigned source_lane = lane + test.delta;
+      const unsigned segment_end =
+          (lane / static_cast<unsigned>(test.width) + 1U) * test.width;
+      if (source_lane >= segment_end) source_lane = lane;
+      if ((test.mask & (uint32_t{1} << source_lane)) == 0) {
+        ++undefined_shuffles;
+        continue;  // CUDA specifies no value here; never assert zero.
+      }
+      ++defined_shuffles;
+      const unsigned source_tid = (tid & ~31U) + source_lane;
+      errors += got.shuffled_u != (0x80000000U | source_tid);
+      errors += got.shuffled_i != -1000 + static_cast<int32_t>(source_tid);
+      errors += got.shuffled_f != 1000.0f + 0.5f * source_tid;
+    }
+  }
+  const aclError free_cases = ascify::cudaFree(device_cases);
+  const aclError free_output = ascify::cudaFree(device_output);
+  free(output);
+  printf("masked_warp observations=%u defined_shuffles_per_type=%u "
+         "undefined_shuffles_per_type=%u errors=%u\n",
+         blocks * threads, defined_shuffles, undefined_shuffles, errors);
+  return errors || free_cases != ACL_SUCCESS || free_output != ACL_SUCCESS ? 11 : 0;
+}

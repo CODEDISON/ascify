@@ -56,13 +56,19 @@ int main() {
   assert(AscendC::Simt::ascify_test_public_thread_barrier_calls == 1);
   assert(AscendC::Simt::ascify_test_public_thread_fence_calls == 2);
 #else
+  // Existing full-mask 64-bit operations must not instantiate the narrower
+  // partial-mask helper. Native stubs preserve all bits, including high bits.
+  assert(ascify::shfl_down_sync(UINT32_MAX, int64_t{-0x100000001LL}, 1, 32)
+         == -0x100000001LL);
+  assert(ascify::shfl_down_sync(UINT32_MAX, uint64_t{0x8000000100000001ULL}, 1, 32)
+         == 0x8000000100000001ULL);
   const float4 vector = make_float4(1.0f, 2.0f, 3.0f, 4.0f);
   assert(vector.x == 1.0f && vector.y == 2.0f &&
          vector.z == 3.0f && vector.w == 4.0f);
   assert(ascify_test_legacy_warp_reduce_add_calls == 3);
   assert(ascify_test_legacy_warp_reduce_max_calls == 1);
   assert(ascify_test_legacy_warp_reduce_min_calls == 1);
-  assert(ascify_test_legacy_warp_shuffle_calls == 4);
+  assert(ascify_test_legacy_warp_shuffle_calls == 6);
   assert(ascify_test_legacy_thread_barrier_calls == 1);
   assert(ascify_test_legacy_thread_fence_block_calls == 1);
   assert(ascify_test_legacy_thread_fence_calls == 1);

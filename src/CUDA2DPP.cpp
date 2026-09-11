@@ -34,6 +34,7 @@ const std::map <llvm::StringRef, dppCounter> CUDA_INCLUDE_MAP {
   // acl/acl_bf16.h does not exist in CANN 9.0.0; use simt_api/asc_bf16.h for bfloat16_t support
   {"cuda_bf16.h",                                          {"simt_api/asc_bf16.h",                                                                                        CONV_INCLUDE,                API_RUNTIME, 0}},
   {"cooperative_groups.h",                                 {"ascify/cooperative_groups_compat.hpp",                                                                       CONV_INCLUDE,                API_RUNTIME, 0}},
+  {"cooperative_groups/reduce.h",                          {"ascify/cooperative_groups_compat.hpp",                                                                       CONV_INCLUDE,                API_RUNTIME, 0}},
   {"math_constants.h",                                    {"simt_api/math_constants.h",                                                              CONV_INCLUDE,                API_RUNTIME, 0}},
 };
 

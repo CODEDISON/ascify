@@ -6,7 +6,7 @@ test_root="$repo_root/tests/frontend_compat"
 profile_root="$repo_root/frontend_compat/ascify-admitted-v1"
 manifest="$profile_root/profile.manifest"
 header="$profile_root/cooperative_groups.h"
-poison="$profile_root/cooperative_groups/reduce.h"
+reduction="$profile_root/cooperative_groups/reduce.h"
 host_math="$profile_root/host_math.h"
 
 search_fixed() {
@@ -50,36 +50,36 @@ sha256_file() {
 }
 
 require_fixed 'class thread_block {' "$header"
-require_fixed 'void sync() const;' "$header"
+require_fixed 'static void sync();' "$header"
 require_fixed 'thread_block this_thread_block();' "$header"
 require_fixed 'inline void sync(const thread_block& group)' "$header"
 require_fixed 'group.sync();' "$header"
 for forbidden in \
-  'coalesced_group' 'reduce' 'ballot' \
+  'coalesced_group' 'ballot' \
   '__shared__' 'dynamic_shared' 'nv/target'; do
   forbid_fixed "$forbidden" "$header"
 done
 require_fixed \
-  'does not admit cooperative_groups/reduce.h' "$poison"
+  'reduce(const thread_block_tile<Size, ParentT>&' "$reduction"
 require_fixed 'schema=ascify.frontend-compat-profile.v1' "$manifest"
 require_fixed 'profile=ascify-admitted-v1' "$manifest"
 require_fixed \
-  'file=cooperative_groups.h;bytes=2481;sha256=3e3061687252e956483540e6d9f78364200dc6de07dd7dc5e103a5ae06311a04' \
+  'file=cooperative_groups.h;bytes=3657;sha256=721a97aebb2a0638efd47a4fbabb65a8da2f0dc3e29ea89398055bda85b7d86b' \
   "$manifest"
 require_fixed \
-  'file=cooperative_groups/reduce.h;bytes=101;sha256=75adbe65aeb5c2acfd63c9896376e67d270198e566080b9260a219ab99e2de8a' \
+  'file=cooperative_groups/reduce.h;bytes=1165;sha256=d26aa794a4ef51f027893e010522d1dc82c4e0d86daaa3f4bdd2fd0e741d5d74' \
   "$manifest"
 require_fixed \
   'file=host_math.h;bytes=1458;sha256=a151400e55d4f484f8321b5d98384f3585fed01678cda680354cd331a664558d' \
   "$manifest"
 if [ "$(sha256_file "$header")" != \
-    '3e3061687252e956483540e6d9f78364200dc6de07dd7dc5e103a5ae06311a04' ]; then
+    '721a97aebb2a0638efd47a4fbabb65a8da2f0dc3e29ea89398055bda85b7d86b' ]; then
   echo "frontend admission header SHA-256 mismatch" >&2
   exit 1
 fi
-if [ "$(sha256_file "$poison")" != \
-    '75adbe65aeb5c2acfd63c9896376e67d270198e566080b9260a219ab99e2de8a' ]; then
-  echo "frontend reduction poison SHA-256 mismatch" >&2
+if [ "$(sha256_file "$reduction")" != \
+    'd26aa794a4ef51f027893e010522d1dc82c4e0d86daaa3f4bdd2fd0e741d5d74' ]; then
+  echo "frontend reduction header SHA-256 mismatch" >&2
   exit 1
 fi
 if [ "$(sha256_file "$host_math")" != \
@@ -91,7 +91,7 @@ fi
 profile_files=$(find "$profile_root" -type f -print | LC_ALL=C sort)
 expected_files=$(printf '%s\n' \
   "$header" \
-  "$poison" \
+  "$reduction" \
   "$host_math" \
   "$manifest" | LC_ALL=C sort)
 if [ "$profile_files" != "$expected_files" ]; then
@@ -150,6 +150,8 @@ trap cleanup 0 1 2 15
 
 "$cxx" -std=c++17 -fsyntax-only -I"$profile_root" \
   "$test_root/tile32_positive.cpp"
+"$cxx" -std=c++17 -x c++ -D__global__= -fsyntax-only -I"$profile_root" \
+  "$test_root/reduce_input.cu"
 for reject_case in 1 2 3 4 5 6 7; do
   if "$cxx" -std=c++17 -fsyntax-only -I"$profile_root" \
       -DASCIFY_TILE_REJECT_CASE="$reject_case" \
@@ -172,10 +174,10 @@ done
 if "$cxx" -std=c++17 -fsyntax-only -I"$profile_root" \
     "$test_root/reduce_header_reject.cpp" \
     >"$test_tmp/reduce.stdout" 2>"$test_tmp/reduce.stderr"; then
-  echo "cooperative_groups/reduce.h compiled unexpectedly" >&2
+  echo "unsupported block reduction compiled unexpectedly" >&2
   exit 1
 fi
-require_fixed 'does not admit cooperative_groups/reduce.h' \
+require_fixed 'no matching function' \
   "$test_tmp/reduce.stderr"
 
 echo "frontend compatibility admission checks passed"

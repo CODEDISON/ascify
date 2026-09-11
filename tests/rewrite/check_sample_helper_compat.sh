@@ -111,7 +111,7 @@ require_fixed 'auditRawPublishedCompatTokensInFile' "$action_cpp"
 require_fixed 'isAscifyCudaCompatReservedMacro' "$action_cpp"
 require_fixed 'isAscifyCudaCompatPublishedMacro' "$action_cpp"
 require_fixed 'RuntimeLock' "$compat_identifiers"
-require_fixed 'f3c23d99bb9751eb611d5184cbb73e8031e137361e0e00290ff1a3812792d37d' \
+require_fixed '2be1369d53a6ca0701e5d69c57ec0bf5e473ed44944db6eb2cd2cd0988c5a3dc' \
   "$action_cpp"
 require_fixed '#include <helper_string.h>' "$action_cpp"
 require_fixed 'surface retained' "$action_cpp"
@@ -126,14 +126,14 @@ require_fixed 'const aclError status = cudaGetLastError();' "$compat_header"
 require_fixed '#expression, __FILE__, __LINE__' "$compat_header"
 forbid_fixed 'gpuGetMaxGflopsDeviceId' "$compat_header"
 
-[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 45554 ]
+[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 46626 ]
 if command -v sha256sum >/dev/null 2>&1; then
   compat_header_sha=$(sha256sum "$compat_header" | awk '{print $1}')
 else
   compat_header_sha=$(shasum -a 256 "$compat_header" | awk '{print $1}')
 fi
 [ "$compat_header_sha" = \
-  f3c23d99bb9751eb611d5184cbb73e8031e137361e0e00290ff1a3812792d37d ]
+  2be1369d53a6ca0701e5d69c57ec0bf5e473ed44944db6eb2cd2cd0988c5a3dc ]
 
 official_helper_functions="$fixtures/nvidia_samples/Common/helper_functions.h"
 [ "$(wc -c <"$official_helper_functions" | tr -d ' ')" -eq 2358 ]
@@ -170,7 +170,8 @@ trap cleanup 0 1 2 15
 raw_token_clang=${CLANG:-clang}
 if command -v "$raw_token_clang" >/dev/null 2>&1; then
   "$raw_token_clang" -cc1 -x c++ -std=c++17 -dump-raw-tokens \
-    "$compat_header" "$repo_root/include/ascify/symbol_compat.hpp" 2>&1 | \
+    "$compat_header" "$repo_root/include/ascify/symbol_compat.hpp" \
+    "$repo_root/include/ascify/masked_warp_compat.hpp" 2>&1 | \
     sed -n "s/^raw_identifier '\([^']*\)'.*/\1/p" | \
     LC_ALL=C sort -u >"$test_tmp/compat-identifiers.expected"
   sed -n 's/^[[:space:]]*"\([^"]*\)",$/\1/p' \

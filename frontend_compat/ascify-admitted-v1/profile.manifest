@@ -1,5 +1,5 @@
 schema=ascify.frontend-compat-profile.v1
 profile=ascify-admitted-v1
-file=cooperative_groups.h;bytes=2481;sha256=3e3061687252e956483540e6d9f78364200dc6de07dd7dc5e103a5ae06311a04
-file=cooperative_groups/reduce.h;bytes=101;sha256=75adbe65aeb5c2acfd63c9896376e67d270198e566080b9260a219ab99e2de8a
+file=cooperative_groups.h;bytes=3657;sha256=721a97aebb2a0638efd47a4fbabb65a8da2f0dc3e29ea89398055bda85b7d86b
+file=cooperative_groups/reduce.h;bytes=1165;sha256=d26aa794a4ef51f027893e010522d1dc82c4e0d86daaa3f4bdd2fd0e741d5d74
 file=host_math.h;bytes=1458;sha256=a151400e55d4f484f8321b5d98384f3585fed01678cda680354cd331a664558d

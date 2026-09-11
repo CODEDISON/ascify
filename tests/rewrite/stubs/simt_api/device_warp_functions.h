@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+#define __SIMT_DEVICE_FUNCTIONS_DECL__
+inline uint32_t asc_activemask() { return UINT32_MAX; }
+inline uint32_t asc_ballot(int predicate) { return predicate ? UINT32_MAX : 0; }
+
 inline int ascify_test_legacy_warp_reduce_add_calls = 0;
 inline int ascify_test_legacy_warp_reduce_max_calls = 0;
 inline int ascify_test_legacy_warp_reduce_min_calls = 0;

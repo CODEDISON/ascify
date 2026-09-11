@@ -3,4 +3,6 @@
 
 #include <simt_api/device_types.h>
 
+unsigned int asc_activemask();
+
 #endif

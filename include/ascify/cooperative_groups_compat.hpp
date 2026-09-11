@@ -49,49 +49,39 @@ __SIMT_DEVICE_FUNCTIONS_DECL__ inline void sync(const thread_block& group) {
   group.sync();
 }
 
-template <unsigned int Size, typename ParentT = void>
-class thread_block_tile {
-  static_assert(Size == 32, "Ascify admits only full-warp tile size 32");
-  static_assert(std::is_same<ParentT, thread_block>::value,
-                "Ascify admits only tiles partitioned from a thread block");
-  using native_tile =
-      ::cooperative_groups::thread_block_tile<Size, thread_block>;
+template <unsigned int Size, typename ParentT = void> class thread_block_tile;
+namespace ascify_detail {
+template <unsigned int Size> class tile_register_operations {
+  static_assert(Size == 32, "Ascify admits only full-warp tile size 32; multi-warp subgroup synchronization is not implemented");
+ protected:
+  using native_tile = ::cooperative_groups::thread_block_tile<Size, thread_block>;
   native_tile native_;
-
- public:
-  __SIMT_DEVICE_FUNCTIONS_DECL__ explicit thread_block_tile(native_tile value)
+  __SIMT_DEVICE_FUNCTIONS_DECL__ explicit tile_register_operations(native_tile value)
       : native_(value) {}
+ public:
   __SIMT_DEVICE_FUNCTIONS_DECL__ static unsigned int thread_rank() {
     return static_cast<unsigned int>(native_tile::thread_rank());
   }
-  __SIMT_DEVICE_FUNCTIONS_DECL__ static constexpr unsigned int size() {
-    return Size;
-  }
-  __SIMT_DEVICE_FUNCTIONS_DECL__ static unsigned int meta_group_rank() {
-    return thread_block::thread_rank() / Size;
-  }
-  template <typename T>
-  __SIMT_DEVICE_FUNCTIONS_DECL__
+  __SIMT_DEVICE_FUNCTIONS_DECL__ static constexpr unsigned int size() { return Size; }
+  template <typename T> __SIMT_DEVICE_FUNCTIONS_DECL__
   typename std::enable_if<std::is_same<T, int>::value ||
-                              std::is_same<T, unsigned int>::value ||
-                              std::is_same<T, float>::value, T>::type
-  shfl_up(T value, unsigned int delta) const {
-    return native_.shfl_up(value, delta);
-  }
-  template <typename T>
-  __SIMT_DEVICE_FUNCTIONS_DECL__
+      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
+  shfl_up(T value, unsigned int delta) const { return native_.shfl_up(value, delta); }
+  template <typename T> __SIMT_DEVICE_FUNCTIONS_DECL__
   typename std::enable_if<std::is_same<T, int>::value ||
-                              std::is_same<T, unsigned int>::value ||
-                              std::is_same<T, float>::value, T>::type
-  shfl_xor(T value, unsigned int lane_mask) const {
-    return native_.shfl_xor(value, lane_mask);
-  }
-  template <typename T>
-  __SIMT_DEVICE_FUNCTIONS_DECL__
+      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
+  shfl(T value, int source_rank) const { return native_.shfl(value, source_rank); }
+  template <typename T> __SIMT_DEVICE_FUNCTIONS_DECL__
+  typename std::enable_if<std::is_same<T, int>::value ||
+      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
+  shfl_down(T value, unsigned int delta) const { return native_.shfl_down(value, delta); }
+  template <typename T> __SIMT_DEVICE_FUNCTIONS_DECL__
+  typename std::enable_if<std::is_same<T, int>::value ||
+      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
+  shfl_xor(T value, unsigned int lane_mask) const { return native_.shfl_xor(value, lane_mask); }
+  template <typename T> __SIMT_DEVICE_FUNCTIONS_DECL__
   typename std::enable_if<std::is_same<T, uint4>::value, T>::type
   shfl_xor(T value, unsigned int lane_mask) const {
-    // CUDA shuffles trivially copyable uint4 values as four 32-bit words.
-    // Apply the identical source-lane permutation to each native component.
     static_assert(sizeof(unsigned int) == 4 && sizeof(uint4) == 16,
                   "uint4 shuffle requires four 32-bit components");
     uint4 result;
@@ -102,12 +92,67 @@ class thread_block_tile {
     return result;
   }
 };
+}  // namespace ascify_detail
+
+template <unsigned int Size, typename ParentT>
+class thread_block_tile : public ascify_detail::tile_register_operations<Size> {
+  static_assert(std::is_same<ParentT, thread_block>::value,
+                "Ascify admits only tiles partitioned from a thread block");
+  using base = ascify_detail::tile_register_operations<Size>;
+  friend class thread_block_tile<Size, void>;
+ public:
+  __SIMT_DEVICE_FUNCTIONS_DECL__ explicit thread_block_tile(typename base::native_tile value)
+      : base(value) {}
+  __SIMT_DEVICE_FUNCTIONS_DECL__ operator thread_block_tile<Size, void>() const {
+    return thread_block_tile<Size, void>(*this);
+  }
+  __SIMT_DEVICE_FUNCTIONS_DECL__ static unsigned int meta_group_rank() {
+    return thread_block::thread_rank() / Size;
+  }
+  __SIMT_DEVICE_FUNCTIONS_DECL__ static unsigned int meta_group_size() {
+    return (thread_block::size() + Size - 1) / Size;
+  }
+};
+
+template <unsigned int Size>
+class thread_block_tile<Size, void> : public ascify_detail::tile_register_operations<Size> {
+  using base = ascify_detail::tile_register_operations<Size>;
+  unsigned int rank_;
+  unsigned int count_;
+ public:
+  template <typename ParentT, typename std::enable_if<
+      std::is_same<ParentT, thread_block>::value, int>::type = 0>
+  __SIMT_DEVICE_FUNCTIONS_DECL__ thread_block_tile(const thread_block_tile<Size, ParentT>& value)
+      : base(value.native_), rank_(value.meta_group_rank()), count_(value.meta_group_size()) {}
+  __SIMT_DEVICE_FUNCTIONS_DECL__ unsigned int meta_group_rank() const { return rank_; }
+  __SIMT_DEVICE_FUNCTIONS_DECL__ unsigned int meta_group_size() const { return count_; }
+};
 
 template <unsigned int Size>
 __SIMT_DEVICE_FUNCTIONS_DECL__ inline thread_block_tile<Size, thread_block>
 tiled_partition(const thread_block& parent) {
   return thread_block_tile<Size, thread_block>(
       ::cooperative_groups::tiled_partition<Size>(parent));
+}
+
+template <typename T> struct plus {
+  static_assert(std::is_same<T, int>::value || std::is_same<T, float>::value,
+                "Ascify cooperative plus supports only int and float");
+  __SIMT_DEVICE_FUNCTIONS_DECL__ T operator()(T left, T right) const { return left + right; }
+};
+
+template <unsigned int Size, typename ParentT, typename T>
+__SIMT_DEVICE_FUNCTIONS_DECL__ inline
+ typename std::enable_if<Size == 32 && (std::is_same<T, int>::value ||
+                                     std::is_same<T, float>::value), T>::type
+reduce(const thread_block_tile<Size, ParentT>& group, T value, plus<T> operation) {
+  // A complete tile must execute this register collective together. In
+  // particular, do not substitute a block barrier when another warp diverges.
+  if (asc_activemask() != 0xffffffffu) { __builtin_trap(); }
+  for (unsigned int offset = Size / 2; offset != 0; offset >>= 1) {
+    value = operation(value, group.shfl_down(value, offset));
+  }
+  return group.shfl(value, 0);
 }
 
 }  // namespace ascify_cg

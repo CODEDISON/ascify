@@ -38,6 +38,26 @@ struct LocalHeaderEdge {
   std::string childSourcePath;
   std::string emittedSpelling;
   unsigned sourceOffset = 0;
+  unsigned resumeLine = 0;
+  std::string resumeFile;
+};
+
+// Evidence belongs to one parse of the original root include context. It is
+// never an instruction to inject an assumed header or macro environment.
+struct LocalHeaderInputEvidence {
+  std::string tokenSha256;
+  std::string macroSha256;
+  std::map<std::string, std::string> fileSha256;
+  std::map<std::string, unsigned> fileEntries;
+  std::set<std::string> pragmaFiles;
+  std::set<std::string> quotedIncludeParents;
+  std::vector<LocalHeaderEdge> originalEdges;
+};
+
+struct LocalHeaderContextInline {
+  std::string sourcePath;
+  std::string sourceSha256;
+  unsigned includeOffset = 0;
 };
 
 struct LocalHeaderIncludeDecision {
@@ -76,7 +96,9 @@ class LocalHeaderClosurePlan {
       const std::string &originalSpelling,
       const std::string &resolvedPath,
       bool isAngled,
-      bool isLiteral);
+      bool isLiteral,
+      unsigned resumeLine = 0,
+      const std::string &resumeFile = {});
 
   bool nextDiscovered(std::size_t &index) const;
   LocalHeaderNode &node(std::size_t index) { return nodes_.at(index); }
@@ -94,6 +116,17 @@ class LocalHeaderClosurePlan {
   const std::string &rootSourcePath() const { return rootSourcePath_; }
   const std::string &rootArtifactPath() const { return rootArtifactPath_; }
   const std::string &bundlePath() const { return bundlePath_; }
+  bool isSelectedRootHeader(const std::string &path) const;
+  void requireInheritedHelperContext(const std::string &path);
+  const std::set<std::string> &inheritedHelperHeaders() const {
+    return inheritedHelperHeaders_;
+  }
+  void retainContextEvidence(const LocalHeaderInputEvidence &evidence,
+                             const std::vector<LocalHeaderContextInline> &inlined);
+  const LocalHeaderInputEvidence &contextEvidence() const { return contextEvidence_; }
+  const std::vector<LocalHeaderContextInline> &contextInlines() const { return contextInlines_; }
+  bool hasPublishedBundle() const { return !nodes_.empty() || !contextInlines_.empty(); }
+  bool verifyContextInputs();
   bool validateArtifactIsolation(bool allowInplaceRootAlias);
   bool validateStagedArtifacts(const std::string &rootStagedPath,
                                const std::string &stagedBundlePath);
@@ -131,6 +164,9 @@ class LocalHeaderClosurePlan {
   std::map<std::string, std::size_t> nodeBySource_;
   std::vector<LocalHeaderEdge> edges_;
   LocalHeaderClosureStats stats_;
+  std::set<std::string> inheritedHelperHeaders_;
+  LocalHeaderInputEvidence contextEvidence_;
+  std::vector<LocalHeaderContextInline> contextInlines_;
   bool failed_ = false;
   std::string failureReason_;
 };
@@ -140,18 +176,26 @@ struct LocalHeaderRewriteContext {
   std::string sourcePath;
   std::string artifactPath;
   unsigned depth = 0;
+  // With a non-null virtualInput, main.cpp parses this exact buffer at the
+  // original root path using Tool.run, never runAndSave on an input file.
+  const std::string *virtualInput = nullptr;
+  LocalHeaderInputEvidence *inputEvidence = nullptr;
+  bool requireHelperTransaction = false;
+  bool helperTransactionCommitted = false;
 
   LocalHeaderIncludeDecision observe(
       unsigned sourceOffset,
       const std::string &originalSpelling,
       const std::string &resolvedPath,
       bool isAngled,
-      bool isLiteral) {
+      bool isLiteral,
+      unsigned resumeLine = 0,
+      const std::string &resumeFile = {}) {
     if (plan == nullptr)
       return {};
     return plan->observeInclude(sourcePath, artifactPath, depth, sourceOffset,
                                 originalSpelling, resolvedPath, isAngled,
-                                isLiteral);
+                                isLiteral, resumeLine, resumeFile);
   }
 };
 

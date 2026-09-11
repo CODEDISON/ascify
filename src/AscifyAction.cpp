@@ -43,6 +43,7 @@ THE SOFTWARE.
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/APSInt.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #if LLVM_VERSION_MAJOR >= 13
 #include "llvm/Support/SHA256.h"
@@ -103,6 +104,31 @@ enum FrozenNvidiaSampleHelperFileRole : unsigned {
   FrozenOfficialNvidiaSampleHelperImage = 1U << 3,
   FrozenOfficialNvidiaSampleHelperTimer = 1U << 4,
 };
+
+std::string contextualInputSha256(llvm::StringRef contents) {
+#if LLVM_VERSION_MAJOR >= 13
+  llvm::SHA256 digest;
+  digest.update(contents);
+  const auto bytes = digest.final();
+  static const char hex[] = "0123456789abcdef";
+  std::string result;
+  for (const auto byte : bytes) {
+    const unsigned value = static_cast<unsigned char>(byte);
+    result += hex[value >> 4];
+    result += hex[value & 15];
+  }
+  return result;
+#else
+  return {};
+#endif
+}
+
+std::string contextualCanonicalPath(llvm::StringRef path) {
+  llvm::SmallString<256> resolved;
+  if (path.empty() || llvm::sys::fs::real_path(path, resolved))
+    return {};
+  return resolved.str().str();
+}
 
 bool sha256Equals(llvm::StringRef contents, llvm::StringRef expectedHex) {
 #if LLVM_VERSION_MAJOR >= 13
@@ -674,12 +700,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 45554)
+  if (contents.size() != 46626)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "f3c23d99bb9751eb611d5184cbb73e8031e137361e0e00290ff1a3812792d37d");
+      "2be1369d53a6ca0701e5d69c57ec0bf5e473ed44944db6eb2cd2cd0988c5a3dc");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -706,12 +732,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 45554)
+  if (invalidBuffer || contents.size() != 46626)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "f3c23d99bb9751eb611d5184cbb73e8031e137361e0e00290ff1a3812792d37d");
+      "2be1369d53a6ca0701e5d69c57ec0bf5e473ed44944db6eb2cd2cd0988c5a3dc");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -3299,6 +3325,25 @@ void AscifyAction::FileChanged(
         nvidiaSampleHelperCudaFileStack.back());
     return;
   }
+  if (localHeaderContext != nullptr &&
+      localHeaderContext->inputEvidence != nullptr) {
+    const auto path = contextualCanonicalPath(sourceManager.getFilename(spelling));
+    if (!path.empty()) {
+      auto &evidence = *localHeaderContext->inputEvidence;
+      ++evidence.fileEntries[path];
+      // The root may be an intentional virtual input. Inventory its real
+      // source separately; the virtual input is covered by the token digest.
+      if (sourceManager.isWrittenInMainFile(spelling)) {
+        if (auto physical = llvm::MemoryBuffer::getFile(path))
+          evidence.fileSha256[path] = contextualInputSha256((*physical)->getBuffer());
+      } else {
+        bool invalid = false;
+        const auto contents = sourceManager.getBufferData(file, &invalid);
+        if (!invalid)
+          evidence.fileSha256[path] = contextualInputSha256(contents);
+      }
+    }
+  }
   const unsigned frozenRole =
       frozenNvidiaSampleHelperFileRole(sourceManager, spelling);
   const bool parentInsideRemovedHelper =
@@ -3383,6 +3428,22 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
   }
   outs() << "File included: " << file_name << "\n";
   auto &SM = getCompilerInstance().getSourceManager();
+  if (localHeaderContext != nullptr && localHeaderContext->inputEvidence != nullptr) {
+    const auto parent = contextualCanonicalPath(SM.getFilename(SM.getExpansionLoc(hash_loc)));
+    const auto child = contextualCanonicalPath(resolved_file_name);
+    if (!parent.empty() && !child.empty())
+      localHeaderContext->inputEvidence->originalEdges.push_back(
+          {parent, file_name.str(), child, {},
+           SM.getFileOffset(SM.getExpansionLoc(hash_loc))});
+  }
+  if (!is_angled && localHeaderContext != nullptr &&
+      localHeaderContext->inputEvidence != nullptr) {
+    const auto parent = contextualCanonicalPath(SM.getFilename(
+        SM.getExpansionLoc(hash_loc)));
+    if (!parent.empty())
+      localHeaderContext->inputEvidence->quotedIncludeParents.insert(parent);
+  }
+
   const bool recognizedNvidiaHelper =
       isRecognizedNvidiaSampleHelperCuda(resolved_file_name);
   if (!SM.isWrittenInMainFile(hash_loc)) {
@@ -3521,8 +3582,11 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
   const unsigned sourceOffset = fileLoc.isValid() ? SM.getFileOffset(fileLoc)
                                                    : 0;
   const std::string resolvedPath = resolved_file_name.str();
+  const auto presumedInclude = SM.getPresumedLoc(hash_loc);
   const LocalHeaderIncludeDecision decision = localHeaderContext->observe(
-      sourceOffset, file_name.str(), resolvedPath, is_angled, isLiteral);
+      sourceOffset, file_name.str(), resolvedPath, is_angled, isLiteral,
+      presumedInclude.isValid() ? presumedInclude.getLine() + 1 : 0,
+      presumedInclude.isValid() ? presumedInclude.getFilename() : "");
   if (decision.fatal) {
     clang::DiagnosticsEngine &DE = getCompilerInstance().getDiagnostics();
     const auto ID = DE.getCustomDiagID(clang::DiagnosticsEngine::Error,
@@ -3546,6 +3610,15 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
 void AscifyAction::PragmaDirective(
     clang::SourceLocation Loc,
     clang::PragmaIntroducerKind Introducer) {
+  if (localHeaderContext != nullptr &&
+      localHeaderContext->inputEvidence != nullptr) {
+    auto &sourceManager = getCompilerInstance().getSourceManager();
+    const auto path = contextualCanonicalPath(sourceManager.getFilename(
+        sourceManager.getExpansionLoc(Loc)));
+    if (!path.empty())
+      localHeaderContext->inputEvidence->pragmaFiles.insert(path);
+  }
+
   finalizePendingNvidiaSampleHelperPragma();
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
@@ -4913,6 +4986,11 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
     // on one of its macros: this prototype does not rewrite that header.
     if (!locationComesFromRecognizedNvidiaSampleHelper(
             sourceManager, macroLocation)) {
+      if ((name == "checkCudaErrors" || name == "getLastCudaError") &&
+          localHeaderContext != nullptr && localHeaderContext->depth == 0 &&
+          localHeaderContext->plan != nullptr)
+        localHeaderContext->plan->requireInheritedHelperContext(
+            sourceManager.getFilename(macroLocation).str());
       nvidiaSampleHelperUnsupportedMacroUse = true;
       llvm::errs()
           << "Ascify NVIDIA sample-helper closure: helper macro expansion "
@@ -5576,6 +5654,8 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
   // No shared state was changed before this point. Commit the complete set in
   // one assignment, then publish ranges, counters, and header state.
   *replacements = std::move(staged);
+  if (localHeaderContext != nullptr)
+    localHeaderContext->helperTransactionCommitted = true;
   SemanticRewriteRanges.insert(SemanticRewriteRanges.end(),
                                stagedSemanticRanges.begin(),
                                stagedSemanticRanges.end());
@@ -5665,6 +5745,15 @@ void AscifyAction::EndSourceFileAction() {
     return;
   }
   finalizeNvidiaSampleHelperClosure();
+  if (localHeaderContext != nullptr &&
+      localHeaderContext->requireHelperTransaction &&
+      !localHeaderContext->helperTransactionCommitted) {
+    const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "contextual local-header conversion requires a proven joint helper transaction");
+    getCompilerInstance().getDiagnostics().Report(diagnostic);
+    return;
+  }
   std::string includes;
   if (needsCudaCompatHeader && !hasCudaCompatHeader)
     includes += "#include <ascify/ascify_cuda_compat.hpp>\n";
@@ -5926,8 +6015,50 @@ void AscifyAction::ExecuteAction() {
   Statistics::cudaVersionUsedByClang = Statistics::convertCudaToolkitVersion(clang::ToCudaVersion(PP.getTargetInfo().getSDKVersion()));
   llvm::errs() << " !!!!!!! CUDA SDK version detected: " << int(clang::ToCudaVersion(PP.getTargetInfo().getSDKVersion())) << "\n";
 #endif
+  // Snapshot the expanded token stream before any source edits. Length-prefixed
+  // spelling includes actual __FILE__/__LINE__/__COUNTER__/include-level uses.
+  std::string contextualTokens;
+  if (localHeaderContext != nullptr && localHeaderContext->inputEvidence != nullptr) {
+    PP.setTokenWatcher([&](const clang::Token &token) {
+      const std::string spelling = token.isAnnotation() ? std::string()
+                                                        : PP.getSpelling(token);
+      contextualTokens += std::to_string(static_cast<unsigned>(token.getKind())) +
+          ":" + std::to_string(spelling.size()) + ":" + spelling + "\n";
+    });
+  }
   // Now we're done futzing with the lexer, have the subclass proceeed with Sema and AST matching.
   clang::ASTFrontendAction::ExecuteAction();
+  if (localHeaderContext != nullptr && localHeaderContext->inputEvidence != nullptr) {
+    PP.setTokenWatcher(nullptr);
+    auto &evidence = *localHeaderContext->inputEvidence;
+    evidence.tokenSha256 = contextualInputSha256(contextualTokens);
+    contextualTokens.clear();
+    std::map<std::string, std::string> definitions;
+    for (const auto &entry : PP.macros()) {
+      const auto *identifier = entry.first;
+      const auto *info = PP.getMacroDefinition(identifier).getMacroInfo();
+      if (info == nullptr)
+        continue;
+      std::string definition = std::to_string(info->isBuiltinMacro()) + ":" +
+          std::to_string(info->isFunctionLike()) + ":" +
+          std::to_string(info->isC99Varargs()) + ":" +
+          std::to_string(info->isGNUVarargs()) + ":";
+      for (const auto *parameter : info->params())
+        definition += parameter->getName().str() + ",";
+      for (const auto &token : info->tokens()) {
+        const auto spelling = PP.getSpelling(token);
+        definition += std::to_string(static_cast<unsigned>(token.getKind())) +
+            ":" + std::to_string(token.hasLeadingSpace()) +
+            ":" + std::to_string(spelling.size()) + ":" + spelling + "\n";
+      }
+      definitions[identifier->getName().str()] = std::move(definition);
+    }
+    std::string macros = "counter=" + std::to_string(PP.getCounterValue()) + "\n";
+    for (const auto &entry : definitions)
+      macros += std::to_string(entry.first.size()) + ":" + entry.first + ":" +
+          std::to_string(entry.second.size()) + ":" + entry.second;
+    evidence.macroSha256 = contextualInputSha256(macros);
+  }
   auto &SM = getCompilerInstance().getSourceManager();
   ascifyCudaCompatDeclarationConflict =
       hasInputTopLevelAscifyDeclaration(

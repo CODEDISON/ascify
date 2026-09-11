@@ -42,7 +42,7 @@ forbid_fixed() {
 check_static_contract() {
   require_fixed '{"cooperative_groups.h"' "$include_map"
   require_fixed '{"ascify/cooperative_groups_compat.hpp"' "$include_map"
-  forbid_fixed '{"cooperative_groups/reduce.h"' "$include_map"
+  require_fixed '{"cooperative_groups/reduce.h"' "$include_map"
 
   require_fixed '#include <simt_api/cooperative_groups.h>' "$header"
   require_fixed '__SIMT_DEVICE_FUNCTIONS_DECL__ inline void sync(const thread_block& group)' "$header"
@@ -53,7 +53,7 @@ check_static_contract() {
   require_fixed 'static unsigned int meta_group_rank()' "$header"
   require_fixed 'Size == 32' "$header"
   forbid_fixed 'coalesced_group' "$header"
-  forbid_fixed 'reduce(' "$header"
+  require_fixed 'reduce(const thread_block_tile<Size, ParentT>&' "$header"
   forbid_fixed 'ballot' "$header"
   forbid_fixed '__shared__' "$header"
 }
@@ -112,6 +112,12 @@ if command -v "$cxx" >/dev/null 2>&1; then
     "$repo_root/tests/rewrite/cooperative_groups_uint4_test.cpp" \
     -o "$test_tmp/uint4-shuffle"
   "$test_tmp/uint4-shuffle"
+
+  "$cxx" -std=c++17 -O2 -pthread \
+    -I"$legacy_stubs" -I"$repo_root/include" \
+    "$repo_root/tests/rewrite/cooperative_groups_reduce_host_test.cpp" \
+    -o "$test_tmp/reduce-host"
+  "$test_tmp/reduce-host"
 
   reject_case=1
   while [ "$reject_case" -le 2 ]; do

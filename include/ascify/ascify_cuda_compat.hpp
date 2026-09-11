@@ -58,6 +58,10 @@ extern int ascify_test_register_exit_cleanup(void (*callback)());
 #define ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3 1
 #endif
 
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3)
+#include <ascify/masked_warp_compat.hpp>
+#endif
+
 // CUDA spells alignment as `__align__(N)`. Keeping the argument in a macro
 // preserves both dependent expressions such as sizeof(T) and the declaration
 // position selected by the source.
@@ -1077,6 +1081,17 @@ __aicore__ ASCIFY_FORCEINLINE int all_sync(uint32_t mask, int predicate) {
   return warp_reduce_min(int32_t{predicate != 0});
 }
 
+template<typename Dependency = void>
+__aicore__ ASCIFY_FORCEINLINE uint32_t ballot_sync(uint32_t mask, int predicate) {
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3)
+  return detail::converged_ballot_sync(mask, predicate);
+#else
+  static_assert(detail::dependentFalse<Dependency>::value,
+                "Ascify ballot_sync requires the verified legacy active-mask API");
+  __builtin_unreachable();
+#endif
+}
+
 template<typename T>
 __aicore__ ASCIFY_FORCEINLINE T shfl_sync(uint32_t mask, T value, int source_lane,
                                           int width = 32) {
@@ -1104,6 +1119,17 @@ __aicore__ ASCIFY_FORCEINLINE T shfl_up_sync(uint32_t mask, T value, unsigned in
 template<typename T>
 __aicore__ ASCIFY_FORCEINLINE T shfl_down_sync(uint32_t mask, T value, unsigned int delta,
                                                int width = 32) {
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3)
+  if constexpr (std::is_same<T, int32_t>::value ||
+                std::is_same<T, uint32_t>::value || std::is_same<T, float>::value) {
+    // Keep existing full-mask calls on their original native path. Restricted
+    // partial-mask calls need an already converged cohort; other scalar types
+    // retain the earlier full-mask-only contract and native overload set.
+    if (mask != UINT32_MAX || width == 1) {
+      return detail::converged_shfl_down_sync(mask, value, delta, width);
+    }
+  }
+#endif
   detail::requireFullWarpMask(mask);
   detail::requireSupportedWarpWidth(width);
 #if defined(ASCIFY_SIMT_HEADER_FAMILY_PUBLIC_85)

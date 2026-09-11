@@ -43,12 +43,14 @@ const std::map<llvm::StringRef, dppCounter> CUDA_DEVICE_FUNCTION_MAP = [] {
   m["CUDART_MIN_NORMAL_F"] = {"__FLT_MIN__", CONV_NUMERIC_LITERAL, API_RUNTIME, 0};
   m["CUDART_NEG_ZERO_F"] = {"(-0.0f)",    CONV_NUMERIC_LITERAL, API_RUNTIME, 0};
   m["CUDART_ZERO_F"]     = {"(0.0f)",     CONV_NUMERIC_LITERAL, API_RUNTIME, 0};
-  // Preserve the CUDA shuffle signature. The compatibility shim validates that
-  // the mask is a full warp before calling the unmasked beta3 asc_shfl* API.
+  // Preserve CUDA warp signatures. Legacy ballot and 32-bit down-shuffle
+  // admit only already-converged exact-active masks; other shuffle paths
+  // retain the full-mask requirement before using native unmasked operations.
   m["__shfl_down_sync"]  = {"ascify::shfl_down_sync", CONV_DEVICE_FUNC, API_RUNTIME, 0};
   m["__shfl_up_sync"]    = {"ascify::shfl_up_sync",   CONV_DEVICE_FUNC, API_RUNTIME, 0};
   m["__shfl_xor_sync"]   = {"ascify::shfl_xor_sync",  CONV_DEVICE_FUNC, API_RUNTIME, 0};
   m["__shfl_sync"]       = {"ascify::shfl_sync",      CONV_DEVICE_FUNC, API_RUNTIME, 0};
+  m["__ballot_sync"]     = {"ascify::ballot_sync",    CONV_DEVICE_FUNC, API_RUNTIME, 0};
   m["__any_sync"]        = {"ascify::any_sync",       CONV_DEVICE_FUNC, API_RUNTIME, 0};
   m["__all_sync"]        = {"ascify::all_sync",       CONV_DEVICE_FUNC, API_RUNTIME, 0};
   // The facade retains CUDA tile result types while using native CANN groups.

@@ -28,6 +28,8 @@ run_check "SIMT compatibility static contract" \
   sh "$rewrite_dir/check_simt_compat.sh"
 run_check "partial device properties and warp vote contracts" \
   sh "$rewrite_dir/check_device_properties.sh"
+run_check "converged partial-mask ballot and shuffle contracts" \
+  bash "$rewrite_dir/check_masked_warp_compat.sh"
 run_check "registered symbol copy argument and error contracts" \
   bash "$rewrite_dir/check_symbol_compat.sh"
 run_check "half2 parser ADL and dependent builtin lookup" \
@@ -1189,10 +1191,14 @@ translate_fixture \
   "$rewrite_dir/cooperative_groups_compat_input.cu" \
   "$cooperative_groups_translated" portable precise \
   --frontend-compat=ascify-admitted-v1
-reject_frontend_compat_fixture \
+translate_fixture \
   "$repo_root/tests/frontend_compat/reduce_input.cu" \
-  "$work_dir/frontend_compat_reduce.cce" ascify-admitted-v1 \
-  "does not admit cooperative_groups/reduce.h"
+  "$work_dir/frontend_compat_reduce.cce" dav-c310-vec fast \
+  --frontend-compat=ascify-admitted-v1
+reject_frontend_compat_fixture \
+  "$repo_root/tests/frontend_compat/reduce_group_reject.cu" \
+  "$work_dir/frontend_compat_reduce_group.cce" ascify-admitted-v1 \
+  "multi-warp subgroup synchronization is not implemented"
 reject_frontend_compat_fixture \
   "$repo_root/tests/frontend_compat/block_sync_input.cu" \
   "$work_dir/frontend_compat_unknown.cce" unknown \
