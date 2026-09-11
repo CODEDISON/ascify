@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <type_traits>
 #include <simt_api/device_warp_functions.h>
+#include <ascify/device_contract_reject.hpp>
 
 namespace ascify {
 namespace detail {
@@ -18,7 +19,7 @@ __SIMT_DEVICE_FUNCTIONS_DECL__ inline void require_converged_warp_mask(
   const uint32_t active = asc_activemask();
   const uint32_t invalid = asc_ballot(mask != active || active == 0);
   if (invalid != 0 || active == 0) {
-    __builtin_trap();
+    reject_device_contract();
   }
 }
 
@@ -41,7 +42,7 @@ __SIMT_DEVICE_FUNCTIONS_DECL__ inline T converged_shfl_down_sync(
   const bool valid_width = width == 1 || width == 2 || width == 4 ||
                            width == 8 || width == 16 || width == 32;
   if (asc_ballot(!valid_width) != 0) {
-    __builtin_trap();
+    reject_device_contract();
   }
   // Preserve physical lane addressing and native width boundaries. A source
   // lane outside mask has an undefined CUDA result; never substitute zero or

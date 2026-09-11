@@ -32,3 +32,21 @@ EOF
   fi
 done
 echo 'masked_warp unsupported types rejected: double int64_t uint64_t'
+
+# CPU debug makes the SDK trap a no-op; our guard must still actually reject.
+"$compiler" -std=c++17 -O0 -DASCENDC_CPU_DEBUG -D__NPU_ARCH__=3510 \
+  -I"$test_dir/masked_warp_stubs" -I"$repo_dir/include" \
+  "$test_dir/masked_warp_compat_test.cpp" -o "$scratch_dir/masked-cpu-debug"
+"$scratch_dir/masked-cpu-debug"
+
+
+# SDK-specific routing and macro preservation remain active under NDEBUG and
+# ASCENDC_DUMP=0; the fake SDK only records calls, not actual device termination.
+for macro_state in 0 1; do
+  "$compiler" -std=c++17 -DNDEBUG -DASCENDC_DUMP=0 \
+    -DASCIFY_TEST_ASSERT_DEFINED="$macro_state" \
+    -I"$test_dir/stubs" -I"$repo_dir/include" \
+    "$test_dir/device_contract_reject_host_test.cpp" -o "$scratch_dir/reject-routing"
+  "$scratch_dir/reject-routing"
+done
+echo 'SDK rejection routing active with NDEBUG; assertion macros preserved'

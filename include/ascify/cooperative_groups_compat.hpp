@@ -21,6 +21,7 @@
 #include <simt_api/device_sync_functions.h>
 #include <simt_api/device_warp_functions.h>
 #include <simt_api/cooperative_groups.h>
+#include <ascify/device_contract_reject.hpp>
 
 namespace cooperative_groups {
 
@@ -148,7 +149,7 @@ __SIMT_DEVICE_FUNCTIONS_DECL__ inline
 reduce(const thread_block_tile<Size, ParentT>& group, T value, plus<T> operation) {
   // A complete tile must execute this register collective together. In
   // particular, do not substitute a block barrier when another warp diverges.
-  if (asc_activemask() != 0xffffffffu) { __builtin_trap(); }
+  if (asc_activemask() != 0xffffffffu) { ::ascify::detail::reject_device_contract(); }
   for (unsigned int offset = Size / 2; offset != 0; offset >>= 1) {
     value = operation(value, group.shfl_down(value, offset));
   }

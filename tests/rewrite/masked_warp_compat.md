@@ -72,8 +72,9 @@ zero-mask
 invalid-width
 ```
 
-Each negative run must report a non-success synchronization status; a kernel
-that returns successfully is a failure. The test itself does not change the
+Each negative run must report synchronization status 507035 from the verified
+SDK device trap. A kernel that returns successfully, or an unrelated runtime
+error, is a failure. The test itself does not change the
 main compatibility header, converter routing, or hardware settings.
 
 ## Reduction boundary

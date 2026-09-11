@@ -45,9 +45,12 @@ struct LocalHeaderEdge {
 // Evidence belongs to one parse of the original root include context. It is
 // never an instruction to inject an assumed header or macro environment.
 struct LocalHeaderInputEvidence {
+  bool standardPreprocessing = false;
   std::string tokenSha256;
   std::string macroSha256;
   std::map<std::string, std::string> fileSha256;
+  std::map<std::string, std::string> pathBindings;
+  std::string changedPathBinding;
   std::map<std::string, unsigned> fileEntries;
   std::set<std::string> pragmaFiles;
   std::set<std::string> quotedIncludeParents;

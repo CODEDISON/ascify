@@ -1195,6 +1195,17 @@ translate_fixture \
   "$repo_root/tests/frontend_compat/reduce_input.cu" \
   "$work_dir/frontend_compat_reduce.cce" dav-c310-vec fast \
   --frontend-compat=ascify-admitted-v1
+translate_fixture \
+  "$repo_root/tests/frontend_compat/masked_warp_input.cu" \
+  "$work_dir/frontend_compat_masked_warp.cce" dav-c310-vec fast \
+  --frontend-compat=ascify-admitted-v1
+"$python" -B - "$work_dir/frontend_compat_masked_warp.cce" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+assert "ascify::ballot_sync" in text and "ascify::shfl_down_sync" in text
+assert "__ballot_sync(" not in text and "__shfl_down_sync(" not in text
+PY
 reject_frontend_compat_fixture \
   "$repo_root/tests/frontend_compat/reduce_group_reject.cu" \
   "$work_dir/frontend_compat_reduce_group.cce" ascify-admitted-v1 \

@@ -71,11 +71,11 @@ int main(int argc, char** argv) {
       return 2;
     maskedWarpRejectProbe<<<dim3(1), dim3(32)>>>(negative_mode, device_output);
     const aclError status = ascify::cudaDeviceSynchronize();
-    printf("masked_warp mode=%s expected_device_rejection=1 status=%d\n",
+    printf("masked_warp mode=%s expected_device_rejection=1 expected_status=507035 status=%d\n",
            modes[negative_mode], static_cast<int>(status));
     // Each negative case must run in a fresh process: a deliberate device trap
     // can invalidate the current context. A successful kernel is a test failure.
-    return status == ACL_SUCCESS ? 3 : 0;
+    return static_cast<int>(status) == 507035 ? 0 : 3;
   }
 
   const uint32_t masks[] = {UINT32_MAX, 0x0000ffffU, 0x000000ffU,

@@ -29,12 +29,14 @@ def main():
         header = inputs / "launch_check.cuh"
         original_root, original_header = root.read_text(), header.read_text()
 
-        def convert(output, recursive=True):
+        def convert(output, recursive=True, standard=True):
             args = [binary, str(root), f"--cuda-path={cuda}",
                     f"--clang-resource-directory={resource}", "-o", str(output),
                     "-I" + str(HELPERS)]
             if recursive:
                 args.append("--local-headers-recursive")
+            if standard:
+                args.append("--default-preprocessor")
             args += ["--", "-std=c++17", "-I" + str(HELPERS)]
             before = identity(inputs.iterdir())
             result = subprocess.run(args, text=True, capture_output=True)
@@ -53,6 +55,13 @@ def main():
         bundle = Path(str(output) + ".headers")
         marker = bundle / ".ascify-local-closure"
 
+        # The default converter visits excluded conditional blocks, which is
+        # unsuitable for proving actual C++ token/counter equivalence.
+        result = convert(output, standard=False)
+        assert result.returncode != 0 and "require standard preprocessing" in result.stderr, result.stderr
+        assert not output.exists() and not bundle.exists()
+        print("retained conditional mode rejected without publication")
+
         def successful():
             result = convert(output)
             assert result.returncode == 0, result.stdout + result.stderr
@@ -62,9 +71,11 @@ def main():
             assert "ASCIFY_NVIDIA_SAMPLE_GET_LAST_CUDA_ERROR" in text, text
             proof = marker.read_text()
             assert "context_proof=expanded-tokens-and-final-macros-v1" in proof, proof
+            assert "context_standard_preprocessing=1" in proof, proof
             for path in (root, header):
                 sha = hashlib.sha256(path.read_bytes()).hexdigest()
                 assert f"context_input={path}\t{sha}\n" in proof, proof
+                assert f"context_path_binding={path}\t{path.resolve()}\n" in proof, proof
             assert f"context_inline={header}\t" in proof, proof
             assert f"context_original_edge={root}\t{header}\t" in proof, proof
             print("joint helper conversion published with original input and include-graph evidence")
@@ -84,6 +95,9 @@ def main():
                           original_header + '#endif\n')
         successful()
         published = identity([output, marker])
+        result = convert(output, standard=False)
+        assert result.returncode != 0 and "require standard preprocessing" in result.stderr, result.stderr
+        assert identity([output, marker]) == published
 
         def rejected(label, child_text, root_text=original_root, reason="contextual"):
             root.write_text(root_text)
@@ -121,7 +135,7 @@ def main():
         rejected("joint_proof", original_header,
                  original_root + '\n#ifdef getLastCudaError\nconstexpr int observes_helper = 1;\n#endif\n',
                  reason="joint helper transaction")
-        print("context success plus eight fail-closed boundaries and atomic retries passed")
+        print("context success plus nine fail-closed boundaries and atomic retries passed")
     assert fixture_before == identity(FIXTURE.iterdir()), "fixed fixture modified"
 
 

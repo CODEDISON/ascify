@@ -112,5 +112,23 @@ partial tile participation. `masked_warp_device_probe.cce` uses the public
 mapped wrappers for full/prefix/sparse/single-lane masks, six widths and seven
 deltas, and separately counts undefined source-lane cases without inventing
 expected values. Rejection modes run in separate processes after context traps.
+The initial DT reduction probe exposed that `__builtin_trap` lowers to an
+unsupported host `abort` call when a rejection branch survives optimization.
+The shared `device_contract_reject.hpp` now calls the SDK's direct
+`__asc_simt_vf::__trap` for 3510 device builds. It preserves caller `assert` and
+`ascendc_assert` macros and the SDK's seven assertion-helper macros around
+the SDK include; neither `NDEBUG` nor
+`ASCENDC_DUMP=0` disables this direct call. CPU debug uses the host trap because
+the SDK debug branch is a no-op. Legacy mask and width guards use the same
+helper; the public 8.5 paths retain their previous behavior.
+
+An isolated DT CANN 9.1.0 experiment compiled this SDK call with ordinary O2,
+linked through CCEC, checked all 32 positive outputs, and ran the rejection in
+a separate process on locked device 1. Positive synchronization returned 0;
+negative synchronization returned exactly 507035 without timing out. Source,
+compiler, SDK, and included main-header SHA identities were unchanged. This
+establishes the chosen error mechanism; it does not replace the complete
+CG/mask numerical probes. Their negative modes require exactly 507035, so
+unrelated allocation or device initialization errors cannot count as passes.
 All target tests require actual compile, link, launch, synchronization and
 readback evidence before a device pass can be reported.

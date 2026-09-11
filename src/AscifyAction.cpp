@@ -38,6 +38,7 @@ THE SOFTWARE.
 #include "clang/Basic/TokenKinds.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Lexer.h"
+#include "clang/Lex/PreprocessorOptions.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/ASTMatchers/ASTMatchers.h"
 #include "llvm/ADT/APInt.h"
@@ -128,6 +129,17 @@ std::string contextualCanonicalPath(llvm::StringRef path) {
   if (path.empty() || llvm::sys::fs::real_path(path, resolved))
     return {};
   return resolved.str().str();
+}
+
+std::string contextualRecordPathBinding(LocalHeaderInputEvidence &evidence,
+                                        llvm::StringRef path) {
+  const auto canonical = contextualCanonicalPath(path);
+  if (canonical.empty())
+    return {};  // Synthetic predefines and scratch buffers have no file identity.
+  const auto inserted = evidence.pathBindings.emplace(path.str(), canonical);
+  if (!inserted.second && inserted.first->second != canonical)
+    evidence.changedPathBinding = path.str();
+  return canonical;
 }
 
 bool sha256Equals(llvm::StringRef contents, llvm::StringRef expectedHex) {
@@ -700,12 +712,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 46626)
+  if (contents.size() != 46822)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "2be1369d53a6ca0701e5d69c57ec0bf5e473ed44944db6eb2cd2cd0988c5a3dc");
+      "1f80d5d09f2075a6d56f8a38e15f01b637c5041e2fa0577d34105a93b93c76ce");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -732,12 +744,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 46626)
+  if (invalidBuffer || contents.size() != 46822)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "2be1369d53a6ca0701e5d69c57ec0bf5e473ed44944db6eb2cd2cd0988c5a3dc");
+      "1f80d5d09f2075a6d56f8a38e15f01b637c5041e2fa0577d34105a93b93c76ce");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -3327,9 +3339,9 @@ void AscifyAction::FileChanged(
   }
   if (localHeaderContext != nullptr &&
       localHeaderContext->inputEvidence != nullptr) {
-    const auto path = contextualCanonicalPath(sourceManager.getFilename(spelling));
+    auto &evidence = *localHeaderContext->inputEvidence;
+    const auto path = contextualRecordPathBinding(evidence, sourceManager.getFilename(spelling));
     if (!path.empty()) {
-      auto &evidence = *localHeaderContext->inputEvidence;
       ++evidence.fileEntries[path];
       // The root may be an intentional virtual input. Inventory its real
       // source separately; the virtual input is covered by the token digest.
@@ -3429,8 +3441,9 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
   outs() << "File included: " << file_name << "\n";
   auto &SM = getCompilerInstance().getSourceManager();
   if (localHeaderContext != nullptr && localHeaderContext->inputEvidence != nullptr) {
-    const auto parent = contextualCanonicalPath(SM.getFilename(SM.getExpansionLoc(hash_loc)));
-    const auto child = contextualCanonicalPath(resolved_file_name);
+    auto &evidence = *localHeaderContext->inputEvidence;
+    const auto parent = contextualRecordPathBinding(evidence, SM.getFilename(SM.getExpansionLoc(hash_loc)));
+    const auto child = contextualRecordPathBinding(evidence, resolved_file_name);
     if (!parent.empty() && !child.empty())
       localHeaderContext->inputEvidence->originalEdges.push_back(
           {parent, file_name.str(), child, {},
@@ -6019,6 +6032,10 @@ void AscifyAction::ExecuteAction() {
   // spelling includes actual __FILE__/__LINE__/__COUNTER__/include-level uses.
   std::string contextualTokens;
   if (localHeaderContext != nullptr && localHeaderContext->inputEvidence != nullptr) {
+#if LLVM_VERSION_MAJOR >= 10
+    localHeaderContext->inputEvidence->standardPreprocessing =
+        !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks;
+#endif
     PP.setTokenWatcher([&](const clang::Token &token) {
       const std::string spelling = token.isAnnotation() ? std::string()
                                                         : PP.getSpelling(token);

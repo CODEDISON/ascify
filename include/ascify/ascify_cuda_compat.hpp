@@ -1054,12 +1054,22 @@ namespace detail {
 __aicore__ ASCIFY_FORCEINLINE void requireFullWarpMask(uint32_t mask) {
   // Both admitted target families expose unmasked shuffle operations. Trap
   // instead of silently widening a CUDA partial-mask collective.
-  if (mask != UINT32_MAX) { __builtin_trap(); }
+  if (mask != UINT32_MAX) {
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3)
+    reject_device_contract();
+#else
+    __builtin_trap();
+#endif
+  }
 }
 
 __aicore__ ASCIFY_FORCEINLINE void requireSupportedWarpWidth(int width) {
   if (width != 2 && width != 4 && width != 8 && width != 16 && width != 32) {
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3)
+    reject_device_contract();
+#else
     __builtin_trap();
+#endif
   }
 }
 

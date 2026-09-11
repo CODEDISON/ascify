@@ -150,11 +150,11 @@ int main(int argc, char** argv) {
       return 2;
     cooperativeReduceRejectProbe<<<dim3(1), dim3(8, 4, 2)>>>(device_output);
     const aclError status = ascify::cudaDeviceSynchronize();
-    printf("cg_reduce partial-participation expected_device_rejection=1 status=%d\n",
+    printf("cg_reduce partial-participation expected_device_rejection=1 expected_status=507035 status=%d\n",
            static_cast<int>(status));
     // A device trap may invalidate this context. Run this mode in its own
     // process, after the positive test, and do not reuse it for another case.
-    return status == ACL_SUCCESS ? 3 : 0;
+    return static_cast<int>(status) == 507035 ? 0 : 3;
   }
 
   constexpr unsigned int blocks = 8;

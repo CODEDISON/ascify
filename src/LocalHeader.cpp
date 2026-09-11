@@ -98,10 +98,13 @@ bool writeManifest(const std::string &path,
   if (!plan.contextInlines().empty()) {
     const auto &proof = plan.contextEvidence();
     out << "context_proof=expanded-tokens-and-final-macros-v1\n";
+    out << "context_standard_preprocessing=1\n";
     out << "context_tokens_sha256=" << proof.tokenSha256 << "\n";
     out << "context_macros_sha256=" << proof.macroSha256 << "\n";
     for (const auto &input : proof.fileSha256)
       out << "context_input=" << input.first << "\t" << input.second << "\n";
+    for (const auto &binding : proof.pathBindings)
+      out << "context_path_binding=" << binding.first << "\t" << binding.second << "\n";
     for (const auto &edge : proof.originalEdges)
       out << "context_original_edge=" << edge.parentSourcePath << "\t"
           << edge.childSourcePath << "\t" << edge.sourceOffset << "\t"
@@ -746,6 +749,17 @@ void LocalHeaderClosurePlan::retainContextEvidence(
 }
 
 bool LocalHeaderClosurePlan::verifyContextInputs() {
+  if (!contextEvidence_.changedPathBinding.empty()) {
+    fail("contextual input path binding changed during parse: " +
+         contextEvidence_.changedPathBinding);
+    return false;
+  }
+  for (const auto &binding : contextEvidence_.pathBindings) {
+    if (canonicalExisting(binding.first) != binding.second) {
+      fail("contextual input path binding changed: " + binding.first);
+      return false;
+    }
+  }
   for (const auto &file : contextEvidence_.fileSha256) {
     std::string contents;
     if (canonicalExisting(file.first) != file.first ||
@@ -997,6 +1011,11 @@ bool ascifySourceWithLocalHeaderClosure(
   // instead; neither the discovery output nor a failed joint edit is published.
   if (recursive && !plan.inheritedHelperHeaders().empty()) {
     auto contextualize = [&]() -> bool {
+      if (!discoveryEvidence.standardPreprocessing || AscifyAMAP) {
+        plan.fail("contextual local headers require standard preprocessing "
+                  "(--default-preprocessor) without --amap");
+        return false;
+      }
       if (TargetRecipe != "none") {
         plan.fail("contextual local headers do not admit target recipes");
         return false;
@@ -1019,6 +1038,15 @@ bool ascifySourceWithLocalHeaderClosure(
                               OptionsParserPtr, ascify_exe, mainSourceAbsPath, false,
                               &originalContext) || originalPlan.failed()) {
         plan.fail("original include-context proof parse failed");
+        return false;
+      }
+      // The parse used this saved buffer, not a fresh read in FileChanged.
+      // Never label an old virtual buffer with a concurrently replaced root's SHA.
+      const auto originalRootSha256 = inputSha256(originalInput);
+      if (!originalEvidence.standardPreprocessing || originalRootSha256.empty() ||
+          originalEvidence.fileSha256[originalPlan.rootSourcePath()] != originalRootSha256 ||
+          !originalEvidence.changedPathBinding.empty()) {
+        plan.fail("contextual root buffer identity or input path binding changed");
         return false;
       }
       if (originalPlan.inheritedHelperHeaders() != plan.inheritedHelperHeaders()) {
@@ -1107,11 +1135,24 @@ bool ascifySourceWithLocalHeaderClosure(
         plan.fail("contextual joint helper transaction could not be proven");
         return false;
       }
-      if (originalEvidence.tokenSha256.empty() || originalEvidence.macroSha256.empty() ||
+      if (!jointEvidence.standardPreprocessing ||
+          originalEvidence.tokenSha256.empty() || originalEvidence.macroSha256.empty() ||
           originalEvidence.tokenSha256 != jointEvidence.tokenSha256 ||
           originalEvidence.macroSha256 != jointEvidence.macroSha256) {
         plan.fail("contextual local-header expanded tokens or final macro state differ");
         return false;
+      }
+      if (!jointEvidence.changedPathBinding.empty()) {
+        plan.fail("contextual input path binding changed during joint parse: " +
+                  jointEvidence.changedPathBinding);
+        return false;
+      }
+      for (const auto &binding : jointEvidence.pathBindings) {
+        const auto previous = originalEvidence.pathBindings.find(binding.first);
+        if (previous == originalEvidence.pathBindings.end() || previous->second != binding.second) {
+          plan.fail("contextual expansion changed an input path binding: " + binding.first);
+          return false;
+        }
       }
       for (const auto &file : jointEvidence.fileSha256) {
         if (!originalEvidence.fileSha256.count(file.first) ||
