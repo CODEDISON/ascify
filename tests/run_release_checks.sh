@@ -32,6 +32,8 @@ run_check "converged partial-mask ballot and shuffle contracts" \
   bash "$rewrite_dir/check_masked_warp_compat.sh"
 run_check "registered symbol copy argument and error contracts" \
   bash "$rewrite_dir/check_symbol_compat.sh"
+run_check "private device copy representation and size contracts" \
+  sh "$rewrite_dir/check_device_memory_compat.sh"
 run_check "half2 parser ADL and dependent builtin lookup" \
   "$python" -B tests/rewrite/check_half2_parse_lookup.py
 run_check "host float max semantic admission" \
@@ -40,8 +42,12 @@ run_check "target ABI compatibility static contract" \
   sh "$rewrite_dir/check_target_abi_compat.sh"
 run_check "NVIDIA sample-helper compatibility contract" \
   sh "$rewrite_dir/check_sample_helper_compat.sh"
+run_check "dependent sample-helper emitted type domain" \
+  "$python" -B "$rewrite_dir/check_sample_helper_template_domain.py"
 run_check "narrow cooperative-groups compatibility contract" \
   sh "$rewrite_dir/check_cooperative_groups_compat.sh"
+run_check "uniform block reduction scratch and floating-point tree contracts" \
+  sh "$rewrite_dir/check_uniform_block_reduction.sh"
 run_check "opt-in frontend compatibility admission contract" \
   sh "$repo_root/tests/frontend_compat/check_frontend_compat.sh"
 run_check "translated local include closure static contract" \
@@ -120,6 +126,18 @@ run_check "half2 syntax and separate rounding conversion" \
   sh "$rewrite_dir/check_half2_translation.sh"
 run_check "inherited parent helper conversion boundary" \
   "$python" -B "$rewrite_dir/check_inherited_sample_helper_context.py"
+run_check "private device copy AST admission and refusal boundaries" \
+  sh "$rewrite_dir/check_device_memory_translation.sh"
+run_check "real sample-helper dependent status domain and atomic publication" \
+  "$python" -B "$rewrite_dir/check_sample_helper_template_domain.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+run_check "uniform block reduction whole-TU admission and publication boundaries" \
+  "$python" -B "$repo_root/tests/frontend_compat/check_uniform_block_reduction.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
 
 translate_fixture() {
   input=$1

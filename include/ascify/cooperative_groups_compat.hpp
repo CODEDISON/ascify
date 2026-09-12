@@ -157,6 +157,7 @@ reduce(const thread_block_tile<Size, ParentT>& group, T value, plus<T> operation
 }
 
 }  // namespace ascify_cg
+#include <ascify/uniform_block_reduction_compat.hpp>
 #endif
 
 #endif  // ASCIFY_COOPERATIVE_GROUPS_COMPAT_HPP

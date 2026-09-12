@@ -61,6 +61,7 @@ extern int ascify_test_register_exit_cleanup(void (*callback)());
 #if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3)
 #include <ascify/masked_warp_compat.hpp>
 #endif
+#include <ascify/device_memory_compat.hpp>
 
 // CUDA spells alignment as `__align__(N)`. Keeping the argument in a macro
 // preserves both dependent expressions such as sizeof(T) and the declaration

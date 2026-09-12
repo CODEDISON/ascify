@@ -1,0 +1,197 @@
+// Direct product-adapter probe. All block threads execute every collective.
+// Conversion-time admission is tested separately with CUDA proof fixtures.
+#include <ascify/ascify_cuda_compat.hpp>
+#include <ascify/cooperative_groups_compat.hpp>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <vector>
+
+namespace proto = ascify_cg;
+constexpr unsigned kBlocks = 3, kRounds = 8;
+struct Record { int i; float f; unsigned rank, x, y, z; };
+
+template <unsigned B, unsigned G>
+ASCIFY_GLOBAL void uniformMultiwarpProbe(const int* input_i, const float* input_f,
+                                         Record* output) {
+  __ubuf__ proto::block_tile_memory<B> scratch;
+  auto block = proto::this_thread_block(scratch);
+  auto tile = proto::tiled_partition<G>(block);
+  const unsigned slot = threadIdx.x + (B / 8) * threadIdx.y + (B / 2) * threadIdx.z;
+  const unsigned rank = threadIdx.x + blockDim.x *
+                        (threadIdx.y + blockDim.y * threadIdx.z);
+  for (unsigned round = 0; round < kRounds; ++round) {
+    const unsigned index = (round * kBlocks + blockIdx.x) * B + slot;
+    Record result;
+    result.rank = rank;
+    result.x = threadIdx.x; result.y = threadIdx.y; result.z = threadIdx.z;
+    result.i = proto::reduce(tile, input_i[index], proto::plus<int>());
+    result.f = proto::reduce(tile, input_f[index], proto::plus<float>());
+    output[index] = result;
+  }
+}
+
+static uint32_t bits(float value) {
+  uint32_t result;
+  std::memcpy(&result, &value, sizeof(result));
+  return result;
+}
+template <typename T> static T scalar_tree32(T (&work)[32], unsigned leaves = 32) {
+  // One shrinking scalar tree, not a per-lane emulation of the device kernel.
+  // Volatile forces a float32 rounding point at every addition.
+  for (unsigned stride = leaves / 2; stride != 0; stride /= 2)
+    for (unsigned i = 0; i < stride; ++i) {
+      volatile T rounded = work[i] + work[i + stride];
+      work[i] = rounded;
+    }
+  return work[0];
+}
+static float sample_float(unsigned signature, unsigned lane) {
+  const unsigned local = lane % 32;
+  const float tag = static_cast<float>(signature);
+  if (local == 0) return 16777216.0f;
+  if (local == 16) return 1.0f;
+  if (local == 8) return -16777216.0f;
+  if (local == 4) return 4096.0f + tag;
+  if (local == 20) return -4096.0f;
+  if (local == 6) return tag * 0.00390625f;
+  if (local == 22) return -tag * 0.001953125f;
+  return tag + (local % 2 ? -1.0f : 1.0f) * (local % 7 + 1) * 0.125f;
+}
+
+template <unsigned B, unsigned G> static bool run_case(unsigned long long& total) {
+  constexpr unsigned count = kBlocks * kRounds * B;
+  constexpr unsigned tiles = B / G;
+  std::vector<int> input_i(count);
+  std::vector<float> input_f(count);
+  std::vector<Record> output(count);
+  std::memset(output.data(), 0xa5, count * sizeof(Record));
+  for (unsigned round = 0; round < kRounds; ++round)
+    for (unsigned block = 0; block < kBlocks; ++block)
+      for (unsigned rank = 0; rank < B; ++rank) {
+        const unsigned index = (round * kBlocks + block) * B + rank;
+        const unsigned tile = rank / G, lane = rank % G;
+        const int signature = static_cast<int>((round + 1) * 1000 + (block + 1) * 100 + tile * 29);
+        input_i[index] = (lane % 4 == 0 ? -signature : signature) +
+                         static_cast<int>(lane % 17) - 8;
+        input_f[index] = round == 0 ? -0.0f : round == 1 ? INFINITY :
+                         round == 2 ? (lane % 2 ? INFINITY : -INFINITY) :
+                         sample_float((round + 1) * 8 + (block + 1) * 2 + tile * 4, lane);
+      }
+
+  int* device_i = nullptr;
+  float* device_f = nullptr;
+  Record* device_output = nullptr;
+  bool ok = false;
+  auto checked = [&](aclError status, const char* operation) {
+    if (status != ACL_SUCCESS)
+      std::printf("uniform_multiwarp B=%u G=%u operation=%s status=%d\n",
+                  B, G, operation, static_cast<int>(status));
+    return status == ACL_SUCCESS;
+  };
+  do {
+    if (!checked(ascify::cudaMalloc(&device_i, count * sizeof(int)), "allocate_i") ||
+        !checked(ascify::cudaMalloc(&device_f, count * sizeof(float)), "allocate_f") ||
+        !checked(ascify::cudaMalloc(&device_output, count * sizeof(Record)), "allocate_output")) break;
+    if (!checked(ascify::cudaMemcpy(device_i, input_i.data(), count * sizeof(int),
+                                   ACL_MEMCPY_HOST_TO_DEVICE), "copy_i") ||
+        !checked(ascify::cudaMemcpy(device_f, input_f.data(), count * sizeof(float),
+                                   ACL_MEMCPY_HOST_TO_DEVICE), "copy_f") ||
+        !checked(ascify::cudaMemcpy(device_output, output.data(), count * sizeof(Record),
+                                   ACL_MEMCPY_HOST_TO_DEVICE), "initialize_output")) break;
+    uniformMultiwarpProbe<B, G><<<dim3(kBlocks), dim3(B / 8, 4, 2)>>>(
+        device_i, device_f, device_output);
+    if (!checked(ascify::cudaDeviceSynchronize(), "synchronize") ||
+        !checked(ascify::cudaMemcpy(output.data(), device_output, count * sizeof(Record),
+                                   ACL_MEMCPY_DEVICE_TO_HOST), "read_output")) break;
+
+    unsigned int_errors = 0, float_errors = 0, bit_errors = 0, rank_errors = 0, oracle_errors = 0;
+    unsigned checked_records = 0, checked_groups = 0, distinct_512_pairs = 0;
+    double max_math_error = 0.0;
+    for (unsigned round = 0; round < kRounds; ++round) {
+      for (unsigned block = 0; block < kBlocks; ++block) {
+        int first_group_i = 0;
+        uint32_t first_group_f = 0;
+        for (unsigned tile = 0; tile < tiles; ++tile) {
+          const unsigned base = (round * kBlocks + block) * B + tile * G;
+          int partial_i[32] = {};
+          float partial_f[32] = {};
+          int64_t math_i = 0;
+          double math_f = 0.0;
+          for (unsigned warp = 0; warp < G / 32; ++warp) {
+            int work_i[32];
+            float work_f[32];
+            for (unsigned lane = 0; lane < 32; ++lane) {
+              const unsigned index = base + warp * 32 + lane;
+              work_i[lane] = input_i[index]; work_f[lane] = input_f[index];
+              math_i += input_i[index]; math_f += static_cast<double>(input_f[index]);
+            }
+            partial_i[warp] = scalar_tree32(work_i);
+            partial_f[warp] = scalar_tree32(work_f);
+          }
+          // Exactly G source leaves contribute. In particular no artificial +0
+          // enters the tree and an all-negative-zero group preserves its sign.
+          const int golden_i = scalar_tree32(partial_i, G / 32);
+          const float golden_f = scalar_tree32(partial_f, G / 32);
+          oracle_errors += round == 0 && bits(golden_f) != 0x80000000U;
+          oracle_errors += round == 1 && golden_f != INFINITY;
+          oracle_errors += round == 2 && !std::isnan(golden_f);
+          oracle_errors += static_cast<int64_t>(golden_i) != math_i;
+          const uint32_t golden_bits = bits(golden_f), first_bits = bits(output[base].f);
+          if (tile == 0) { first_group_i = golden_i; first_group_f = golden_bits; }
+          if (B == 1024 && G == 512 && tile == 1) {
+            oracle_errors += golden_i == first_group_i || (round >= 3 && golden_bits == first_group_f);
+            ++distinct_512_pairs;
+          }
+          ++checked_groups;
+          for (unsigned lane = 0; lane < G; ++lane) {
+            const unsigned rank = tile * G + lane;
+            const Record got = output[base + lane];
+            ++checked_records;
+            int_errors += got.i != golden_i || static_cast<int64_t>(got.i) != math_i;
+            float_errors += std::isnan(golden_f) ? !std::isnan(got.f) : bits(got.f) != golden_bits;
+            bit_errors += bits(got.f) != first_bits;
+            rank_errors += got.rank != rank || got.x != rank % (B / 8) ||
+                           got.y != (rank / (B / 8)) % 4 || got.z != rank / (B / 2);
+            const double error = std::fabs(static_cast<double>(got.f) - math_f);
+            if (std::isfinite(golden_f) && error > max_math_error) max_math_error = error;
+          }
+        }
+      }
+    }
+    const unsigned errors = int_errors + float_errors + bit_errors + rank_errors + oracle_errors;
+    total += checked_records;
+    std::printf("uniform_multiwarp B=%u G=%u shape=%ux4x2 blocks=3 rounds=8 "
+                "scratch_bytes=%zu records=%u scalar_results=%u groups=%u "
+                "int_errors=%u float_tree_bit_errors=%u all_lane_bit_errors=%u "
+                "rank_errors=%u oracle_errors=%u distinct_512_pairs=%u "
+                "max_double_math_abs_error=%.17g errors=%u\n",
+                B, G, B / 8, sizeof(proto::block_tile_memory<B>), checked_records, checked_records * 2,
+                checked_groups, int_errors, float_errors, bit_errors, rank_errors,
+                oracle_errors, distinct_512_pairs, max_math_error, errors);
+    ok = checked_records == count && errors == 0;
+  } while (false);
+  if (device_output && !checked(ascify::cudaFree(device_output), "free_output")) ok = false;
+  if (device_f && !checked(ascify::cudaFree(device_f), "free_f")) ok = false;
+  if (device_i && !checked(ascify::cudaFree(device_i), "free_i")) ok = false;
+  return ok;
+}
+
+int main() {
+  const aclError selected = ascify::cudaSetDevice(0);
+  if (selected != ACL_SUCCESS) {
+    std::printf("uniform_multiwarp device=0 set_device_status=%d\n", static_cast<int>(selected));
+    return 1;
+  }
+  unsigned long long total = 0;
+  unsigned failed = 0;
+  failed += !run_case<32, 32>(total); failed += !run_case<1024, 32>(total);
+  failed += !run_case<64, 64>(total); failed += !run_case<1024, 64>(total);
+  failed += !run_case<128, 128>(total); failed += !run_case<1024, 128>(total);
+  failed += !run_case<256, 256>(total); failed += !run_case<1024, 256>(total);
+  failed += !run_case<512, 512>(total); failed += !run_case<1024, 512>(total);
+  std::printf("uniform_multiwarp device=0 configurations=10 failed=%u "
+              "records=%llu scalar_results=%llu expected_records=146688\n",
+              failed, total, total * 2);
+  return failed != 0 || total != 146688 ? 2 : 0;
+}

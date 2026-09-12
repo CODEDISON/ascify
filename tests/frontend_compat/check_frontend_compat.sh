@@ -64,21 +64,21 @@ require_fixed \
 require_fixed 'schema=ascify.frontend-compat-profile.v1' "$manifest"
 require_fixed 'profile=ascify-admitted-v1' "$manifest"
 require_fixed \
-  'file=cooperative_groups.h;bytes=3657;sha256=721a97aebb2a0638efd47a4fbabb65a8da2f0dc3e29ea89398055bda85b7d86b' \
+  'file=cooperative_groups.h;bytes=5100;sha256=fb1d10ab43fbe45211cd23b879abb03bfdd056430c2d92498f4405ae8c6d2130' \
   "$manifest"
 require_fixed \
-  'file=cooperative_groups/reduce.h;bytes=1165;sha256=d26aa794a4ef51f027893e010522d1dc82c4e0d86daaa3f4bdd2fd0e741d5d74' \
+  'file=cooperative_groups/reduce.h;bytes=1612;sha256=bc6f9130deaa55a786df70d127a118ecf57b1014dddbb0700a45ef05f597c928' \
   "$manifest"
 require_fixed \
   'file=host_math.h;bytes=1458;sha256=a151400e55d4f484f8321b5d98384f3585fed01678cda680354cd331a664558d' \
   "$manifest"
 if [ "$(sha256_file "$header")" != \
-    '721a97aebb2a0638efd47a4fbabb65a8da2f0dc3e29ea89398055bda85b7d86b' ]; then
+    'fb1d10ab43fbe45211cd23b879abb03bfdd056430c2d92498f4405ae8c6d2130' ]; then
   echo "frontend admission header SHA-256 mismatch" >&2
   exit 1
 fi
 if [ "$(sha256_file "$reduction")" != \
-    'd26aa794a4ef51f027893e010522d1dc82c4e0d86daaa3f4bdd2fd0e741d5d74' ]; then
+    'bc6f9130deaa55a786df70d127a118ecf57b1014dddbb0700a45ef05f597c928' ]; then
   echo "frontend reduction header SHA-256 mismatch" >&2
   exit 1
 fi

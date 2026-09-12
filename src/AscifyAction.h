@@ -77,6 +77,12 @@ private:
     bool rewritten = false;
   };
 
+  struct NvidiaSampleTemplateGuard {
+    clang::SourceLocation insertionLocation;
+    SemanticRewriteRange anchorRange;
+    std::string text;
+  };
+
   ct::Replacements *replacements = nullptr;
   LocalHeaderRewriteContext *localHeaderContext = nullptr;
   ascify::FrontendCompatibilityConfig frontendCompatibility;
@@ -90,6 +96,7 @@ private:
       nvidiaSampleHelperMacroCandidates;
   std::vector<NvidiaSampleFindDeviceCandidate>
       nvidiaSampleFindDeviceCandidates;
+  std::vector<NvidiaSampleTemplateGuard> nvidiaSampleTemplateGuards;
   std::vector<NvidiaSampleHelperInclude> nvidiaSampleHelperIncludes;
   std::set<std::string> recognizedNvidiaSampleHelperPaths;
   std::set<unsigned> nvidiaSampleHelperNormalMacroOffsets;
@@ -167,6 +174,7 @@ private:
   std::set<unsigned> rewrittenCudaHalf2DirectInitOffsets;
   std::set<unsigned> rewrittenCudaHalf2OperatorOffsets;
   std::set<unsigned> rewrittenGlobalAtomicOffsets;
+  std::set<unsigned> rewrittenDeviceMemoryOffsets;
   std::set<unsigned> rewrittenWarpAddReductionOffsets;
   std::set<unsigned> taggedCanonicalReducerOffsets;
   std::set<std::string> rowwiseSimdMacrosEverDefined;
@@ -223,6 +231,8 @@ public:
   bool rewriteCudaHalf2Operator(const mat::MatchFinder::MatchResult &Result);
   bool rewriteFrontendHostMath(const mat::MatchFinder::MatchResult &Result);
   bool rewriteProvenGlobalAtomicCall(
+      const mat::MatchFinder::MatchResult &Result);
+  bool rewriteProvenDeviceMemoryCall(
       const mat::MatchFinder::MatchResult &Result);
   bool rewriteCanonicalWarpAddReduction(
       const mat::MatchFinder::MatchResult &Result);

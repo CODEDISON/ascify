@@ -21,6 +21,7 @@ THE SOFTWARE.
 */
 
 #pragma once
+#include <vector>
 
 #include <chrono>
 #include <string>

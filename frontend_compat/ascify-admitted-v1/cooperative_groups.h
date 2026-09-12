@@ -75,6 +75,31 @@ class thread_block_tile<Size, void> : public ascify_detail::tile_register_operat
 template <unsigned int Size>
 ASCIFY_FRONTEND_COMPAT_DEVICE_ thread_block_tile<Size, thread_block>
 tiled_partition(const thread_block& parent);
+
+// A parsing projection for a separately proven whole-block scratch domain.
+// Ordinary thread_block_tile still rejects sizes above 32. Ascify's mandatory
+// AST gate rejects every unproved use of the distinct types below; their
+// identities may not be observed by user code, overloads, or type traits.
+template <unsigned BlockSize> struct block_tile_memory {};
+template <unsigned BlockSize> struct scratch_thread_block {
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static void sync();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int thread_rank();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int size();
+};
+template <unsigned BlockSize>
+ASCIFY_FRONTEND_COMPAT_DEVICE_ scratch_thread_block<BlockSize>
+this_thread_block(block_tile_memory<BlockSize>& storage);
+template <unsigned BlockSize>
+ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync(const scratch_thread_block<BlockSize>& group);
+template <unsigned Size, unsigned BlockSize> struct scratch_thread_block_tile {
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int thread_rank();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static constexpr unsigned int size() { return Size; }
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int meta_group_rank();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int meta_group_size();
+};
+template <unsigned Size, unsigned BlockSize>
+ASCIFY_FRONTEND_COMPAT_DEVICE_ scratch_thread_block_tile<Size, BlockSize>
+tiled_partition(const scratch_thread_block<BlockSize>& parent);
 }  // namespace cooperative_groups
 #undef ASCIFY_FRONTEND_COMPAT_DEVICE_
 #endif

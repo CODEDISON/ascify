@@ -29,6 +29,7 @@ THE SOFTWARE.
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/Decl.h"
+#include "clang/AST/DeclTemplate.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/Stmt.h"
@@ -58,6 +59,8 @@ THE SOFTWARE.
 #include "ImplicitCudaHeaders.h"
 #include "CUDA2DPP.h"
 #include "StringUtils.h"
+#include "DeviceMemoryLowering.h"
+#include "UniformBlockReduction.h"
 
 using namespace ascify;
 
@@ -712,12 +715,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 48407)
+  if (contents.size() != 48450)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "ac01de98870bffb414236ebaefe07524456fd90b9444b6d8bf220a64d2dbc8d3");
+      "3166a87acccad627c072f08620b56d6bdfec579c7e2ef85846a9db093cabf0dd");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -744,12 +747,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 48407)
+  if (invalidBuffer || contents.size() != 48450)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "ac01de98870bffb414236ebaefe07524456fd90b9444b6d8bf220a64d2dbc8d3");
+      "3166a87acccad627c072f08620b56d6bdfec579c7e2ef85846a9db093cabf0dd");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -3031,12 +3034,15 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
             const std::set<unsigned> &trustedSystemFileIds,
             const std::vector<SemanticRewriteRange> &supportedRanges,
             std::vector<NvidiaSampleHelperMacroCandidate> &candidates,
-            std::vector<NvidiaSampleFindDeviceCandidate> &findCandidates)
+            std::vector<NvidiaSampleFindDeviceCandidate> &findCandidates,
+            std::vector<NvidiaSampleTemplateGuard> &templateGuards,
+            clang::Preprocessor &preprocessor)
         : sourceManager(sourceManager), astContext(astContext),
           languageOptions(languageOptions),
           trustedSystemFileIds(trustedSystemFileIds),
           supportedRanges(supportedRanges),
-          candidates(candidates), findCandidates(findCandidates) {}
+          candidates(candidates), findCandidates(findCandidates),
+          templateGuards(templateGuards), preprocessor(preprocessor) {}
 
     bool VisitCallExpr(clang::CallExpr *expression) {
       if (expression == nullptr)
@@ -3061,10 +3067,7 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
         }
         return true;
       }
-      if (callee == nullptr || callee->getIdentifier() == nullptr ||
-          callee->getName() != "check" ||
-          !locationComesFromRecognizedNvidiaSampleHelper(
-              sourceManager, callee->getLocation()))
+      if (!isFrozenCheckCallee(expression))
         return true;
       NvidiaSampleHelperMacroCandidate *candidate =
           candidateAt(expression->getExprLoc(),
@@ -3073,7 +3076,42 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
         return true;
       candidate->statusDomainProven = isAdmittedCudaRuntimeStatusCall(
           sourceManager, expression->getArg(0), trustedSystemFileIds);
+      // A dependent check/cudaMemcpy/cudaFree lookup cannot be proved by its
+      // spelling. Remember the pattern and audit its instantiated ASTs below;
+      // any accepted template receives an explicit output type-domain guard.
+      if (const auto *owner =
+              enclosingNonLambdaFunction(expression, astContext)) {
+        if (const auto *functionTemplate = owner->getDescribedFunctionTemplate()) {
+          templatePatterns[functionTemplate][candidate] = expression;
+        }
+      }
       return true;
+    }
+
+    void proveGuardedTemplateStatusDomains() {
+      for (const auto &entry : templatePatterns) {
+        bool needsGuard = false;
+        for (const auto &pattern : entry.second)
+          needsGuard |= !pattern.first->statusDomainProven;
+        if (!needsGuard)
+          continue;
+        NvidiaSampleTemplateGuard guard;
+        if (!proveTemplate(entry.first, entry.second, guard)) {
+          llvm::errs() << "Ascify NVIDIA sample-helper closure: dependent "
+                          "template status domain not proven for '"
+                       << entry.first->getQualifiedNameAsString()
+                       << "'; all helper edits kept\n";
+          continue;
+        }
+        for (const auto &pattern : entry.second)
+          pattern.first->statusDomainProven = true;
+        llvm::errs() << "Ascify NVIDIA sample-helper closure: proved dependent "
+                        "template status domain for '"
+                     << entry.first->getQualifiedNameAsString()
+                     << "'; guard pending helper transaction: "
+                     << llvm::StringRef(guard.text).trim() << "\n";
+        templateGuards.push_back(std::move(guard));
+      }
     }
 
     bool VisitDeclRefExpr(clang::DeclRefExpr *expression) {
@@ -3133,6 +3171,164 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
     llvm::StringRef conflictingName() const { return name; }
 
   private:
+    using TemplatePatterns =
+        std::map<NvidiaSampleHelperMacroCandidate *, const clang::CallExpr *>;
+
+    bool isFrozenCheckCallee(const clang::CallExpr *call) const {
+      const auto frozenCheck = [&](const clang::NamedDecl *declaration) {
+        if (const auto *functionTemplate =
+                llvm::dyn_cast_or_null<clang::FunctionTemplateDecl>(declaration))
+          declaration = functionTemplate->getTemplatedDecl();
+        const auto *function =
+            llvm::dyn_cast_or_null<clang::FunctionDecl>(declaration);
+        return function != nullptr && function->getIdentifier() != nullptr &&
+               function->getName() == "check" &&
+               locationComesFromRecognizedNvidiaSampleHelper(
+                   sourceManager, function->getLocation());
+      };
+      if (call->getDirectCallee() != nullptr)
+        return frozenCheck(call->getDirectCallee());
+      const auto *lookup = llvm::dyn_cast<clang::UnresolvedLookupExpr>(
+          call->getCallee()->IgnoreParenImpCasts());
+      if (lookup == nullptr || lookup->decls_begin() == lookup->decls_end())
+        return false;
+      for (const clang::NamedDecl *declaration : lookup->decls()) {
+        if (!frozenCheck(declaration))
+          return false;
+      }
+      return true;
+    }
+
+    bool proveTemplate(const clang::FunctionTemplateDecl *functionTemplate,
+                       const TemplatePatterns &patterns,
+                       NvidiaSampleTemplateGuard &guard) const {
+      const clang::FunctionDecl *function = functionTemplate->getTemplatedDecl();
+      const clang::TemplateParameterList *parameters =
+          functionTemplate->getTemplateParameters();
+      if (function == nullptr || parameters == nullptr || parameters->size() != 1 ||
+          !function->getDeclContext()->isTranslationUnit() ||
+          function->hasAttr<clang::CUDADeviceAttr>() ||
+          function->hasAttr<clang::CUDAGlobalAttr>())
+        return false;
+      const auto *parameter =
+          llvm::dyn_cast<clang::TemplateTypeParmDecl>(parameters->getParam(0));
+      const auto *body =
+          llvm::dyn_cast_or_null<clang::CompoundStmt>(function->getBody());
+      if (parameter == nullptr || parameter->isParameterPack() ||
+          parameter->getIdentifier() == nullptr || parameter->getDepth() != 0 ||
+          body == nullptr || body->getLBracLoc().isInvalid() ||
+          body->getLBracLoc().isMacroID() || body->getRBracLoc().isMacroID() ||
+          parameter->getLocation().isMacroID() ||
+          !sourceManager.isWrittenInMainFile(body->getLBracLoc()) ||
+          !sourceManager.isWrittenInMainFile(body->getRBracLoc()))
+        return false;
+      const std::string parameterName = parameter->getNameAsString();
+      // The emitted trait and parameter tokens must retain their meaning at
+      // the exact insertion point, even if macros are undefined later.
+      for (const std::string &token :
+           {std::string("static_assert"), std::string("__is_same"),
+            parameterName, std::string("int"), std::string("float")}) {
+        if (preprocessor.getMacroDefinitionAtLoc(
+                preprocessor.getIdentifierInfo(token), body->getLBracLoc()))
+          return false;
+      }
+      bool invalidToken = false;
+      const llvm::StringRef parameterToken = clang::Lexer::getSourceText(
+          clang::CharSourceRange::getTokenRange(
+              parameter->getLocation(), parameter->getLocation()),
+          sourceManager, languageOptions, &invalidToken);
+      if (invalidToken || parameterToken != parameterName)
+        return false;
+
+      std::set<std::string> types;
+      for (const clang::FunctionDecl *specialization :
+           functionTemplate->specializations()) {
+        const clang::TemplateSpecializationKind kind =
+            specialization->getTemplateSpecializationKind();
+        const clang::TemplateArgumentList *arguments =
+            specialization->getTemplateSpecializationArgs();
+        if ((kind != clang::TSK_ImplicitInstantiation &&
+             kind != clang::TSK_ExplicitInstantiationDefinition) ||
+            !specialization->hasBody() || arguments == nullptr ||
+            arguments->size() != 1 ||
+            arguments->get(0).getKind() != clang::TemplateArgument::Type)
+          return false;
+        const clang::QualType type = arguments->get(0).getAsType().getCanonicalType();
+        if (type.isNull() || type.getLocalCVRQualifiers() != 0)
+          return false;
+        if (astContext.hasSameType(type, astContext.IntTy))
+          types.insert("int");
+        else if (astContext.hasSameType(type, astContext.FloatTy))
+          types.insert("float");
+        else
+          return false;
+
+        class InstantiationVisitor
+            : public clang::RecursiveASTVisitor<InstantiationVisitor> {
+        public:
+          InstantiationVisitor(const Visitor &owner,
+                               const TemplatePatterns &patterns)
+              : owner(owner), patterns(patterns) {}
+          bool VisitCallExpr(clang::CallExpr *call) {
+            for (const auto &pattern : patterns) {
+              if (call->getExprLoc() != pattern.second->getExprLoc())
+                continue;
+              ++counts[pattern.first];
+              const clang::FunctionDecl *callee = call->getDirectCallee();
+              if (callee == nullptr || !owner.isFrozenCheckCallee(call) ||
+                  !allFunctionRedeclarationsComeFromFrozenHelperProfile(
+                      callee, owner.sourceManager,
+                      FrozenOfficialNvidiaSampleHelperCuda,
+                      owner.trustedSystemFileIds) ||
+                  call->getNumArgs() != 4 ||
+                  !isAdmittedCudaRuntimeStatusCall(
+                      owner.sourceManager, call->getArg(0),
+                      owner.trustedSystemFileIds))
+                failed = true;
+            }
+            return true;
+          }
+          bool proved() const {
+            if (failed)
+              return false;
+            for (const auto &pattern : patterns) {
+              const auto count = counts.find(pattern.first);
+              if (count == counts.end() || count->second != 1)
+                return false;
+            }
+            return true;
+          }
+        private:
+          const Visitor &owner;
+          const TemplatePatterns &patterns;
+          std::map<NvidiaSampleHelperMacroCandidate *, unsigned> counts;
+          bool failed = false;
+        } instantiated(*this, patterns);
+        instantiated.TraverseStmt(
+            const_cast<clang::Stmt *>(specialization->getBody()));
+        if (!instantiated.proved())
+          return false;
+      }
+      if (types.empty())
+        return false;
+
+      guard.insertionLocation = clang::Lexer::getLocForEndOfToken(
+          body->getLBracLoc(), 0, sourceManager, languageOptions);
+      if (guard.insertionLocation.isInvalid())
+        return false;
+      const auto anchor = sourceManager.getDecomposedLoc(body->getLBracLoc());
+      guard.anchorRange = {anchor.first, anchor.second, anchor.second + 1};
+      guard.text = "\nstatic_assert(";
+      for (const std::string &type : types) {
+        if (guard.text != "\nstatic_assert(")
+          guard.text += " || ";
+        guard.text += "__is_same(" + parameterName + ", " + type + ")";
+      }
+      guard.text += ", \"Ascify: dependent helper status is only proven for "
+                    "the emitted template type domain\");\n";
+      return true;
+    }
+
     NvidiaSampleHelperMacroCandidate *candidateAt(
         clang::SourceLocation location,
         NvidiaSampleHelperMacroKind kind) {
@@ -3206,6 +3402,9 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
     const std::vector<SemanticRewriteRange> &supportedRanges;
     std::vector<NvidiaSampleHelperMacroCandidate> &candidates;
     std::vector<NvidiaSampleFindDeviceCandidate> &findCandidates;
+    std::vector<NvidiaSampleTemplateGuard> &templateGuards;
+    clang::Preprocessor &preprocessor;
+    std::map<const clang::FunctionTemplateDecl *, TemplatePatterns> templatePatterns;
     bool conflict = false;
     std::string name;
   } visitor(getCompilerInstance().getSourceManager(),
@@ -3214,10 +3413,13 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
             trustedSystemFileIds,
             nvidiaSampleHelperMacroRanges,
             nvidiaSampleHelperMacroCandidates,
-            nvidiaSampleFindDeviceCandidates);
+            nvidiaSampleFindDeviceCandidates,
+            nvidiaSampleTemplateGuards,
+            getCompilerInstance().getPreprocessor());
 
   visitor.TraverseDecl(
       getCompilerInstance().getASTContext().getTranslationUnitDecl());
+  visitor.proveGuardedTemplateStatusDomains();
   for (const NvidiaSampleFindDeviceCandidate &candidate :
        nvidiaSampleFindDeviceCandidates) {
     nvidiaSampleFindDeviceNormalOffsets.insert(
@@ -4467,6 +4669,51 @@ bool AscifyAction::rewriteProvenGlobalAtomicCall(
   return true;
 }
 
+bool AscifyAction::rewriteProvenDeviceMemoryCall(
+    const mat::MatchFinder::MatchResult &Result) {
+  // Object type and storage proofs describe the actual preprocessed program.
+  // Do not infer them from the legacy mode that retains excluded branches.
+  if (getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)
+    return false;
+  const auto *call =
+      Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
+  if (call == nullptr || Result.Context == nullptr ||
+      Result.SourceManager == nullptr)
+    return false;
+  ascify::DeviceMemoryRewrite plan;
+  if (!ascify::planDeviceMemoryCall(
+          call, *Result.Context, trustedSystemFileIds, plan))
+    return false;
+  auto &sourceManager = *Result.SourceManager;
+  const auto begin = plan.range.getBegin();
+  const auto last = plan.range.getEnd();
+  if (begin.isInvalid() || last.isInvalid() || begin.isMacroID() ||
+      last.isMacroID() || !sourceManager.isWrittenInMainFile(begin) ||
+      !sourceManager.isWrittenInMainFile(last))
+    return false;
+  const auto end = clang::Lexer::getLocForEndOfToken(
+      last, 0, sourceManager, getCompilerInstance().getLangOpts());
+  if (end.isInvalid())
+    return false;
+  const unsigned offset = sourceManager.getFileOffset(begin);
+  const unsigned endOffset = sourceManager.getFileOffset(end);
+  if (endOffset <= offset)
+    return false;
+  if (!rewrittenDeviceMemoryOffsets.insert(offset).second)
+    return true;
+  ct::Replacement edit(sourceManager, begin, endOffset - offset, plan.replacement);
+  if (!insertSemanticReplacement(
+          edit, clang::FullSourceLoc(begin, sourceManager), begin, end)) {
+    rewrittenDeviceMemoryOffsets.erase(offset);
+    return false;
+  }
+  static const dppCounter counter = {
+      "ascify private device memcpy", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(counter, plan.apiName);
+  needsCudaCompatHeader = true;
+  return true;
+}
+
 bool AscifyAction::rewriteCanonicalWarpAddReduction(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *loop =
@@ -4712,9 +4959,9 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
         this);
   }
   // Keep this matcher independent of API spelling and perform the CUDA API,
-  // scalar type, enclosing-kernel, and address-provenance proof in the
-  // callback. A failed proof makes no edit, so shared/local/helper pointers
-  // cannot acquire a forged global-memory address-space cast.
+  // scalar type, enclosing function, and address-provenance proofs in the
+  // callbacks. Separate proofs admit global atomics or a private object copy;
+  // a failed proof makes no edit and cannot forge a memory address space.
   Finder->addMatcher(
       mat::callExpr(mat::callee(mat::functionDecl()),
                     mat::isExpansionInMainFile())
@@ -5616,6 +5863,30 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
     stagedSemanticRanges.push_back(candidate.rewriteRange);
   }
 
+  for (const NvidiaSampleTemplateGuard &guard : nvidiaSampleTemplateGuards) {
+    if (!stagingError.empty())
+      break;
+    for (const SemanticRewriteRange &existing : SemanticRewriteRanges) {
+      if (overlaps(guard.anchorRange, existing)) {
+        stagingError = "template domain guard overlaps a semantic rewrite";
+        break;
+      }
+    }
+    for (const SemanticRewriteRange &pending : stagedSemanticRanges) {
+      if (overlaps(guard.anchorRange, pending)) {
+        stagingError = "template domain guard overlaps helper transaction";
+        break;
+      }
+    }
+    if (!stagingError.empty())
+      break;
+    const ct::Replacement replacement(
+        sourceManager, guard.insertionLocation, 0U, guard.text);
+    if (!llcompat::insertReplacement(staged, replacement, &stagingError))
+      break;
+    stagedSemanticRanges.push_back(guard.anchorRange);
+  }
+
   bool compatInsertedByClosure =
       hasCudaCompatHeaderBeforeNvidiaHelper;
   const NvidiaSampleHelperInclude &include =
@@ -5667,6 +5938,11 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
   // No shared state was changed before this point. Commit the complete set in
   // one assignment, then publish ranges, counters, and header state.
   *replacements = std::move(staged);
+  if (!nvidiaSampleTemplateGuards.empty()) {
+    llvm::errs() << "Ascify NVIDIA sample-helper closure: committed "
+                 << nvidiaSampleTemplateGuards.size()
+                 << " explicit template type-domain guard(s)\n";
+  }
   if (localHeaderContext != nullptr)
     localHeaderContext->helperTransactionCommitted = true;
   SemanticRewriteRanges.insert(SemanticRewriteRanges.end(),
@@ -6077,6 +6353,90 @@ void AscifyAction::ExecuteAction() {
     evidence.macroSha256 = contextualInputSha256(macros);
   }
   auto &SM = getCompilerInstance().getSourceManager();
+  // The scratch-specific parsing projection must never publish code without
+  // proving every participating specialization and its whole-block schedule.
+  // Reset the contextual token watcher above before any diagnostic early exit.
+  if (getCompilerInstance().getDiagnostics().hasErrorOccurred())
+    return;
+  ascify::UniformBlockReductionStats uniformReduction;
+  std::string uniformReductionError;
+  if (!ascify::ValidateUniformBlockReduction(
+          getCompilerInstance().getASTContext(), frontendCompatibility,
+          uniformReduction, uniformReductionError,
+          !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)) {
+    const auto diagnostic =
+        getCompilerInstance().getDiagnostics().getCustomDiagID(
+            clang::DiagnosticsEngine::Error,
+            "uniform block reduction boundary: %0");
+    getCompilerInstance().getDiagnostics().Report(diagnostic)
+        << uniformReductionError;
+    return;
+  }
+  if (uniformReduction.instantiations != 0) {
+    ct::Replacements staged(*replacements);
+    std::vector<SemanticRewriteRange> guardRanges;
+    for (const auto &guard : uniformReduction.guards) {
+      const auto location = guard.insertionLocation;
+      if (location.isInvalid() || location.isMacroID() ||
+          !SM.isWrittenInMainFile(location)) {
+        uniformReductionError = "template guard has no literal main-file insertion point";
+        break;
+      }
+      const auto decomposed = SM.getDecomposedLoc(location);
+      if (decomposed.second == 0) {
+        uniformReductionError = "template guard has no body brace anchor";
+        break;
+      }
+      for (const auto &range : SemanticRewriteRanges) {
+        if (range.file == decomposed.first &&
+            range.beginOffset <= decomposed.second &&
+            decomposed.second < range.endOffset) {
+          uniformReductionError = "template guard overlaps an existing semantic rewrite";
+          break;
+        }
+      }
+      if (!uniformReductionError.empty())
+        break;
+      clang::Lexer guardLexer(clang::SourceLocation(),
+          getCompilerInstance().getLangOpts(), guard.text.data(),
+          guard.text.data(), guard.text.data() + guard.text.size());
+      clang::Token token;
+      while (!guardLexer.LexFromRawLexer(token)) {
+        if (token.isNot(clang::tok::raw_identifier))
+          continue;
+        const auto name = token.getRawIdentifier();
+        if (PP.getMacroDefinitionAtLoc(PP.getIdentifierInfo(name), location)) {
+          uniformReductionError = "input macro changes template guard token '" +
+                                  name.str() + "' at its insertion point";
+          break;
+        }
+      }
+      if (!uniformReductionError.empty())
+        break;
+      const ct::Replacement edit(SM, location, 0U, guard.text);
+      if (!llcompat::insertReplacement(staged, edit, &uniformReductionError))
+        break;
+      guardRanges.push_back(
+          {decomposed.first, decomposed.second - 1, decomposed.second});
+    }
+    if (!uniformReductionError.empty()) {
+      const auto diagnostic =
+          getCompilerInstance().getDiagnostics().getCustomDiagID(
+              clang::DiagnosticsEngine::Error,
+              "uniform block reduction boundary: %0");
+      getCompilerInstance().getDiagnostics().Report(diagnostic)
+          << uniformReductionError;
+      return;
+    }
+    *replacements = std::move(staged);
+    SemanticRewriteRanges.insert(SemanticRewriteRanges.end(),
+                                 guardRanges.begin(), guardRanges.end());
+    needsCudaCompatHeader = true;
+    llvm::errs() << "Ascify uniform block reduction: kernels="
+                 << uniformReduction.kernels << ", instantiations="
+                 << uniformReduction.instantiations << ", collectives="
+                 << uniformReduction.collectives << "\n";
+  }
   ascifyCudaCompatDeclarationConflict =
       hasInputTopLevelAscifyDeclaration(
           getCompilerInstance().getASTContext(), SM);
@@ -6246,7 +6606,8 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
   }
   if (Result.Nodes.getNodeAs<clang::CallExpr>(
           sProvenGlobalAtomicCall) != nullptr) {
-    (void)rewriteProvenGlobalAtomicCall(Result);
+    if (!rewriteProvenGlobalAtomicCall(Result))
+      (void)rewriteProvenDeviceMemoryCall(Result);
     return;
   }
   if (Result.Nodes.getNodeAs<clang::ForStmt>(

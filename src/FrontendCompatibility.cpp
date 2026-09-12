@@ -93,6 +93,31 @@ class thread_block_tile<Size, void> : public ascify_detail::tile_register_operat
 template <unsigned int Size>
 ASCIFY_FRONTEND_COMPAT_DEVICE_ thread_block_tile<Size, thread_block>
 tiled_partition(const thread_block& parent);
+
+// A parsing projection for a separately proven whole-block scratch domain.
+// Ordinary thread_block_tile still rejects sizes above 32. Ascify's mandatory
+// AST gate rejects every unproved use of the distinct types below; their
+// identities may not be observed by user code, overloads, or type traits.
+template <unsigned BlockSize> struct block_tile_memory {};
+template <unsigned BlockSize> struct scratch_thread_block {
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static void sync();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int thread_rank();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int size();
+};
+template <unsigned BlockSize>
+ASCIFY_FRONTEND_COMPAT_DEVICE_ scratch_thread_block<BlockSize>
+this_thread_block(block_tile_memory<BlockSize>& storage);
+template <unsigned BlockSize>
+ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync(const scratch_thread_block<BlockSize>& group);
+template <unsigned Size, unsigned BlockSize> struct scratch_thread_block_tile {
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int thread_rank();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static constexpr unsigned int size() { return Size; }
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int meta_group_rank();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int meta_group_size();
+};
+template <unsigned Size, unsigned BlockSize>
+ASCIFY_FRONTEND_COMPAT_DEVICE_ scratch_thread_block_tile<Size, BlockSize>
+tiled_partition(const scratch_thread_block<BlockSize>& parent);
 }  // namespace cooperative_groups
 #undef ASCIFY_FRONTEND_COMPAT_DEVICE_
 #endif
@@ -113,12 +138,19 @@ template <typename T> struct plus {
   ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_ T operator()(T left, T right) const;
 };
 // The target implements a register-only all-reduction for a complete tile32.
-// No arbitrary functor, block reduction, or multi-warp scratch is admitted.
+// No arbitrary functor or generic multi-warp tile is admitted here.
 template <unsigned int Size, typename ParentT, typename T>
 ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_
 typename std::enable_if<Size == 32 && (std::is_same<T, int>::value ||
                                     std::is_same<T, float>::value), T>::type
 reduce(const thread_block_tile<Size, ParentT>& group, T value, plus<T> operation);
+// This overload is published only when the mandatory whole-TU scratch proof
+// succeeds. It does not admit a generic multi-warp thread_block_tile.
+template <unsigned Size, unsigned BlockSize, typename T>
+ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_
+typename std::enable_if<std::is_same<T, int>::value ||
+                        std::is_same<T, float>::value, T>::type
+reduce(const scratch_thread_block_tile<Size, BlockSize>& group, T value, plus<T> operation);
 }  // namespace cooperative_groups
 #undef ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_
 #endif
@@ -166,13 +198,13 @@ inline int min(A a, B b) {
 constexpr char kProfileManifest[] =
     "schema=ascify.frontend-compat-profile.v1\n"
     "profile=ascify-admitted-v1\n"
-    "file=cooperative_groups.h;bytes=3657;sha256=721a97aebb2a0638efd47a4fbabb65a8da2f0dc3e29ea89398055bda85b7d86b\n"
-    "file=cooperative_groups/reduce.h;bytes=1165;sha256=d26aa794a4ef51f027893e010522d1dc82c4e0d86daaa3f4bdd2fd0e741d5d74\n"
+    "file=cooperative_groups.h;bytes=5100;sha256=fb1d10ab43fbe45211cd23b879abb03bfdd056430c2d92498f4405ae8c6d2130\n"
+    "file=cooperative_groups/reduce.h;bytes=1612;sha256=bc6f9130deaa55a786df70d127a118ecf57b1014dddbb0700a45ef05f597c928\n"
     "file=host_math.h;bytes=1458;sha256=a151400e55d4f484f8321b5d98384f3585fed01678cda680354cd331a664558d\n";
 
-static_assert(sizeof(kAdmissionHeader) - 1 == 3657,
+static_assert(sizeof(kAdmissionHeader) - 1 == 5100,
               "admission header identity drifted");
-static_assert(sizeof(kReductionHeader) - 1 == 1165,
+static_assert(sizeof(kReductionHeader) - 1 == 1612,
               "reduction header identity drifted");
 static_assert(sizeof(kHostMathHeader) - 1 == 1458,
               "host math header identity drifted");
@@ -187,8 +219,8 @@ struct RequiredProfileFile {
 
 constexpr RequiredProfileFile kRequiredProfileFiles[] = {
     {"profile.manifest", 393, kProfileManifest},
-    {"cooperative_groups.h", 3657, kAdmissionHeader},
-    {"cooperative_groups/reduce.h", 1165, kReductionHeader},
+    {"cooperative_groups.h", 5100, kAdmissionHeader},
+    {"cooperative_groups/reduce.h", 1612, kReductionHeader},
     {"host_math.h", 1458, kHostMathHeader},
 };
 

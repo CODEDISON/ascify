@@ -1,0 +1,69 @@
+#include <ascify/ascify_cuda_compat.hpp>
+#include <ascify/device_memory_compat.hpp>
+
+#include <stdint.h>
+#include <stdio.h>
+
+struct DeviceCopyPacket { uint4 x, y, z, w; };
+struct DeviceCopyObservation {
+  DeviceCopyPacket words;
+  DeviceCopyPacket bytes;
+  unsigned int returned_word_pointer;
+  unsigned int returned_byte_pointer;
+};
+
+ASCIFY_GLOBAL void private_copy_probe(DeviceCopyObservation *output) {
+  const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
+  unsigned int words[16];
+  unsigned char bytes[64];
+  for (unsigned int i = 0; i < 16; ++i)
+    words[i] = 0xff800000U + index * 1664525U + i * 1013904223U;
+  for (unsigned int i = 0; i < 64; ++i)
+    bytes[i] = static_cast<unsigned char>(index + i * 37U);
+  DeviceCopyPacket word_packet;
+  DeviceCopyPacket byte_packet;
+  void *word_return = ascify::device_memcpy_private<64>(&word_packet, words);
+  void *byte_return = ascify::device_memcpy_private<64>(&byte_packet, bytes);
+  output[index].words = word_packet;
+  output[index].bytes = byte_packet;
+  output[index].returned_word_pointer = word_return == &word_packet;
+  output[index].returned_byte_pointer = byte_return == &byte_packet;
+}
+
+int main() {
+  constexpr unsigned int count = 256;
+  static_assert(sizeof(DeviceCopyPacket) == 64, "target vector packet ABI");
+  DeviceCopyObservation host[count];
+  DeviceCopyObservation *device = nullptr;
+  aclError status = ascify::cudaSetDevice(0);
+  if (status != ACL_SUCCESS) { printf("device_copy setdevice status=%d\n", status); return 2; }
+  status = ascify::cudaMalloc(reinterpret_cast<void **>(&device), sizeof(host));
+  if (status != ACL_SUCCESS) { printf("device_copy allocation status=%d\n", status); return 3; }
+  private_copy_probe<<<4, 64>>>(device);
+  status = ascify::cudaDeviceSynchronize();
+  if (status != ACL_SUCCESS) { printf("device_copy synchronize status=%d\n", status); return 4; }
+  status = ascify::cudaMemcpy(host, device, sizeof(host), ACL_MEMCPY_DEVICE_TO_HOST);
+  if (status != ACL_SUCCESS) { printf("device_copy readback status=%d\n", status); return 5; }
+  unsigned int errors = 0;
+  for (unsigned int index = 0; index < count; ++index) {
+    const uint4 vectors[4] = {host[index].words.x, host[index].words.y,
+                              host[index].words.z, host[index].words.w};
+    for (unsigned int vector = 0; vector < 4; ++vector) {
+      const unsigned int words[4] = {vectors[vector].x, vectors[vector].y,
+                                     vectors[vector].z, vectors[vector].w};
+      for (unsigned int component = 0; component < 4; ++component) {
+        const unsigned int i = vector * 4 + component;
+        errors += words[component] != 0xff800000U + index * 1664525U + i * 1013904223U;
+      }
+    }
+    const unsigned char *bytes = reinterpret_cast<const unsigned char *>(&host[index].bytes);
+    for (unsigned int i = 0; i < 64; ++i)
+      errors += bytes[i] != static_cast<unsigned char>(index + i * 37U);
+    errors += host[index].returned_word_pointer != 1;
+    errors += host[index].returned_byte_pointer != 1;
+  }
+  status = ascify::cudaFree(device);
+  printf("device_copy observations=%u copies=%u checked_bytes=%u errors=%u free_status=%d\n",
+         count, count * 2, count * 128, errors, status);
+  return errors == 0 && status == ACL_SUCCESS ? 0 : 6;
+}

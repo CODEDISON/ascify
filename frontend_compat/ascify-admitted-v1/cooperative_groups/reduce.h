@@ -13,12 +13,19 @@ template <typename T> struct plus {
   ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_ T operator()(T left, T right) const;
 };
 // The target implements a register-only all-reduction for a complete tile32.
-// No arbitrary functor, block reduction, or multi-warp scratch is admitted.
+// No arbitrary functor or generic multi-warp tile is admitted here.
 template <unsigned int Size, typename ParentT, typename T>
 ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_
 typename std::enable_if<Size == 32 && (std::is_same<T, int>::value ||
                                     std::is_same<T, float>::value), T>::type
 reduce(const thread_block_tile<Size, ParentT>& group, T value, plus<T> operation);
+// This overload is published only when the mandatory whole-TU scratch proof
+// succeeds. It does not admit a generic multi-warp thread_block_tile.
+template <unsigned Size, unsigned BlockSize, typename T>
+ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_
+typename std::enable_if<std::is_same<T, int>::value ||
+                        std::is_same<T, float>::value, T>::type
+reduce(const scratch_thread_block_tile<Size, BlockSize>& group, T value, plus<T> operation);
 }  // namespace cooperative_groups
 #undef ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_
 #endif
