@@ -61,9 +61,12 @@ authorize a type-only half2 transformation in arbitrary source.
 
 Registered-symbol copies retain the original symbol object and use the SDK's
 symbol lookup and transfer APIs, including overflow-safe offset/extent checks.
-They require the admitted legacy SIMT/ACL 1.17+ surface. They remain an
-experimental path without established successful device transfer; host-memory
-substitutes and fabricated registrations are not supported fallbacks.
+They require legacy SIMT headers and SDK declarations of both
+`aclrtGetSymbolSize` and `aclrtMemcpyToSymbol`; an ACL version number alone is
+insufficient. Without these APIs, including the compatibility headers remains
+valid, but calling a symbol copy is rejected at compile time. This transfer
+path remains experimental; validate generated code with the target toolchain.
+Host-memory substitutes and fabricated registrations are not supported fallbacks.
 
 Relevant checks: [target ABI](../tests/rewrite/check_target_abi_compat.sh),
 [device properties](../tests/rewrite/check_device_properties.sh),

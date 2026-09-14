@@ -75,6 +75,14 @@ int main() {
   assert(ascify::cudaMemcpyToSymbol(scalar, source, sizeof(scalar)) == ACL_SUCCESS);
   assert(recorded.copy_token == &scalar && scalar == 17.0f);
 
+  // A pointer-valued symbol is identified by the pointer object, not its value.
+  float *pointer_symbol = &scalar;
+  reset(sizeof(pointer_symbol));
+  assert(ascify::cudaMemcpyToSymbol(pointer_symbol, source, sizeof(float)) ==
+         ACL_SUCCESS);
+  assert(recorded.size_token == &pointer_symbol);
+  assert(recorded.copy_token == &pointer_symbol && pointer_symbol == &scalar);
+
   reset(sizeof(table));
   assert(ascify::cudaMemcpyToSymbol(table, source, sizeof(float),
                                   31 * sizeof(unsigned),

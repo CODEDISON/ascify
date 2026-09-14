@@ -20,8 +20,12 @@ enum aclrtMemcpyKind {
 static const aclError ACL_SUCCESS = 0;
 static const aclError ACL_ERROR_RT_PARAM_INVALID = 107000;
 
-#if !defined(ASCIFY_TEST_SYMBOL_OLD_SDK)
+#if !defined(ASCIFY_TEST_SYMBOL_OLD_SDK) && \
+    !defined(ASCIFY_TEST_SYMBOL_NO_SIZE_API)
 aclError aclrtGetSymbolSize(const void *symbol, size_t *size);
+#endif
+#if !defined(ASCIFY_TEST_SYMBOL_OLD_SDK) && \
+    !defined(ASCIFY_TEST_SYMBOL_NO_COPY_API)
 aclError aclrtMemcpyToSymbol(const void *symbol, const void *source,
                             size_t count, size_t offset, aclrtMemcpyKind kind);
 #endif
