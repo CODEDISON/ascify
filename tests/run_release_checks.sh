@@ -71,9 +71,9 @@ run_check "formal-evidence and work-metric Python unit tests" \
     tests/softmax_rmsnorm_950/scripts/test_validate_formal_run.py \
     tests/softmax_rmsnorm_950/tools/test_derive_work_metrics.py
 run_check "row-wise SIMD selector and dispatch contracts" \
-  sh tests/rewrite/check_rowwise_simd_recipes.sh
+  bash tests/rewrite/check_rowwise_simd_recipes.sh
 run_check "static kernel proof M0 contract" \
-  sh tests/rewrite/check_static_kernel_proof_m0.sh
+  bash tests/rewrite/check_static_kernel_proof_m0.sh
 run_check "row-wise ascify-clang wrapper Python unit tests" \
   "$python" -I -B tests/rewrite/test_generate_rowwise_cce.py -q
 run_check "explicit FP16 input profile and FP64 rejection" \
