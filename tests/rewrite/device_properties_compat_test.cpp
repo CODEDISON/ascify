@@ -3,6 +3,7 @@
 #include <ascify/ascify_cuda_compat.hpp>
 #include <cassert>
 #include <cstring>
+#include <initializer_list>
 
 aclError ascify_test_get_device_status = ACL_SUCCESS;
 aclError ascify_test_vector_core_info_status = ACL_SUCCESS;

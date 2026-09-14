@@ -6,6 +6,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <initializer_list>
 #include <limits>
 
 namespace {
