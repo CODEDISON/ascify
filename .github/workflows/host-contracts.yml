@@ -36,11 +36,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            build-essential clang cmake ninja-build python3
+            build-essential clang cmake ninja-build python3 ripgrep
 
       - name: Require host test tools
         run: |
-          for tool in bash sh clang clang++ c++ cmake ctest ninja python3 sha256sum; do
+          for tool in bash sh clang clang++ c++ cmake ctest ninja python3 rg sha256sum; do
             command -v "$tool"
           done
 

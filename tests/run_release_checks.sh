@@ -16,6 +16,10 @@ if ! command -v "$python" >/dev/null 2>&1; then
   exit 1
 fi
 "$python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else "Python 3.9 or newer is required")'
+if ! command -v rg >/dev/null 2>&1; then
+  echo "ripgrep executable not found: rg (install the ripgrep package)" >&2
+  exit 1
+fi
 
 cd -- "$repo_root"
 

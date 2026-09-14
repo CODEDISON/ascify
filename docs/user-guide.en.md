@@ -34,11 +34,12 @@ Source conversion does not need an NVIDIA GPU or an Ascend NPU. The conversion m
 | Bash | Run `build.sh` and `run.sh` | Both files are Bash scripts |
 | CMake | Set up the build | Ascify needs version 3.16.8 or later |
 | Ninja | Build the project | `build.sh` uses Ninja by default |
+| ripgrep (`rg`) | Check expected compiler diagnostics | Required by the host release checks |
 | C/C++ compiler | Build Ascify | It must support the current machine |
 | LLVM and Clang development files | Provide the Clang front end, libraries, and CMake files | The `clang` command alone is often not enough |
 | CUDA Toolkit | Provide CUDA headers and `libdevice` | An NVIDIA GPU is not required |
 
-You do not need Python to build Ascify. Repository checks, conversion wrappers, and tests require Python 3.9 or newer.
+You do not need Python to build Ascify. Repository checks, conversion wrappers, and tests require Python 3.9 or newer. The host release checks also need Clang and ripgrep.
 
 The following setup is recorded in historical validation. See the [validation matrix](validation-matrix.md) for its result attribution and current candidate status:
 
@@ -58,7 +59,7 @@ On Ubuntu or Debian, run:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential cmake git ninja-build python3
+sudo apt-get install -y build-essential clang cmake git ninja-build python3 ripgrep
 ```
 
 On another Linux system, install the same tools with its package manager. Then run:
@@ -68,6 +69,7 @@ git --version
 cmake --version
 ninja --version
 python3 --version
+rg --version
 ```
 
 If CMake is older than 3.16.8, update it first. LLVM may need a newer CMake version. Check the build requirements for your LLVM version.

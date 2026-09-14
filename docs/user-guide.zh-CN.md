@@ -34,11 +34,12 @@ CUDA 源码
 | Bash | 运行 `build.sh` 和 `run.sh` | 这两个脚本使用 Bash |
 | CMake | 配置项目 | Ascify 要求 3.16.8 或更高版本 |
 | Ninja | 构建项目 | `build.sh` 默认使用 Ninja |
+| ripgrep（`rg`） | 核对预期的编译器诊断 | host release 检查需要 |
 | C/C++ 编译器 | 编译 Ascify | 编译器要支持当前主机 |
 | LLVM 和 Clang 开发文件 | 提供 Clang 前端、库和 CMake 配置 | 只有 `clang` 命令通常不够 |
 | CUDA Toolkit | 提供 CUDA 头文件和 `libdevice` | 不要求有 NVIDIA GPU |
 
-编译 Ascify 不需要 Python。仓库检查、转换封装脚本和测试需要 Python 3.9 或更高版本。
+编译 Ascify 不需要 Python。仓库检查、转换封装脚本和测试需要 Python 3.9 或更高版本。host release 检查还需要 Clang 和 ripgrep。
 
 以下是历史验证中记录的环境；其结果归属和当前候选状态见 [验证矩阵](validation-matrix.md)：
 
@@ -58,7 +59,7 @@ Ubuntu 或 Debian 用户可以运行：
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential cmake git ninja-build python3
+sudo apt-get install -y build-essential clang cmake git ninja-build python3 ripgrep
 ```
 
 其他 Linux 发行版请安装同类软件包。安装后运行：
@@ -68,6 +69,7 @@ git --version
 cmake --version
 ninja --version
 python3 --version
+rg --version
 ```
 
 如果 CMake 低于 3.16.8，请先升级。LLVM 也可能要求更高版本的 CMake。请按你所用 LLVM 版本的要求准备环境。

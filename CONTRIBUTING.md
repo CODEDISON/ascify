@@ -8,7 +8,15 @@ correctness, or performance.
 ## Local checks
 
 Run the repository check and host release gate before committing (C++17 compiler,
-Clang, Bash, and Python 3.9 or newer required):
+Clang, Bash, CMake, ripgrep (`rg`), and Python 3.9 or newer required).
+On Ubuntu or Debian, install the host test dependencies with:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential clang cmake git ninja-build python3 ripgrep
+```
+
+Then run:
 
 ```bash
 python3 tools/check_repository.py --root .
