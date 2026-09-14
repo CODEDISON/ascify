@@ -1,12 +1,13 @@
 # RMSNorm full1000 inputs and bounded host correctness
 
-The original RMSNorm corpus has 1000 shape entries and 2000 A800 measurements
-(plain and affine). The old `rows * cols < INT32_MAX` filter removed 33 entries
-and 66 measurements. The standalone A800 store adapter already used 64-bit
-addressing. `inputs/rmsnorm_affine_store.cuh` now uses the same addressing width,
-including the multiplication operands, for converted fallback execution.
+The exporter accepts 1000 RMSNorm shape entries and 2000 A800 measurements
+(plain and affine). It retains the full population, including the 33 entries
+(66 measurement records) whose element counts exceed the earlier 32-bit product
+limit. The store adapter in `inputs/rmsnorm_affine_store.cuh` uses 64-bit
+addressing, including its multiplication operands, for converted fallback
+execution.
 
-This change does not add device FP64 support or change the RMSNorm computation.
+Address width does not add device FP64 support or change the RMSNorm computation.
 The source dimensions must still each fit the original kernel's `int` parameters.
 
 ## Export the complete existing corpus
@@ -32,10 +33,10 @@ Neither file is evidence that a device test has run.
 
 ## Check the full device shape with bounded host buffers
 
-The checker now uploads whole rows in blocks, executes the full original device
+The checker uploads whole rows in blocks, executes the full original device
 shape once, then reads every input, output and inverse-RMS element back in blocks.
-It regenerates exactly the original deterministic host input from global linear
-indices and retains the prior FP32 oracle, FP16 roundings and comparison order
+It regenerates the deterministic host input from global linear
+indices and uses an FP32 oracle with FP16 roundings and a fixed comparison order
 within each row. Input/weight immutability, all output/inverse canaries, allocation
 guards, nonfinite values and error maxima remain checked.
 
@@ -46,7 +47,7 @@ unchanged; the largest original pair requires approximately 29.813 GiB HBM.
 `full oracle: ... elements=... rows=...` is printed only after complete readback
 and comparison. It records coverage separately from the numeric pass/fail result.
 
-The previous `--max-elements` limit remains explicit. To include the actual full
+The `--max-elements` limit is explicit. To include the actual full
 corpus, use the maximum recorded by the exporter (8,000,000,000 for the frozen
 original data), not the smoke limit:
 
@@ -60,13 +61,13 @@ original data), not the smoke limit:
   --inv-abs-tol 2e-3 --inv-scaled-rel-tol 2e-3
 ```
 
-Use the project's device selection and locking entry before this invocation.
-Full acceptance requires 2000 selected and passed records, zero failures/skips,
-and complete per-shape coverage logs. The checker retains its historical exit
-code behavior, so exit code zero alone does not prove no cases were skipped.
-DT validates development changes; final PR measurements and correctness remain
-required. Rebuild from the new source, regenerate the adapter with the recipe,
-and confirm the recipe still adds its adapter traits before device execution.
+Use [select_device.sh](../scripts/select_device.sh) to select and lock the
+device before this invocation. A complete corpus check requires 2000 selected and passed records, zero failures/skips,
+and complete per-shape coverage logs. Check the selected, passed, failed, and skipped counts: exit code zero alone
+does not prove no cases were skipped.
+Record the source commit, generated-input hashes, CANN version, device model,
+and run parameters with the results. Rebuild the checker, regenerate the adapter
+with the recipe, and confirm its adapter traits before device execution.
 The matcher permits integral widths of at least 32 bits; actual converter and
 CCEC validation remain separate from the host tests below.
 

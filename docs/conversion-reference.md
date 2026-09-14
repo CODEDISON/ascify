@@ -3,8 +3,8 @@
 This reference describes the `ascify-clang` command-line interface and the
 semantic boundaries of generated source. For setup and a first conversion, use
 the [English tutorial](user-guide.en.md) or [中文教程](user-guide.zh-CN.md).
-Target compilation and device results are recorded separately in the
-[validation matrix](validation-matrix.md).
+Supported APIs and limitations are described in the
+[compatibility reference](compatibility.md).
 
 ## Build options
 
@@ -23,10 +23,11 @@ discovery. The release suite uses the separate
 
 ## Usage
 
-Typical invocation passes ascify flags first, then **`--`**, then normal Clang flags (omit `--` if there are no extra Clang arguments):
+Pass Ascify options and input paths before **`--`**, followed by extra Clang flags
+(omit `--` if there are no extra Clang arguments):
 
-```bash
-ascify-clang [ascify-options] -- [clang-options] <inputs>
+```text
+ascify-clang [ascify-options] <inputs> -- [clang-options]
 ```
 
 Minimal ingredients for CUDA sources:
@@ -63,7 +64,7 @@ or inspect only with **`-examine`** (combines `-no-output` and `-print-stats`).
 | `--target-recipe=none\|dav-3510-rowwise-simd-v1` | Explicitly enable the versioned, externally linked row-wise SIMD+SIMT hybrid dispatch; default `none` |
 | `--migration-receipt=<path>` | Atomically write an opt-in, deterministic JSON result for this source-conversion invocation |
 | `--no-lower-device-double-params` | Preserve by-value scalar `double` parameters on CUDA `__global__` functions |
-| `-versions` | Print translator and LLVM build identity; target validation is recorded separately in the validation matrix |
+| `-versions` | Print translator and LLVM build identity; target support depends on the compatibility surface and runtime |
 
 Full list: run **`ascify-clang --help`**.
 
@@ -110,58 +111,26 @@ crash-recovery journal. See
 
 ### NVIDIA CUDA Samples helper closure
 
-Ascify separately recognizes the proven NVIDIA CUDA Samples
-`helper_cuda.h` included by a main translation unit. It can close the two
-error-handling macros `checkCudaErrors(expr)` and
-`getLastCudaError(message)` only when the resolved header, active macro
-definitions, direct source tokens, and CUDA Runtime status domain all match
-the admitted contract. It can also replace a direct host call to the official
-`findCudaDevice(int, const char **)` definition after proving its canonical
-signature, active device-selection AST, unqualified non-macro call token, and
-the version-paired SHA-256 identities of the actual `helper_cuda.h` and
-`helper_string.h` definition files. The hashes cover Clang's parsed buffers,
-every macro that affects either frozen header must be defined by that profile,
-a file that entered preprocessing as a system header, or the compiler itself,
-and every resolved direct call transitively reached from the replaced helper
-must stay inside the frozen profile or that same system-file set. Return-value
-use is preserved because only the callee token changes. This proof gate is
-automatic when such an include is encountered; it is not enabled by the
-frontend-profile or local-header flags. The frozen SHA-256 proof requires LLVM
-13 or newer; on an older LLVM build this one helper rewrite stays disabled and
-fails closed while the rest of Ascify remains available.
+Ascify recognizes a restricted `helper_cuda.h` dependency and can replace
+`checkCudaErrors`, `getLastCudaError`, and direct calls to the admitted
+`findCudaDevice` implementation. The device helper requires one visible logical
+device and selects logical zero. Recognition is automatic and depends on source
+identity, active macro definitions, and supported call types. It does not enable
+general CUDA Samples or library compatibility.
 
-This proof trusts the configured Ascify/Clang resources, CUDA SDK, sysroot, and
-system-header graph; an untrusted `-isystem` directory enlarges that trust and
-is outside the guarantee. Main source, `-D`, ordinary preincludes, VFS helper
-remaps, forged `#line` filenames, and ordinary headers that later apply
-`#pragma clang/GCC system_header` (including re-entry under a new `FileID`)
-remain fail-closed inputs.
-The macro replacements evaluate the status expression once, preserve
-expression/file/line diagnostics, and implement `getLastCudaError` with
-consume-and-reset semantics.
+See [CUDA Samples helper compatibility](sample-helpers.md) for supported include
+forms, status domains, frozen dependencies, and rejection behavior.
 
-This is one all-or-nothing source transaction. A duplicate or indirect
-include, residual preprocessor use in any local header, altered active macro,
-reserved output-macro collision, unsupported status domain, external helper
-declaration use, or incomplete raw-file audit keeps the original include and
-helper calls. The owned device helper admits only one visible logical device:
-no selector or one exact `--device=0` binds logical zero; any other selector,
-device count, query error, or bind error fails explicitly. It does not emulate
-CUDA's GFLOPS ranking. Occupancy, Driver/VMM, compression, and
-compressible-allocation helpers remain unsupported. See
-[ADR-0015](decisions/0015-admit-only-proven-nvidia-sample-helper-closure.md)
-and
-[ADR-0016](decisions/0016-proof-gate-single-device-sample-selection.md).
+### Target-specific SIMT rewrites
 
-`portable` and `precise` are the defaults. The 950PR SIMT policy used in the
-[recorded validation](validation-matrix.md) is explicitly opt-in:
+`portable` and `precise` are the defaults. Enable the target-specific fast policy
+explicitly:
 
 ```bash
 ascify-clang input.cuh \
   --target-policy=dav-c310-vec \
   --simt-math=fast \
   --cuda-path=/path/to/cuda \
-  --clang-resource-directory=/path/to/llvm/lib/clang/23 \
   -o output.cuh
 ```
 
@@ -171,9 +140,9 @@ pure binary sum/max/min functors for `aclcub::BlockReduce`. Partial masks,
 sub-warps, side effects, dependent calls, unsupported data types, and
 unproven functors retain the compatibility fallback.
 
-### Explicit row-wise SIMD+SIMT hybrid dispatch
+### Explicit row-wise SIMD+SIMT Hybrid dispatch
 
-The dav-3510 row-wise hybrid path has an additional explicit opt-in:
+Enable the versioned recipe together with the target and math policy:
 
 ```bash
 ascify-clang input.cuh \
@@ -181,124 +150,21 @@ ascify-clang input.cuh \
   --simt-math=fast \
   --target-recipe=dav-3510-rowwise-simd-v1 \
   --cuda-path=/path/to/cuda \
-  --clang-resource-directory=/path/to/llvm/lib/clang/23 \
   -o output.cuh
 ```
 
-`--target-recipe=none` is the default and does not add the externally linked
-row-wise target ABI to generated code. The explicit recipe is rejected unless
-both `dav-c310-vec` and `fast` are selected.
+Ascify recognizes supported FP16 Softmax, RMSNorm, and LayerNorm data flows,
+including admitted load/store adapters. Recognition checks the implementation
+and its source context; function names or annotations alone do not qualify.
+The generated call uses the Hybrid runtime when its selector accepts the inputs,
+and keeps the whole-SIMT launch for selector misses. A selected launch returns
+its status, including errors, without launching a second fallback.
 
-In explicit mode, Ascify inserts the closed `RowwiseHybridFacadeV1` entry only
-when it proves all of the following in the main-file AST:
-
-- an exact packed row-major FP16-to-FP32 load and FP32-to-FP16 direct or
-  per-column affine store;
-- exact-owner adapter metadata, so derived classes cannot inherit the proof;
-- the complete Softmax, RMSNorm, or LayerNorm primitive/data-flow graph, including
-  resolved `exp`/divide/`rsqrt` semantics;
-- a supported shape/type contract at runtime.
-
-Explicit hybrid mode does not accept `ascify.semantic.*` annotations as the
-semantic or status-type proof. It inspects the FP32 helper specialization,
-reads the complete source body rather than only the preprocessor-selected AST
-branch, and requires every textual conditional branch in that body to contain
-only the corresponding `exp`, divide, or `rsqrt` return. It also verifies the
-wrapper return type and rejects identity or side-effecting helpers. Reserved
-macros, pre-instrumented adapter markers, input-defined dispatch declarations,
-and input-defined launch-ABI symbols fail closed. Feature macros that affect a
-proved source branch must match between conversion and CCE build. The recorded
-release evidence aligns both `OF_*_USE_FAST_MATH` values; unrelated toolkit
-version macros may differ only when they select the same validated branch. The
-v3 report records the converter arguments and frontend/generator digests.
-Non-system GNU/MS assembler is rejected, including assembler tokens in skipped
-dependencies, so source cannot alias a protected `_launch_v1` symbol. Injected
-headers are macro-shielded; a conventional main-file include guard is
-temporarily undefined only around the injected include and restored before the
-translated body.
-
-The generated main CCE calls
-`RowwiseHybridFacadeV1::TrySoftmaxHybrid` or
-`RowwiseHybridFacadeV1::TryRmsNormHybrid` or
-`RowwiseHybridFacadeV1::TryLayerNormHybrid` and retains its original
-translated SIMT launch. The outer `handled` branch is a pre-launch support gate: a
-selector miss continues into that whole-SIMT launch, while a selected call is
-owned by one target kernel that uses both execution styles. It is not an
-all-SIMD versus all-SIMT operator choice. A selected error is returned and
-never launches the fallback a second time.
-
-Inside a selected Softmax kernel, SIMD performs row maximum,
-exponentiation/sum reduction, and normalization division. Inside selected
-RMSNorm kernels, SIMD performs square/sum reduction, square root, division,
-normalization, and the optional affine multiply. For LayerNorm, SIMD performs
-mean, centered variance, and reciprocal square root; SIMT applies centered
-normalization and output-local indexing. In Softmax and RMSNorm, SIMT performs
-contiguous normalized-value staging from UB to the output-local tile. None of
-the current recipes provides mask, gather, scatter, stride, or other
-non-contiguous adapter lowering.
-
-Mixed kernels require an explicit dynamic-UB launch capacity in the second
-launch argument, large enough for the complete `TPipe` allocation. The
-current budgets are 163,904 bytes for Softmax recompute, 65,600 bytes for
-RMSNorm cached, 147,520 bytes for RMSNorm plain row-batch, and 32,832 bytes for
-LayerNorm cached. `0` and `nullptr` are invalid; the host static gate rejects
-both forms. Recorded selected-route device checks cover these budgets; their
-tested candidate and evidence scope are recorded in the
-[validation matrix](validation-matrix.md).
-
-The Softmax runtime queries the current device, vector-core count, and maximum
-threads per vector core on every selected call. Query failures are propagated
-unchanged; the runtime does not substitute a fixed core count or reuse a
-process-global result from another device.
-
-The facade reports that decision as `HybridTryResult`, an alias of the legacy
-`SimdTryResult { bool handled; aclError status; }` type. ABI v1 exports four C
-symbols: `ascify950_softmax_reg_recompute_launch_v1`,
-`ascify950_rmsnorm_reg_cached_launch_v1`,
-`ascify950_rmsnorm_reg_plain_rowbatch_launch_v1`, and
-`ascify950_layernorm_reg_cached_launch_v1`. Their respective DSO linker names
-are `libascify950_softmax_reg_recompute_v1.so`,
-`libascify950_rmsnorm_reg_cached_v1.so`,
-`libascify950_rmsnorm_reg_plain_rowbatch_v1.so`, and
-`libascify950_layernorm_reg_cached_v1.so`. Their SONAMEs append `.1` to those
-linker names (`VERSION 1.0.0`, `SOVERSION 1`). Each public DSO entry
-repeats the corresponding v1 selector-domain check before launching a kernel,
-so a direct ABI call cannot bypass the shape, alignment, extent, or aliasing
-guard.
-
-The mixed target-support device implementations are built separately from
-`runtime/dav_3510/rowwise/` and linked or deployed with the generated main CCE.
-Source conversion alone therefore does not establish CANN build, device
-correctness, hybrid routing, or performance. RMSNorm affine also requires
-converting the caller file that defines its store adapter together with
-`layer_norm.cuh` and `rms_norm.cuh`; an unknown external store is never
-inferred from field names or layout.
-
-The intra-kernel stage change invalidates predecessor build, correctness, and
-performance attribution. Current claims require regenerated Hybrid-facade
-output and freshly built, checked, and measured target-support binaries.
-
-For the existing 950PR harness, set `ROWWISE_SIMD_RUNTIME_DIR` to the
-unchanged CMake build/install `lib` directory containing all four versioned
-`.so` linker-name files, all four `.so.1` SONAME files, and their
-implementations. The harness verifies each ELF SONAME and that its linker and
-SONAME paths resolve to the same file. The build script links the Softmax check
-ELF only to the Softmax DSO and the RMSNorm check ELF only to the two RMSNorm
-DSOs; the dedicated LayerNorm check exposes only its LayerNorm launch symbol.
-The script rejects any extra or missing row-wise `_launch_v1` dynamic symbol.
-The smoke runner prepends the same directory to its process-local
-`LD_LIBRARY_PATH`.
-
-See [the explicit row-wise SIMD+SIMT conversion guide](rowwise-simd-conversion.md)
-for the ABI, build/link steps, selector domains, verification gates, and
-conversion/performance reporting definitions. The explicit activation and AST
-proof are recorded in
-[ADR-0007](decisions/0007-explicit-ast-gated-rowwise-simd-dispatch.md),
-and the same-kernel stage composition is recorded in
-[ADR-0008](decisions/0008-compose-rowwise-simd-and-simt-stages-in-one-kernel.md).
-The common recipe registry and third-family LayerNorm extension are recorded
-in
-[ADR-0009](decisions/0009-register-rowwise-hybrid-recipes-and-add-layernorm.md).
+Hybrid output requires separately built runtime libraries. Use the
+[row-wise conversion guide](rowwise-simd-conversion.md) for supported source
+patterns, shapes, ABI, build/link commands, and testing. The
+[architecture guide](architecture.md) explains how recognition and runtime
+selection fit together.
 
 ## Tests
 
@@ -326,4 +192,3 @@ documented in
 That older replay is useful as a SIMT baseline but does not enable the new
 `--target-recipe` or build the four hybrid target-support DSOs. Use the
 explicit conversion guide above for the v1 SIMD+SIMT workflow.
-

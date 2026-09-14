@@ -1,17 +1,16 @@
-# Ascend950PR SIMT 硬件上限探针
+# SIMT 硬件探针
 
-本目录只回答 softmax / RMSNorm 调优前必须量化的五个问题：
+本目录提供 `dav-c310-vec` 目标的五类独立硬件测量：
 
-1. 单 block 与铺满 56 个 AIV 时，SIMT kernel 的启动底噪是多少；
+1. 单 block 与覆盖可用 AIV 时的 SIMT kernel 启动延迟；
 2. 2 / 4 / 8 / 16 字节 load-store 宽度分别能到多少 GM 带宽；
 3. 固定 grid 和 16 字节访存时，32 到 1024 threads/block 的最优点在哪里，以及
    每 AIV 2048 resident threads 的上限形态能否继续提升；
 4. `asc_reduce_add` 硬件 warp 归约是否优于 5 级 `asc_shfl_xor`；
 5. `expf` 与 `rsqrtf` 的整卡吞吐上限是多少。
 
-它不是算子 benchmark，也不做 A800 对比。这里得到的是 950PR 的本机基线，后续
-softmax / RMSNorm 性能结果应先与这些上限比较，才能判断瓶颈来自访存、归约、数学
-函数还是 launch 粒度。
+探针结果描述当前设备、软件版本和运行参数下的启动、访存、归约和数学函数
+性能。它们与 Softmax / RMSNorm 算子 benchmark 分开，也不包含 A800 对比。
 
 与本门禁直接相关的文件：
 
@@ -19,78 +18,54 @@ softmax / RMSNorm 性能结果应先与这些上限比较，才能判断瓶颈�
 - `rowwise_recipe_traits_compile.cce`：public recipe header 的 CCEC compile-only 契约；
 - `rowwise_recipe_contract_probe.cce`：不启动设备 kernel 的 host runtime fallback 契约；
 - `parse_results.py`：只依赖 Python 标准库的 CSV 校验与汇总器；
-- `README.md`：构建、运行、字段口径和反馈规则。
+- `README.md`：构建、运行和字段口径。
 
-## 构建接入
+## 构建和运行
 
-源码采用仓库已经验证过的 DPP/SIMT 语法：`__global__` kernel、四尖括号 ACL
-stream 启动、`simt_api` warp/math intrinsic。CANN 9.1.0 beta3 下应交给
-Bisheng 套件里的 `ccec -x dpp` 驱动；不要对这个混合 host+device 文件使用只面向
-ASC kernel 的 `--asc-aicore-lang`。
+从仓库根目录运行。脚本需要 Bash、Python 3.9 或更新版本、`sha256sum`、
+`flock` 和 `npu-smi`。设置与你的设备和目标匹配的 CANN 安装路径及可写输出目录：
 
-在统一 `softmax_rmsnorm_950` 工程内，优先使用已经接入的脚本：
+```bash
+export CANN_ROOT=/path/to/cann
+export WORK_ROOT="$(pwd -P)/.work/softmax_rmsnorm_950"
+```
+
+构建入口使用 `CANN_ROOT` 下的环境和 CCEC 编译器。当前脚本为这个混合
+host/device 源文件选择 `-x dpp --cce-aicore-arch=dav-c310-vec`；具体 include、
+link 参数由 [build.sh](../scripts/build.sh) 维护。仅编译探针和契约检查：
 
 ```bash
 tests/softmax_rmsnorm_950/scripts/build.sh probe
+```
+
+该目标不依赖转换后的 Softmax header。二进制写入 `${WORK_ROOT}/bin/`，
+编译契约对象写入 `${WORK_ROOT}/probes/`。
+
+完整构建、运行和解析使用：
+
+```bash
 tests/softmax_rmsnorm_950/scripts/run_probes.sh
 ```
 
-`build.sh probe` 不依赖已转换的 softmax header，二进制只写入
-`.work/softmax_rmsnorm_950/bin/`。`run_probes.sh` 通过现有
-`select_device.sh` 动态选择健康空闲设备，并在同一个项目锁内先执行
-`rowwise_recipe_contract_probe`，再完成硬件探针、17 行
-校验和解析；产物统一写入 `.work/softmax_rmsnorm_950/results/<run_id>.{build.log,run.log,csv,summary.md}`。
+`run_probes.sh` 调用 `select_device.sh` 选择健康空闲设备，在持有设备锁的期间
+构建，先执行 `rowwise_recipe_contract_probe`，再执行硬件探针并检查 17 行结果。
+如需使用指定设备，可设置 `DEVICE`；脚本仍会执行健康和空闲检查。已构建的二进制
+可通过 `SKIP_BUILD=1` 复用。产物默认写入
+`${WORK_ROOT}/results/<run_id>.{build.log,run.log,csv,summary.md}`；`RUN_ID` 和
+`RESULT_DIR` 可覆盖默认名称和结果目录。
 
-上层统一构建脚本可以把下列命令作为接入模板，并复用其现有的完整 link library
-集合：
+首次构建检查或排错可使用较小工作量：
 
 ```bash
-CANN_ROOT=/path/to/user-owned/cann
-source "$CANN_ROOT/set_env.sh"
-
-"$CANN_ROOT/tools/bisheng_compiler/bin/ccec" \
-  -x dpp --cce-aicore-arch=dav-c310-vec \
-  -std=c++17 -O2 -DNDEBUG \
-  simt_hw_probes.cce \
-  -I"$CANN_ROOT/include" \
-  -I"$CANN_ROOT/include/ascendc/host_api" \
-  -I"$CANN_ROOT/compiler/ascendc/include/highlevel_api" \
-  -I"$CANN_ROOT/compiler/tikcpp/tikcfw" \
-  -I"$CANN_ROOT/compiler/tikcpp/tikcfw/impl" \
-  -I"$CANN_ROOT/compiler/tikcpp/tikcfw/interface" \
-  -I"$CANN_ROOT/compiler/tikcpp/tikcfw/lib" \
-  -I"$CANN_ROOT/compiler/tikcpp/tikcfw/lib/matmul" \
-  -I"$CANN_ROOT/x86_64-linux/asc/include" \
-  -L"$CANN_ROOT/lib64" \
-  -lascendcl -lruntime -lregister -lerror_manager \
-  -lprofapi -lascendalog -lmmpa -lascend_dump -lc_sec \
-  -lstdc++ -lm \
-  -o simt_hw_probes
+tests/softmax_rmsnorm_950/scripts/run_probes.sh --quick
 ```
 
-选择 `dav-c310-vec` 是为了保证只在 AIV 上运行 SIMT probe；beta3 编译器内部对应
-950PR 的 `__NPU_ARCH__=3510` / `__CCE_AICORE__=310`。不要修改系统 CANN、驱动
-或全局环境，构建只使用 `CANN_ROOT` 指向的用户态 beta3 包。beta3 不提供
-`libascendc_runtime`，因此 link 参数中不得沿用 beta1 的
-`-lascendc_runtime`。
-
-## 运行
-
-推荐先把目标物理卡映射成逻辑 device 0，再运行完整探针。stdout 只含 CSV，诊断和
-实际探测到的 AIV/warp/thread 配置写到 stderr：
+探针选项会原样传给二进制；实际检测到的 AIV、warp 和 thread 配置保存在运行日志。
+已有 CSV 可单独校验和汇总，不启动设备：
 
 ```bash
-ASCEND_RT_VISIBLE_DEVICES=<physical_device> \
-  ./simt_hw_probes --device 0 > simt_hw_probes.csv
-
-python3 parse_results.py --strict simt_hw_probes.csv
-```
-
-第一次验证构建或排错时可用较小工作量：
-
-```bash
-ASCEND_RT_VISIBLE_DEVICES=<physical_device> \
-  ./simt_hw_probes --device 0 --quick > simt_hw_probes_quick.csv
+python3 tests/softmax_rmsnorm_950/probes/parse_results.py \
+  --strict /path/to/results.csv
 ```
 
 完整默认值为 256 MiB copy、5 个 timing sample、每个 sample 10 次 throughput
@@ -118,7 +93,7 @@ threads/block，必须不大于 1024。
 
 ## CSV 口径
 
-正常 950PR 完整运行固定输出 17 行结果，schema version 为 1：
+受支持目标上的完整运行输出 17 行结果，schema version 为 1：
 
 | probe | 行数 | 主要指标 | 工作量定义 |
 |---|---:|---|---|
@@ -143,8 +118,8 @@ thread 曲线并标记最佳点；`--format csv` 可让上层脚本继续机器�
 ## Target recipe 编译契约
 
 `rowwise_recipe_traits_compile.cce` 是 CCEC compile-only 门禁，`build.sh all`
-和 `build.sh probe` 都会将它编译到唯一工作根的
-`.work/softmax_rmsnorm_950/probes/`。其 `static_assert` 覆盖：
+和 `build.sh probe` 都会将它编译到
+`${WORK_ROOT}/probes/`。其 `static_assert` 覆盖：
 
 - FP16 storage / FP32 compute 的 direct load/store；
 - compile-time affine `true/false` 与 weight accessor；
@@ -166,22 +141,9 @@ row 必须回退。double/custom dispatcher mismatch 只由上面的 trait
 runtime case 会掩盖 compute-type guard 是否真的生效，因此不把该 smoke test 表述为
 mismatch runtime 证据。
 
-## 如何反馈给 Ascify
+## 结果解释
 
-探针数据不直接写死到转换器，而应转成保守、可回退的 target heuristic：
-
-- 16B copy 相对 2B 的提升稳定且显著：对齐和长度可证明时生成 128-bit
-  load/store；不满足时保留标量 tail/fallback；
-- thread 曲线的峰值：作为 950PR SIMT launch-bound / block-size 候选，不替代
-  shape-aware 派发；
-- `asc_reduce_add` 显著快于 shuffle：将受支持类型的 warp sum lowering 优先映射
-  到硬件 intrinsic，shuffle 保留为兼容回退；
-- `expf` 吞吐逼近 softmax 实测需求：说明优化重点应转向减少重复 exp、融合或换用
-  经精度验证的 math mode，而不是继续只调访存；
-- `rsqrtf` 吞吐逼近 RMSNorm 实测需求：优先减少重复统计/rsqrt 和中间 GM 往返；
-- tiny-shape 算子耗时接近 `launch_floor`：优先合并工作、减少 kernel 数，不能把收益
-  归因于单个 kernel 内部微调。
-
-只有跨至少两次独立运行仍成立、且 softmax 与 RMSNorm 实测能复现收益的规则，才应
-进入 Ascify 的 `dav-c310-vec` target policy。这样增强传统转换工具的生成质量，同时不改
-其整体框架。
+保留构建日志、设备信息、运行参数和原始 CSV，使不同测量可以按相同条件比较。
+`--quick` 用于检查运行流程；完整测量使用上面的默认工作量或明确记录的覆盖值。
+硬件探针的吞吐与算子端到端吞吐采用不同工作量定义，不能直接当作算子正确性、
+完整迁移成功率或相对 A800 性能的证明。

@@ -26,8 +26,8 @@ CUDA source  →  ascify-clang  →  Ascend-compatible source  →  CANN build a
 
 Generated source is one migration stage. It does not establish target compilation,
 linking, numerical correctness, or performance. Full CUDA Samples application
-coverage is ongoing work; see the [validation matrix](docs/validation-matrix.md)
-for measured populations, tested commits, and remaining gaps.
+coverage is ongoing work; see the [compatibility reference](docs/compatibility.md)
+for supported operations and known limitations.
 
 ## Quick start
 
@@ -88,8 +88,8 @@ shapes, ABI requirements, and target validation.
 |---|---|
 | Install and convert your first source | [English](docs/user-guide.en.md) · [中文](docs/user-guide.zh-CN.md) |
 | Look up CLI options and conversion boundaries | [Source conversion reference](docs/conversion-reference.md) |
-| Inspect coverage and performance evidence | [Validation matrix](docs/validation-matrix.md) |
-| Add a capability or fix a bug | [Contributing](CONTRIBUTING.md) · [Architecture decisions](docs/decisions/) |
+| Understand the implementation and supported APIs | [Architecture](docs/architecture.md) · [Compatibility](docs/compatibility.md) |
+| Add a capability or fix a bug | [Contributing](CONTRIBUTING.md) |
 | Prepare a release | [Release process](docs/release-process.md) |
 
 ## Development

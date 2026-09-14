@@ -41,17 +41,9 @@ CUDA 源码
 
 编译 Ascify 不需要 Python。仓库检查、转换封装脚本和测试需要 Python 3.9 或更高版本。host release 检查还需要 Clang 和 ripgrep。
 
-以下是历史验证中记录的环境；其结果归属和当前候选状态见 [验证矩阵](validation-matrix.md)：
-
-| 项目 | 测试值 |
-|---|---|
-| 系统 | Linux AArch64 |
-| LLVM/Clang | 23.0.0git，commit `caf619642a6dbb216969a9450d33dbac5a8d30df` |
-| CUDA Toolkit | 12.8 |
-| CMake | 4.3.4 |
-| Ninja | 1.13.0 |
-
-其他版本也可能可用。上表只给出已经测试过的版本。
+持续集成使用 LLVM 23，依赖版本见 [原生构建环境](../.github/conda-native.yml)。
+请选择与 LLVM 版本匹配的 CUDA Toolkit。目标编译和执行还需要配套的 CANN
+工具链与设备；支持范围见 [兼容性参考](compatibility.md)。
 
 ### 2.2 安装基础工具
 

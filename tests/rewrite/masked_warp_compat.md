@@ -23,8 +23,8 @@ zero, mask `delta`, or alter width boundaries.
 
 ## SDK evidence
 
-These are source observations from DT's installed
-`/usr/local/Ascend/cann-9.1.0/aarch64-linux/asc`, not device validation:
+These are CANN 9.1.0 SDK source observations, not device validation. Paths are
+relative to the SDK's `aarch64-linux/asc` directory:
 
 - `include/simt_api/device_warp_functions.h:26,28,50–58` declares unmasked
   ballot, active-mask, and shuffle operations.
@@ -34,7 +34,7 @@ These are source observations from DT's installed
   `impl/simt_api/cooperative_groups_impl.h:438–445` forwards its shuffle with
   `width=Size`, including width 1.
 
-SDK source establishes these calls exist. The DT test below is required to
+SDK source establishes these calls exist. The device test below is required to
 check the compiler's active-mask behavior inside conditional execution.
 
 ## Verification
@@ -50,10 +50,13 @@ lane), physical source addressing, width boundaries, preservation of a nonzero
 unspecified-source result, and compile-time rejection of FP64 and 64-bit integer
 types. Host stubs do **not** establish device convergence or synchronization.
 
-Compile `tests/rewrite/masked_warp_device_probe.cce` using the project's current
-DT compiler/launch recipe and its real SDK headers. Run the executable without
-arguments first. All positive and negative calls use the public mapped
-wrappers, including full-mask and partial-mask dispatch. It checks eight full,
+Compile `tests/rewrite/masked_warp_device_probe.cce` with the legacy SIMT
+compiler configuration for your CANN 9.1.0 installation, the real SDK headers,
+and the repository `include/` directory on the include path. This probe is
+separate from the host-only release checks. Its executable uses logical device
+0; configure device visibility for the intended device before launching it.
+Run the executable without arguments first. All positive and negative calls
+use the public mapped wrappers, including full-mask and partial-mask dispatch. It checks eight full,
 prefix, sparse, and single-lane masks,
 six widths, seven deltas, and all three admitted types across 42 blocks. Each
 active observation must report the selected mask; inactive lanes must leave
@@ -79,13 +82,10 @@ main compatibility header, converter routing, or hardware settings.
 
 ## Reduction boundary
 
-The frozen Reduction source SHA-256 is
-`c9ac9a9a424726522dd616fa24d58e6f0919ac95dd746a233d5fb857bffffde9`.
-Its final reduce7 stage passes the ballot from line 499 into the branch at
-lines 500–504. This is a candidate for an already converged prefix group, to be
-checked on DT. However, its `warpReduceSum` at lines 75–80 always begins with
-delta 16 at width 32. When the final group has fewer than 32 members, it can read
-an unselected source. The CUDA result for that operation is undefined. Passing
-this helper's tests therefore does not establish numerical correctness for
-that Reduction path. Algorithm changes or a narrower acceptance boundary need
-separate review; this helper does not silently repair the source.
+A converged partial-mask collective does not by itself prove that a reduction
+algorithm reads only selected lanes. For example, a width-32 down-shuffle with
+delta 16 can read an unselected source when the final group has fewer than 32
+members. The CUDA result for that operation is undefined. Passing this helper's
+tests therefore does not establish numerical correctness for every reduction
+that uses it. Validate the caller's source-lane domain separately; the helper
+does not repair an invalid reduction algorithm.

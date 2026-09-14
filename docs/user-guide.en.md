@@ -41,17 +41,10 @@ Source conversion does not need an NVIDIA GPU or an Ascend NPU. The conversion m
 
 You do not need Python to build Ascify. Repository checks, conversion wrappers, and tests require Python 3.9 or newer. The host release checks also need Clang and ripgrep.
 
-The following setup is recorded in historical validation. See the [validation matrix](validation-matrix.md) for its result attribution and current candidate status:
-
-| Item | Tested value |
-|---|---|
-| System | Linux AArch64 |
-| LLVM/Clang | 23.0.0git, commit `caf619642a6dbb216969a9450d33dbac5a8d30df` |
-| CUDA Toolkit | 12.8 |
-| CMake | 4.3.4 |
-| Ninja | 1.13.0 |
-
-Other versions may work. This table only lists versions that the project has tested.
+The continuous-integration build uses LLVM 23; its dependency versions are
+listed in the [native build environment](../.github/conda-native.yml). Choose a
+CUDA Toolkit compatible with your LLVM version. Target compilation and execution
+require a matching CANN toolchain and device; see [compatibility](compatibility.md).
 
 ### 2.2 Install the basic tools
 

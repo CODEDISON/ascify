@@ -21,7 +21,8 @@ REQUIRED = (
     ".gitattributes", ".editorconfig", ".github/workflows/host-contracts.yml",
     ".github/conda-native.yml",
     "docs/README.md", "docs/user-guide.en.md", "docs/user-guide.zh-CN.md",
-    "docs/validation-matrix.md", "docs/release-process.md",
+    "docs/architecture.md", "docs/compatibility.md", "docs/sample-helpers.md",
+    "docs/release-process.md",
 )
 PRODUCT_DIRECTORIES = ("src", "include", "frontend_compat", "runtime", "acl_cub", "cmake")
 PRODUCT_FILES = ("CMakeLists.txt", "build.sh", "run.sh")
@@ -110,7 +111,7 @@ def check(root):
 
         if path.suffix != ".md":
             continue
-        # Historical ADRs and third-party attribution may name upstream tools.
+        # Third-party attribution may name upstream tools.
         if name in ("README.md", "README.zh-CN.md", "CONTRIBUTING.md",
                     "docs/conversion-reference.md", "docs/user-guide.en.md",
                     "docs/user-guide.zh-CN.md"):

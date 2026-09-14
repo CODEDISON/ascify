@@ -73,12 +73,12 @@ execution. See the [release process](docs/release-process.md) for each level.
 Changes to a target recipe require:
 
 1. positive and adversarial negative rewrite coverage;
-2. a clean native build, actual conversion, and mutation replay on the named
-   integration environment (DT for phase-one closeout; preserve the original
-   identity of historical 910C runs);
-3. 950PR direct/native correctness and performance gates;
-4. an ADR update when the semantic proof, runtime domain, or acceptance
-   threshold changes.
+2. a clean native build, actual conversion, and mutation replay with the declared
+   integration toolchain;
+3. correctness and, for changes affecting performance, benchmark comparisons
+   on the supported target;
+4. updates to the affected compatibility or runtime guide when the semantic
+   proof, supported domain, or acceptance threshold changes.
 
 ## Repository conventions
 
@@ -87,8 +87,10 @@ locks, or evidence bundles. Commit only source, fixed fixtures, expected
 outputs, and small evidence summaries bound to immutable hashes.
 
 Keep changes focused. Preserve source and fixture paths during release
-engineering, and avoid repository-wide formatting. Update the relevant guide,
-Unreleased changelog, and ADR when behavior or its contract changes. A bug or
+engineering, and avoid repository-wide formatting. Update the relevant guide
+and Unreleased changelog when behavior or its contract changes. Keep public
+documentation focused on current usage, architecture, and supported behavior;
+store development journals and raw experiment records outside the source tree. A bug or
 coverage report should identify the input, source commit, dependency versions,
 command, first failing stage, and actual diagnostic; redact private connection
 details. Do not describe generated source as a working migrated application.
@@ -100,6 +102,6 @@ CUDA fixtures to satisfy a branding or style check.
 
 Use the issue templates for reproducible bugs and scoped feature requests. In a
 pull request, explain the problem and resulting behavior, record the checks you
-ran, and call out affected compatibility boundaries. See
-[ADR-0029](docs/decisions/0029-cuda-to-ascend-product-contract.md) for the current
-product and engineering contracts.
+ran, and call out affected compatibility boundaries. See the
+[architecture](docs/architecture.md) and [compatibility reference](docs/compatibility.md)
+for the current implementation and supported behavior.

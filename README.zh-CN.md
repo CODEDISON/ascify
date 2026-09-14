@@ -20,8 +20,8 @@ CUDA 源码  →  ascify-clang  →  Ascend 兼容源码  →  CANN 编译与设
 - 对未支持的模式保留原源码或明确报错，具体行为由对应的转换契约定义。
 
 源码生成只是迁移的一步。目标编译、链接、数值正确性和性能需要分别验证。
-完整 CUDA Samples 应用的覆盖仍在推进；[验证矩阵](docs/validation-matrix.md)
-列出已测样本范围、提交版本、性能结果和待补验证。
+完整 CUDA Samples 应用的覆盖仍在推进；[兼容性参考](docs/compatibility.md)
+列出当前支持的操作及已知限制。
 
 ## 快速开始
 
@@ -70,6 +70,7 @@ ASCIFY_BINARY= sh tests/run_release_checks.sh
 ```
 
 [贡献指南](CONTRIBUTING.md) 说明构建、CLI、安装、真实转换和目标设备验证的分工；
+[架构说明](docs/architecture.md) 和 [兼容性参考](docs/compatibility.md) 介绍当前实现与支持范围；
 [转换参考](docs/conversion-reference.md) 记录命令行与语义边界；
 [发布流程](docs/release-process.md) 说明候选版本和证据要求。
 

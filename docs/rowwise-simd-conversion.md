@@ -59,7 +59,7 @@ using HybridTryResult = SimdTryResult;
 
 `HybridTryResult` is an alias of the legacy `SimdTryResult` type.
 The old `RowwiseSimdFacadeV1::Try*Simd` entry remains only as a compatibility
-alias for already generated review artifacts; new conversion output uses the
+alias for previously generated source; new conversion output uses the
 Hybrid facade.
 
 The generated ownership pattern is:
@@ -174,7 +174,7 @@ helper, side-effecting helper, or annotated non-status wrapper leaves the
 source on the SIMT path. Reserved macros, pre-instrumented adapter markers,
 input-defined dispatch declarations, and input-defined launch-ABI symbols
 reject explicit conversion. Feature macros affecting a proved branch must
-agree between conversion and CCE build. The release evidence aligns the
+agree between conversion and CCE build, including the
 `OF_*_USE_FAST_MATH` macros; toolkit-version macros may differ only when they
 select the same validated branch. Converter arguments are bound into the v3
 report, while the package manifest records the build-side configuration.
@@ -245,7 +245,7 @@ the following fixed budgets:
 | Route | Dynamic UB launch capacity |
 |---|---:|
 | Softmax recompute | 163,904 bytes |
-| RMSNorm cached | 65,600 bytes |
+| RMSNorm cached | 65,600 bytes through 8192 columns; 131,136 bytes through 16384 columns |
 | RMSNorm plain row-batch | 147,520 bytes |
 | LayerNorm cached | 32,832 bytes |
 
@@ -254,10 +254,8 @@ A `0` or `nullptr` second argument is invalid. Any change to a kernel's
 capacity. The host static gate rejects both forms, and the selected-route
 device correctness suite exercises the current launch budgets.
 
-This stage composition is specified by
-[ADR-0008](decisions/0008-compose-rowwise-simd-and-simt-stages-in-one-kernel.md);
-the operator-independent registry and LayerNorm extension are specified by
-[ADR-0009](decisions/0009-register-rowwise-hybrid-recipes-and-add-layernorm.md).
+The [architecture guide](architecture.md) explains how source proofs, the
+recipe registry, and the separately linked runtime fit together.
 
 ## Version 1 runtime selector boundary
 
@@ -363,8 +361,3 @@ and aggregation. State the baseline explicitly. For example, `1.23x` is 123%
 of baseline and a 23% increase, not a 123% increase. Do not carry a predecessor
 payload's ratio onto a newly generated or rebuilt binary before its own build,
 correctness, and measurement gates pass.
-
-The intra-kernel change defined by ADR-0008 invalidates predecessor build,
-correctness, and performance attribution. Current results require regenerated
-Hybrid-facade output and freshly built, checked, and measured target-support
-binaries from the same frozen source state.

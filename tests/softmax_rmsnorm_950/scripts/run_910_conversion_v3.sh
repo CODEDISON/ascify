@@ -10,12 +10,16 @@ INPUT_ROOT="${INPUT_ROOT:-${REPO_ROOT}/tests/fixtures/oneflow}"
 EVIDENCE_ROOT="${EVIDENCE_ROOT:-${WORK_ROOT}/conversion/evidence_v3}"
 ASCIFY_BINARY="${ASCIFY_BINARY:-${REPO_ROOT}/build/ascify-clang}"
 CUDA_ROOT="${CUDA_ROOT:-${WORK_ROOT}/cuda}"
-CLANG_RESOURCE_DIRECTORY="${CLANG_RESOURCE_DIRECTORY:-${REPO_ROOT}/ascify_install/include/ascify}"
+CLANG_RESOURCE_DIRECTORY="${CLANG_RESOURCE_DIRECTORY:-}"
 RMSNORM_ADAPTER_INPUT="${RMSNORM_ADAPTER_INPUT:-${TEST_ROOT}/inputs/rmsnorm_affine_store.cuh}"
 CONVERSION_SET_ID="${CONVERSION_SET_ID:-ascify_recipe_conversion_v3}"
 VALIDATOR="${SCRIPT_DIR}/validate_formal_run.py"
 LOCK_HELPER="${SCRIPT_DIR}/safe_lock_exec.py"
 
+if [[ -z "${CLANG_RESOURCE_DIRECTORY}" ]]; then
+  echo "Set CLANG_RESOURCE_DIRECTORY to the matching Clang resource directory (the parent of include/)." >&2
+  exit 2
+fi
 if [[ ! "${CONVERSION_SET_ID}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
   echo "CONVERSION_SET_ID must be a safe identifier" >&2
   exit 2
@@ -34,7 +38,7 @@ if ! command -v flock >/dev/null 2>&1; then
 fi
 
 if [[ -e "${WORK_ROOT}" && ! -d "${WORK_ROOT}" ]]; then
-  echo "910C work root is not a directory: ${WORK_ROOT}" >&2
+  echo "Conversion work root is not a directory: ${WORK_ROOT}" >&2
   exit 1
 fi
 mkdir -p -- "${WORK_ROOT}"
@@ -105,7 +109,7 @@ for required_file in \
   "${RECIPE_SOURCE}" "${RECIPE_HEADER}" \
   "${CLANG_RESOURCE_DIRECTORY}/include/__clang_cuda_runtime_wrapper.h"; do
   if [[ ! -f "${required_file}" ]]; then
-    echo "missing 910C conversion input: ${required_file}" >&2
+    echo "missing conversion input: ${required_file}" >&2
     exit 1
   fi
 done
@@ -187,7 +191,7 @@ run_conversion() {
   local stdout_path="${PARTIAL_ROOT}/logs/${unit}.stdout"
   local stderr_path="${PARTIAL_ROOT}/logs/${unit}.stderr"
   local exit_code
-  echo "[910C conversion] ${unit}"
+  echo "[conversion] ${unit}"
   set +e
   (
     cd -- "${PARTIAL_ROOT}"

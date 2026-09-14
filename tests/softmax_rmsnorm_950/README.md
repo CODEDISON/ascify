@@ -1,9 +1,9 @@
-# Legacy Softmax / RMSNorm 910C-to-950PR recipe replay
+# Softmax / RMSNorm test harness
 
 > Scope: `run_910_conversion_v3.sh` exercises the earlier in-header
 > `TrySoftmax` / `TryRmsNorm` recipe and does not pass the explicit
 > `--target-recipe=dav-3510-rowwise-simd-v1` option or build the four v1 mixed
-> runtime DSOs. Keep it as a baseline replay. For the current externally
+> runtime DSOs. For the externally
 > linked SIMD+SIMT path, follow
 > [the explicit conversion guide](../../docs/rowwise-simd-conversion.md), then
 > use this directory's build/smoke harness with
@@ -16,22 +16,32 @@ profile cases. It excludes LogSoftmax, backward kernels, and A800 comparison.
 
 `direct` means an unedited Ascify-generated header whose proved wrapper calls
 the versioned `ascify::target::dav_c310::rowwise_simd_v1` implementation. `native` is a thin
-control entry into the same implementation. The comparison proves that a
-clean conversion reproduces the deposited target recipe; it does not claim
+control entry into the same implementation. A passing comparison shows that a
+clean conversion reproduces the selected target recipe; it does not claim
 that Ascify synthesizes the low-level kernel from arbitrary CUDA.
 
-## Repository and work roots
+## Prerequisites and output paths
 
-Use one checkout and one ignored work tree on each host:
+Run the examples from the repository root. Conversion requires a built
+Ascify executable, LLVM/Clang resource headers, and CUDA parsing headers.
+The replay scripts use Bash, Python 3.9 or newer, `sha256sum`, and `flock`.
+Device checks additionally require a compatible CANN package, its CCEC compiler,
+`npu-smi`, and an Ascend device supported by the selected recipe. The legacy
+formal validator specifically expects `Ascend950PR` in the device snapshot. See the
+[build guide](../../docs/user-guide.en.md) for translator dependencies.
+
+Choose a writable output directory. The following uses the scripts' ignored
+default; `WORK_ROOT` can also point outside the checkout:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
 export WORK_ROOT="${REPO_ROOT}/.work/softmax_rmsnorm_950"
 ```
 
-All generated headers, converter binaries, build outputs, locks, manifests,
-CSV evidence and logs stay below `WORK_ROOT`. CANN, LLVM, CUDA parsing headers,
-drivers, and global shell configuration are external and must not be modified.
+The harness writes generated headers, build outputs, locks, manifests, CSV
+results, and logs below `WORK_ROOT`. Use the same work root when staging and
+running one experiment; conversion and device hosts may use different absolute
+paths. Set `CANN_ROOT`, `LLVM_BUILD_DIR`, and `CUDA_ROOT` to your own installations.
 
 The three OneFlow conversion inputs are versioned in
 `tests/fixtures/oneflow/`; their origin, local RMSNorm patch, and SHA256 values
@@ -40,36 +50,48 @@ are recorded in [the fixture manifest](../fixtures/oneflow/README.md).
 ## Host-only gate
 
 ```bash
+ASCIFY_BINARY= ASCIFY_CUDA_PATH= ASCIFY_CLANG_RESOURCE_DIRECTORY= \
+  sh tests/run_release_checks.sh
+```
+
+This runs the static rewrite contracts and registered Python suites. To also
+re-translate the golden fixtures, provide the translator and parsing dependencies:
+
+```bash
+ASCIFY_BINARY=/path/to/ascify-clang \
+ASCIFY_CUDA_PATH=/path/to/cuda \
+ASCIFY_CLANG_RESOURCE_DIRECTORY=/path/to/install/libexec/ascify/clang/23 \
 sh tests/run_release_checks.sh
 ```
 
-This runs the static rewrite contracts and registered Python suites. With a
-built translator, it also re-translates the golden fixtures:
+## Build and convert
+
+The legacy replay script retains its `run_910_conversion_v3.sh` filename, but
+conversion runs on the host where Ascify and its dependencies are installed.
+For an LLVM 23 build with the default install directory layout:
 
 ```bash
-ASCIFY_BINARY=build/ascify-clang \
-ASCIFY_CUDA_PATH=/path/to/user-owned/cuda \
-ASCIFY_CLANG_RESOURCE_DIRECTORY=ascify_install/include/ascify \
-sh tests/run_release_checks.sh
-```
-
-## 910C: build and convert
-
-Configure a user-owned LLVM/Clang tree and CUDA parsing layout:
-
-```bash
-export LLVM_PROJECT_PATH=/path/to/llvm-project
-export CUDA_ROOT=/path/to/user-owned/cuda
-export CLANG_RESOURCE_DIRECTORY="${REPO_ROOT}/ascify_install/include/ascify"
+export LLVM_BUILD_DIR=/path/to/llvm-prefix
+export CUDA_ROOT=/path/to/cuda
+export BUILD_DIR="${WORK_ROOT}/build"
+export INSTALL_ROOT="${WORK_ROOT}/install"
 
 ./build.sh
-cmake --install build --prefix "${REPO_ROOT}/ascify_install"
+cmake --install "${BUILD_DIR}"
+
+export ASCIFY_BINARY="${INSTALL_ROOT}/bin/ascify-clang"
+export CLANG_RESOURCE_DIRECTORY="${INSTALL_ROOT}/libexec/ascify/clang/23"
 ```
+
+The resource root contains `include/__clang_cuda_runtime_wrapper.h`; adjust
+`23` and `libexec` to the resource version and install layout of your build.
+Pass it explicitly because the legacy replay script predates this layout.
 
 Create a new evidence set. The script refuses to overwrite an existing set:
 
 ```bash
 WORK_ROOT="${WORK_ROOT}" \
+ASCIFY_BINARY="${ASCIFY_BINARY}" \
 CUDA_ROOT="${CUDA_ROOT}" \
 CLANG_RESOURCE_DIRECTORY="${CLANG_RESOURCE_DIRECTORY}" \
 tests/softmax_rmsnorm_950/scripts/run_910_conversion_v3.sh
@@ -103,7 +125,7 @@ Run the fail-close mutation matrix against the same commit and inputs:
 
 ```bash
 python3 -B tests/rewrite/check_dav_c310_rowwise_mutations.py \
-  --ascify build/ascify-clang \
+  --ascify "${ASCIFY_BINARY}" \
   --softmax tests/fixtures/oneflow/oneflow/core/cuda/softmax.cuh \
   --rms-norm tests/fixtures/oneflow/oneflow/core/cuda/rms_norm.cuh \
   --layer-norm tests/fixtures/oneflow/oneflow/core/cuda/layer_norm.cuh \
@@ -116,37 +138,26 @@ python3 -B tests/rewrite/check_dav_c310_rowwise_mutations.py \
   --converter-cwd "${REPO_ROOT}"
 ```
 
-The accepted matrix is 29 Softmax, 9 RMSNorm, and 7 LayerNorm cases. Exit
-status zero means 45/45 passed.
+The mutation matrix contains 29 Softmax, 9 RMSNorm, and 7 LayerNorm cases.
+A successful run reports 45/45 passed.
 
-## Transfer the immutable conversion evidence
+## Use the conversion bundle on a device host
 
-From a machine with SSH aliases for both hosts:
+If conversion and device execution use separate hosts, copy the complete
+`conversion/evidence_v3` directory to `${WORK_ROOT}/conversion/evidence_v3`
+on the device host using your preferred file-transfer method. Preserve its
+manifest, relative paths, and file bytes. Use the same source commit to build
+the target checks; the checkout and work-root paths can differ between hosts.
+The generated headers are consumed without manual edits.
 
-```bash
-export ASCIFY_CONVERT_HOST=910C
-export ASCIFY_TEST_HOST=950PR
-export CONVERT_REPO=/path/to/ascify-on-910c
-export TEST_REPO=/path/to/ascify-on-950pr
+## Stage, build, verify, and benchmark on the device host
 
-ssh "${ASCIFY_CONVERT_HOST}" \
-  "tar -C '${CONVERT_REPO}/.work/softmax_rmsnorm_950/conversion' -cf - evidence_v3" |
-ssh "${ASCIFY_TEST_HOST}" \
-  "mkdir -p '${TEST_REPO}/.work/softmax_rmsnorm_950/conversion' &&
-   tar -C '${TEST_REPO}/.work/softmax_rmsnorm_950/conversion' -xf -"
-```
-
-Both checkouts must resolve to the same Git commit. Do not edit any generated
-header after transfer.
-
-## 950PR: stage, build, verify, and benchmark
-
-Set the user-owned CANN package explicitly:
+Set the work root containing the conversion bundle and your CANN package:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
 export WORK_ROOT="${REPO_ROOT}/.work/softmax_rmsnorm_950"
-export CANN_ROOT=/path/to/user-owned/cann
+export CANN_ROOT=/path/to/cann
 
 mkdir -p "${WORK_ROOT}/generated"
 cp -a "${WORK_ROOT}/conversion/evidence_v3/outputs/." \
@@ -164,12 +175,13 @@ WORK_ROOT="${WORK_ROOT}" \
 tests/softmax_rmsnorm_950/scripts/run_formal_recipe_v3.sh
 ```
 
-Do not set `DEVICE`. After building, the script selects and locks a healthy
+The formal runner selects its device automatically after building, ignoring
+a caller-provided `DEVICE`. It selects and locks a healthy
 device with zero compute and HBM-bandwidth utilization. If a candidate becomes
 busy between the initial check and the check made under its project lock, the
 selector rejects that candidate and continues with the next discovered device.
 
-The formal run fixes:
+The replay script uses:
 
 - direct and native `correctness.csv`: 42 Softmax and 18 RMSNorm cases each;
 - direct and native `unified_tune.csv`: 5 Softmax and 10 RMSNorm cases each;
@@ -181,11 +193,8 @@ The formal run fixes:
 - every shape direct/native geometric center at least `0.90`;
 - Softmax, RMSNorm plain, and RMSNorm affine group geomean at least `0.95`.
 
-The immutable binary bundle and run manifests are written below:
-
-```text
-.work/softmax_rmsnorm_950/results/manifests/
-```
+The binary bundle and run manifests are written to
+`${WORK_ROOT}/results/manifests/`.
 
 Derive ordinary arithmetic throughput and separate SFU call rates:
 
@@ -196,23 +205,19 @@ python3 -B tests/softmax_rmsnorm_950/tools/derive_work_metrics.py \
   --output "${WORK_ROOT}/results/perf_metrics_v1.csv"
 ```
 
-The calculation does not count `exp` or `rsqrt` as FLOPs. Probe instructions
-are in [probes/README.md](probes/README.md); measured conversion and tuning
-results are in
-[the tuning report](../../docs/softmax-rmsnorm-950pr-tuning-report.md).
+The calculation does not count `exp` or `rsqrt` as FLOPs. See
+[probes/README.md](probes/README.md) for independent hardware measurements.
 
 Build and run only the independent LayerNorm hybrid check when converted
 Softmax/RMSNorm headers are not being staged:
 
 ```bash
-CANN_ROOT=/path/to/user-owned/cann \
-ROWWISE_SIMD_RUNTIME_DIR=build/rowwise-simd-v1/lib \
-  tests/softmax_rmsnorm_950/scripts/build.sh \
-  layernorm-check production-fast
+export CANN_ROOT=/path/to/cann
+export ROWWISE_SIMD_RUNTIME_DIR=/path/to/rowwise-simd-v1/lib
 
-LD_LIBRARY_PATH=build/rowwise-simd-v1/lib \
-  .work/softmax_rmsnorm_950/bin/layernorm_hybrid_check_production_fast \
-  --device 0
+tests/softmax_rmsnorm_950/scripts/build.sh layernorm-check production-fast
+LAYERNORM_CHECK_PATHS=direct \
+  tests/softmax_rmsnorm_950/scripts/run_layernorm_hybrid_checks.sh
 ```
 
 The program checks five valid domains, including exact in-place input/output,
@@ -228,15 +233,11 @@ mkdir -p "${WORK_ROOT}/generated/oneflow/core/cuda"
 cp /path/to/ascify-output/layer_norm.cuh \
   "${WORK_ROOT}/generated/oneflow/core/cuda/layer_norm.cuh"
 
-CANN_ROOT=/path/to/user-owned/cann \
 GENERATED_ROOT="${WORK_ROOT}/generated" \
-ROWWISE_SIMD_RUNTIME_DIR=build/rowwise-simd-v1/lib \
   tests/softmax_rmsnorm_950/scripts/build.sh \
   layernorm-generated-check production-fast
 
-CANN_ROOT=/path/to/user-owned/cann \
-ROWWISE_SIMD_RUNTIME_DIR=build/rowwise-simd-v1/lib \
-  tests/softmax_rmsnorm_950/scripts/run_layernorm_hybrid_checks.sh
+tests/softmax_rmsnorm_950/scripts/run_layernorm_hybrid_checks.sh
 ```
 
 This second binary instantiates the converted `DirectLoad`/`DirectStore` and
@@ -246,4 +247,4 @@ representative generated-path domains through 1024 columns. The companion
 direct-ABI binary additionally covers the runtime's 4096- and 8192-column
 boundaries. The runner acquires one healthy-device lock and checks both paths
 sequentially on that device. See
-[ADR-0009](../../docs/decisions/0009-register-rowwise-hybrid-recipes-and-add-layernorm.md).
+[the explicit conversion guide](../../docs/rowwise-simd-conversion.md).
