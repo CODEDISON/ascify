@@ -4,14 +4,14 @@ English | [简体中文](user-guide.zh-CN.md)
 
 ## 1. What Ascify does
 
-Ascify is a source converter for CUDA C/C++. It uses Clang to read CUDA source files. It then changes the source to use the ACL, DPP, and Ascend compatibility layers.
+Ascify translates CUDA C/C++ source for Ascend. It uses Clang to read CUDA source files, then rewrites supported CUDA APIs and kernel constructs to Ascify compatibility headers and Ascend ACL interfaces.
 
 The full flow has two parts:
 
 ```text
 CUDA source
   -> ascify-clang converts the source
-  -> ACL/DPP/Ascend-compatible source
+  -> Ascend-compatible source
   -> CANN or your target project builds, links, and tests the code
 ```
 
@@ -38,9 +38,9 @@ Source conversion does not need an NVIDIA GPU or an Ascend NPU. The conversion m
 | LLVM and Clang development files | Provide the Clang front end, libraries, and CMake files | The `clang` command alone is often not enough |
 | CUDA Toolkit | Provide CUDA headers and `libdevice` | An NVIDIA GPU is not required |
 
-You do not need Python 3 to build Ascify. The test scripts do need Python 3. Python 3 is also useful when you read the JSON receipt.
+You do not need Python to build Ascify. Repository checks, conversion wrappers, and tests require Python 3.9 or newer.
 
-The project has passed tests with this setup:
+The following setup is recorded in historical validation. See the [validation matrix](validation-matrix.md) for its result attribution and current candidate status:
 
 | Item | Tested value |
 |---|---|
@@ -73,6 +73,10 @@ python3 --version
 If CMake is older than 3.16.8, update it first. LLVM may need a newer CMake version. Check the build requirements for your LLVM version.
 
 ## 3. Prepare LLVM and Clang
+
+You can set `LLVM_BUILD_DIR` directly to an LLVM development installation
+containing `LLVMConfig.cmake` and `ClangConfig.cmake`. `build.sh` does not require
+an LLVM source checkout. The following steps use an existing source build.
 
 ### 3.1 Use an existing LLVM build directory
 
@@ -139,18 +143,18 @@ cmake -S llvm -B build -G Ninja \
   -DLLVM_TARGETS_TO_BUILD="${LLVM_HOST_TARGET};NVPTX" \
   -DLLVM_DEFAULT_TARGET_TRIPLE="${LLVM_HOST_TRIPLE}"
 
-cmake --build build --target clang lld --parallel 2
+cmake --build build --parallel 2
 cd ..
 ```
 
-After the build, set these paths:
+Build the full default target to produce the Clang development libraries used by Ascify; building only the `clang` executable does not prepare all of these dependencies. Then set these paths:
 
 ```bash
 export LLVM_PROJECT_PATH=/path/to/llvm-project
 export LLVM_BUILD_DIR="$LLVM_PROJECT_PATH/build"
 ```
 
-You can also use LLVM development packages from your Linux system. In that case, `LLVM_BUILD_DIR` must point to a directory with all needed files. It needs `bin/clang`, the LLVM CMake files, and the Clang CMake files. If `ClangConfig.cmake` is missing, install the matching Clang development package or use a full LLVM source build.
+You can also use LLVM development packages from your Linux system. `LLVM_BUILD_DIR` must identify the prefix containing LLVM and Clang CMake configurations, development libraries, and matching parsing resources. The host compilers may live elsewhere: select them with `ASCIFY_CC`/`ASCIFY_CXX` or `CC`/`CXX`. Without overrides, the script tries Clang in the prefix, then CMake compiler discovery. If `ClangConfig.cmake` is missing, install the matching Clang development package or use a complete LLVM source build.
 
 ## 4. Prepare the CUDA Toolkit
 
@@ -184,11 +188,10 @@ Save the commit value. You can use it to repeat the same conversion later.
 
 ### 5.2 Build
 
-First, check that the two LLVM variables from section 3 are still set. Then run:
+Set `LLVM_BUILD_DIR` to the development installation or source build prepared in section 3. This variable is sufficient; you do not also need `LLVM_PROJECT_PATH`:
 
 ```bash
-export LLVM_PROJECT_PATH=/path/to/llvm-project
-export LLVM_BUILD_DIR="$LLVM_PROJECT_PATH/build"
+export LLVM_BUILD_DIR=/path/to/llvm
 export ASCIFY_BUILD_JOBS=2
 
 ./build.sh
@@ -200,8 +203,8 @@ export ASCIFY_BUILD_JOBS=2
 - Build type: Release.
 - Build directory: `build/`.
 - Install directory: `ascify_install/`.
-- C/C++ compilers: `clang` and `clang++` in the LLVM build directory.
-- Linker: `lld` in the LLVM build directory, if the file exists.
+- C/C++ compilers: `ASCIFY_CC`/`ASCIFY_CXX`, then `CC`/`CXX`, then Clang in the LLVM prefix, then CMake host compiler discovery.
+- Linker: selected by the compiler; set `ASCIFY_LINKER` to override it.
 
 Check the new program:
 
@@ -238,35 +241,47 @@ If you used the default build directory, run:
 cmake --install build
 
 test -x ascify_install/bin/ascify-clang
-test -f ascify_install/include/ascify/include/__clang_cuda_runtime_wrapper.h
+test -f ascify_install/libexec/ascify/clang/23/include/__clang_cuda_runtime_wrapper.h
 test -f ascify_install/include/ascify/ascify_cuda_compat.hpp
 ```
 
-The install command copies the Ascify program, the compatibility headers, the front-end compatibility files, and the Clang resource headers.
+The install command copies the Ascify program, compatibility headers, front-end
+profiles, Clang resource headers, and license notices. The two header roles use
+separate installed locations:
+
+| Installed path | Consumer |
+|---|---|
+| `include/ascify/` and `include/acl_cub/` | Generated Ascend source; compile with `-I<install-prefix>/include` |
+| `libexec/ascify/clang/<major>/include/` | The translator's private Clang parsing resources |
+
+The commands here use the tested Clang major version `23`. Substitute your build's
+resource version when using another toolchain. The resource-directory option points
+to `libexec/ascify/clang/<major>`, the parent of its `include/` directory. The installed
+binary discovers that location automatically unless an explicit override is supplied.
 
 Do not copy only `ascify-clang` to another machine. The program also needs matching resource headers. It may also need LLVM shared libraries.
 
 ## 6. Run the first conversion
 
-The next command converts `examples/vector_add.cu`. It uses pure SIMT mode and writes a JSON receipt.
+The next command converts the FP32 example `examples/vector_add.cu`. It uses pure SIMT mode and writes a JSON receipt.
 
 ```bash
 export CUDA_PATH=/usr/local/cuda
-export CLANG_RESOURCE_DIRECTORY="$PWD/ascify_install/include/ascify"
+export CLANG_RESOURCE_DIRECTORY="$PWD/ascify_install/libexec/ascify/clang/23"
 export ASCIFY_BINARY="$PWD/ascify_install/bin/ascify-clang"
 
-mkdir -p generated
+mkdir -p .work/examples
 
 ./run.sh examples/vector_add.cu \
   --target-policy=dav-c310-vec \
   --simt-math=precise \
   --target-recipe=none \
-  --migration-receipt="$PWD/generated/vector_add.receipt.json" \
-  -o "$PWD/generated/vector_add.cu.dpp" \
+  --migration-receipt="$PWD/.work/examples/vector_add.receipt.json" \
+  -o "$PWD/.work/examples/vector_add.cu.dpp" \
   -- -std=c++17
 ```
 
-If the CUDA Toolkit is not at `/usr/local/cuda`, use its real path. `run.sh` reads the three environment variables. It then calls `ASCIFY_BINARY`.
+If the CUDA Toolkit is not at `/usr/local/cuda`, use its real path. `run.sh` reads these environment variables and calls `ASCIFY_BINARY`. Installed resource headers can also be discovered automatically; `CLANG_RESOURCE_DIRECTORY` explicitly overrides that location.
 
 The `--` at the end splits Ascify options from Clang options. Here, `-std=c++17` goes to Clang.
 
@@ -275,18 +290,18 @@ The `--` at the end splits Ascify options from Clang options. Here, `-std=c++17`
 If the conversion command did not report an error, check the output files:
 
 ```bash
-test -s generated/vector_add.cu.dpp
-test -s generated/vector_add.receipt.json
+test -s .work/examples/vector_add.cu.dpp
+test -s .work/examples/vector_add.receipt.json
 ```
 
 Then check the main changes and the receipt status:
 
 ```bash
 grep -E 'ascify_cuda_compat|acl/acl.h|aclrtMalloc' \
-  generated/vector_add.cu.dpp
+  .work/examples/vector_add.cu.dpp
 
 grep -Eq '"status"[[:space:]]*:[[:space:]]*"succeeded"' \
-  generated/vector_add.receipt.json
+  .work/examples/vector_add.receipt.json
 ```
 
 The `succeeded` value only means that source conversion is complete. It does not mean that the target build, link, device run, result check, or speed test has passed.
@@ -300,13 +315,13 @@ export ASCIFY_BINARY="$PWD/build/ascify-clang"
 export CLANG_RESOURCE_DIRECTORY="$("$LLVM_BUILD_DIR/bin/clang" -print-resource-dir)"
 export CUDA_PATH=/usr/local/cuda
 
-mkdir -p generated
+mkdir -p .work/examples
 
 ./run.sh examples/vector_add.cu \
   --target-policy=dav-c310-vec \
   --simt-math=precise \
   --target-recipe=none \
-  -o "$PWD/generated/vector_add.cu.dpp" \
+  -o "$PWD/.work/examples/vector_add.cu.dpp" \
   -- -std=c++17
 ```
 
@@ -321,7 +336,7 @@ The install directory is better for regular use. It is also easier to record and
   --target-policy=dav-c310-vec \
   --simt-math=precise \
   --target-recipe=none \
-  -o "$PWD/generated/kernel.cu.dpp" \
+  -o "$PWD/.work/examples/kernel.cu.dpp" \
   -- -std=c++17 -I/path/to/project/include -DMY_FEATURE=1
 ```
 
@@ -341,11 +356,11 @@ Ascify converts only the input file by default. You can tell it to convert local
   --local-headers-recursive \
   --target-policy=dav-c310-vec \
   --simt-math=precise \
-  -o "$PWD/generated/kernel.cu.dpp" \
+  -o "$PWD/.work/examples/kernel.cu.dpp" \
   -- -std=c++17 -I/path/to/project/include
 ```
 
-Ascify writes the new headers to `generated/kernel.cu.dpp.headers/`. This option does not process every system header. It does not add support for more CUDA APIs. See the [local header guide](local-header-closure.md) for the full rules.
+Ascify writes the new headers to `.work/examples/kernel.cu.dpp.headers/`. This option does not process every system header. It does not add support for more CUDA APIs. See the [local header guide](local-header-closure.md) for the full rules.
 
 ### 7.3 Run `ascify-clang` directly
 
@@ -417,17 +432,18 @@ Show all options:
 ### 10.1 Run the host tests
 
 ```bash
-sh tests/run_release_checks.sh
+python3 tools/check_repository.py --root .
+ASCIFY_BINARY= sh tests/run_release_checks.sh
 ```
 
-These tests do not need a real Ascify program. They check the conversion rules and the Python tests.
+The first command checks repository contracts and documentation links. The second explicitly clears any previously exported `ASCIFY_BINARY` and runs host checks for conversion rules and Python tooling without invoking the real translator.
 
 ### 10.2 Run tests with the real program
 
 ```bash
 ASCIFY_BINARY="$PWD/build/ascify-clang" \
 ASCIFY_CUDA_PATH="$CUDA_PATH" \
-ASCIFY_CLANG_RESOURCE_DIRECTORY="$PWD/ascify_install/include/ascify" \
+ASCIFY_CLANG_RESOURCE_DIRECTORY="$PWD/ascify_install/libexec/ascify/clang/23" \
 sh tests/run_release_checks.sh
 ```
 
@@ -455,18 +471,17 @@ None of these results can prove a successful device run by itself:
 
 ## 12. Common problems
 
-### `LLVM_PROJECT_PATH` is not set
+### No LLVM development prefix is set
 
-`build.sh` stops at once. Run:
+Set the LLVM development prefix or source build directory:
 
 ```bash
-export LLVM_PROJECT_PATH=/absolute/path/to/llvm-project
-export LLVM_BUILD_DIR="$LLVM_PROJECT_PATH/build"
+export LLVM_BUILD_DIR=/absolute/path/to/llvm
 ```
 
-### `missing build dependency: .../bin/clang`
+### `Host compiler is not executable`
 
-The `LLVM_BUILD_DIR` path is wrong, or the LLVM build is not complete. Check `bin/clang` and `bin/clang++`.
+Check your explicit `ASCIFY_CC`, `ASCIFY_CXX`, `CC`, and `CXX` settings. They must name executable host compilers, either by path or as commands available in `PATH`.
 
 ### CMake cannot find LLVM or Clang
 
@@ -507,10 +522,10 @@ export CMAKE_GENERATOR="Unix Makefiles"
 test -f "$CLANG_RESOURCE_DIRECTORY/include/__clang_cuda_runtime_wrapper.h"
 ```
 
-The default install path is:
+The default private resource path for the guide's Clang 23 build is:
 
 ```bash
-export CLANG_RESOURCE_DIRECTORY="$PWD/ascify_install/include/ascify"
+export CLANG_RESOURCE_DIRECTORY="$PWD/ascify_install/libexec/ascify/clang/23"
 ```
 
 ### CUDA headers or `libdevice` are not found

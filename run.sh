@@ -4,11 +4,28 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ASCIFY_BINARY="${ASCIFY_BINARY:-${SCRIPT_DIR}/build/ascify-clang}"
 
-: "${CUDA_PATH:?set CUDA_PATH to the CUDA parsing root}"
-: "${CLANG_RESOURCE_DIRECTORY:?set CLANG_RESOURCE_DIRECTORY to the directory containing include/__clang_cuda_runtime_wrapper.h}"
+usage() {
+  cat <<'USAGE'
+Usage: CUDA_PATH=/path/to/cuda ./run.sh INPUT [ASCIFY_OPTIONS] [-- CLANG_OPTIONS]
 
-if [[ "$#" -lt 1 ]]; then
-  echo "usage: CUDA_PATH=... CLANG_RESOURCE_DIRECTORY=... $0 INPUT [ASCIFY_OPTIONS] [-- CLANG_OPTIONS]" >&2
+Environment:
+  ASCIFY_BINARY             Built or installed ascify-clang executable
+                            (default: ./build/ascify-clang)
+  CUDA_PATH                 CUDA Toolkit parsing root
+  CLANG_RESOURCE_DIRECTORY  Optional explicit Clang resource root; otherwise
+                            ascify-clang discovers its build/install resources
+USAGE
+}
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+if [[ "$#" -eq 0 ]]; then
+  usage >&2
+  exit 2
+fi
+if [[ -z "${CUDA_PATH:-}" ]]; then
+  echo "Set CUDA_PATH to the CUDA Toolkit parsing root." >&2
   exit 2
 fi
 if [[ ! -x "${ASCIFY_BINARY}" ]]; then
@@ -18,7 +35,8 @@ fi
 
 input="$1"
 shift
-exec "${ASCIFY_BINARY}" "${input}" \
-  "--cuda-path=${CUDA_PATH}" \
-  "--clang-resource-directory=${CLANG_RESOURCE_DIRECTORY}" \
-  "$@"
+ascify_args=("${input}" "--cuda-path=${CUDA_PATH}")
+if [[ -n "${CLANG_RESOURCE_DIRECTORY:-}" ]]; then
+  ascify_args+=("--clang-resource-directory=${CLANG_RESOURCE_DIRECTORY}")
+fi
+exec "${ASCIFY_BINARY}" "${ascify_args[@]}" "$@"

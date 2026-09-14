@@ -140,22 +140,6 @@ private:
   unsigned nvidiaSampleFindCudaDeviceRewrites = 0;
   std::unique_ptr<mat::MatchFinder> Finder;
   ascify::DavC310TargetRecipe davC310TargetRecipe;
-  // CUDA implicitly adds its runtime header. We rewrite explicitly-provided CUDA includes with equivalent
-  // ones, and track - using this flag - if the result led to us including the hip runtime header. If it did
-  // not, we insert it at the top of the file when we finish processing it.
-  // This approach means we do the best it's possible to do w.r.t preserving the user's include order.
-  bool insertedRuntimeHeader = false;
-  bool insertedBLASHeader = false;
-  bool insertedBLASHeader_V2 = false;
-  bool insertedRANDHeader = false;
-  bool insertedRAND_kernelHeader = false;
-  bool insertedDNNHeader = false;
-  bool insertedFFTHeader = false;
-  bool insertedSPARSEHeader = false;
-  bool insertedSPARSEHeader_V2 = false;
-  bool insertedComplexHeader = false;
-  bool insertedSOLVERHeader = false;
-  bool insertedFILEHeader = false;
   bool firstHeader = false;
   bool needsCudaCompatHeader = false;
   bool hasCudaCompatHeader = false;
@@ -181,9 +165,9 @@ private:
   std::set<unsigned> rowwiseSimdRawScannedFiles;
   std::string rowwiseSimdRawConflictingDeclaration;
   static constexpr std::size_t kRawTokenWindowCap = 128;
-  // Rewrite a string literal to refer to hip, not CUDA.
+  // Rewrite mapped CUDA API names within a string literal.
   void RewriteString(StringRef s, clang::SourceLocation start);
-  // Replace a CUDA identifier with the corresponding hip identifier, if applicable.
+  // Replace a CUDA identifier with its mapped Ascend spelling, if applicable.
   // Returns true if the raw lexer was advanced past rewritten text; the caller must not
   // call LexFromRawLexer for the current token again.
   bool RewriteToken(clang::Lexer &rawLex, clang::Token &tok);
@@ -224,7 +208,6 @@ public:
     localHeaderContext(context),
     frontendCompatibility(compatibility) {}
   // MatchCallback listeners
-  bool cudaLaunchKernel(const mat::MatchFinder::MatchResult &Result);
   bool lowerCudaGlobalScalarDoubleParam(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaDefaultDim3(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaHalf2DirectInit(const mat::MatchFinder::MatchResult &Result);
@@ -314,6 +297,5 @@ protected:
   // MatchCallback API entry point. Called by the AST visitor while searching the AST for things we registered an interest for.
   void run(const mat::MatchFinder::MatchResult &Result) override;
   std::unique_ptr<clang::ASTConsumer> CreateASTConsumer(clang::CompilerInstance &CI, StringRef InFile) override;
-  bool Exclude(const dppCounter &hipToken);
   void FindAndReplace(StringRef name, clang::SourceLocation sl, const std::map<StringRef, dppCounter> &repMap, bool bReplace = true);
 };

@@ -1,5 +1,56 @@
 # Third-party notices
 
+The root [LICENSE](LICENSE) contains the Apache License, Version 2.0. Files with
+separate license headers retain those terms; the root license does not replace
+the MIT or NVIDIA notices reproduced below. Preserve the applicable notices when
+redistributing source or installed artifacts.
+
+## Inherited translator source
+
+Ascify's initial repository history identifies its translator skeleton as based
+on [HIPIFY](https://github.com/ROCm/HIPIFY) (initial commit `4d84836`). The inherited
+translator files in `src/` retain their original Advanced Micro Devices copyright
+and MIT permission notices. This is upstream attribution; Ascify's product target
+is CUDA-to-Ascend. An exact upstream import revision is not recorded here.
+
+The original file headers are authoritative for each file's copyright and terms.
+The retained MIT notice reads:
+
+Copyright (c) 2015 - present Advanced Micro Devices, Inc. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+## LLVM and Clang resource headers
+
+Ascify links against the LLVM/Clang installation selected at build time. When
+`ASCIFY_INSTALL_CLANG_HEADERS` is enabled, installation also copies matching
+Clang resource headers from that toolchain. Those headers retain their own
+upstream notices. Record and distribute the notices applicable to the selected
+LLVM/Clang package when packaging its libraries or resource headers.
+
+The complete [Clang license](LICENSES/Clang.txt) and
+[LLVM license](LICENSES/LLVM.txt) shipped with the LLVM 23.1.0 development
+packages used for the native build check are included here and installed under
+`share/licenses/ascify/`. They include the Apache-2.0 terms, LLVM exceptions,
+and retained legacy notices. A different toolchain may require additional
+notices from that distribution.
+
 ## OneFlow CUDA conversion fixtures
 
 The following files are derived from OneFlow

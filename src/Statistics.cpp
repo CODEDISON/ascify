@@ -329,7 +329,7 @@ void Statistics::print(std::ostream *csv, llvm::raw_ostream *printOut, bool skip
     conditionalPrint(csv, printOut, "\n" + str, "\n[ASCIFY] info: " + str);
   }
   if (hasErrors || totalBytes == 0 || totalLines == 0) {
-    std::string str = "\n  ERROR: Statistics is invalid due to failed hipification.\n\n";
+    std::string str = "\n  ERROR: Statistics is invalid due to failed translation.\n\n";
     conditionalPrint(csv, printOut, str, str);
   }
   std::stringstream stream;
@@ -398,22 +398,22 @@ void Statistics::setActive(const std::string &name) {
   Statistics::currentStatistics = &stats.at(name);
 }
 
-bool Statistics::isHipExperimental(const dppCounter &counter) {
-  return HIP_EXPERIMENTAL == (counter.supportDegree & HIP_EXPERIMENTAL);
+bool Statistics::isTargetExperimental(const dppCounter &counter) {
+  return TARGET_EXPERIMENTAL == (counter.supportDegree & TARGET_EXPERIMENTAL);
 }
 
-bool Statistics::isHipPartiallySupported(const dppCounter &counter) {
-  return HIP_PARTIALLY_SUPPORTED == (counter.supportDegree & HIP_PARTIALLY_SUPPORTED);
+bool Statistics::isTargetPartiallySupported(const dppCounter &counter) {
+  return TARGET_PARTIALLY_SUPPORTED == (counter.supportDegree & TARGET_PARTIALLY_SUPPORTED);
 }
 
-bool Statistics::isHipUnsupported(const dppCounter &counter) {
-  return HIP_UNSUPPORTED == (counter.supportDegree & HIP_UNSUPPORTED) ||
+bool Statistics::isTargetUnsupported(const dppCounter &counter) {
+  return TARGET_UNSUPPORTED == (counter.supportDegree & TARGET_UNSUPPORTED) ||
     UNSUPPORTED == (counter.supportDegree & UNSUPPORTED);
 }
 
 bool Statistics::isUnsupported(const dppCounter &counter) {
   if (UNSUPPORTED == (counter.supportDegree & UNSUPPORTED)) return true;
-  return Statistics::isHipUnsupported(counter);
+  return Statistics::isTargetUnsupported(counter);
 }
 
 bool Statistics::isCudaDeprecated(const dppCounter &counter) {
@@ -421,15 +421,15 @@ bool Statistics::isCudaDeprecated(const dppCounter &counter) {
          DEPRECATED == (counter.supportDegree & DEPRECATED);
 }
 
-bool Statistics::isHipDeprecated(const dppCounter &counter) {
-  return HIP_DEPRECATED == (counter.supportDegree & HIP_DEPRECATED) ||
+bool Statistics::isTargetDeprecated(const dppCounter &counter) {
+  return TARGET_DEPRECATED == (counter.supportDegree & TARGET_DEPRECATED) ||
          DEPRECATED == (counter.supportDegree & DEPRECATED);
 }
 
 bool Statistics::isDeprecated(const dppCounter &counter) {
   return DEPRECATED == (counter.supportDegree & DEPRECATED) || (
          CUDA_DEPRECATED == (counter.supportDegree & CUDA_DEPRECATED) &&
-         HIP_DEPRECATED == (counter.supportDegree & HIP_DEPRECATED));
+         TARGET_DEPRECATED == (counter.supportDegree & TARGET_DEPRECATED));
 }
 
 bool Statistics::isCudaRemoved(const dppCounter &counter) {
@@ -437,19 +437,19 @@ bool Statistics::isCudaRemoved(const dppCounter &counter) {
          REMOVED == (counter.supportDegree & REMOVED);
 }
 
-bool Statistics::isHipRemoved(const dppCounter &counter) {
-  return HIP_REMOVED == (counter.supportDegree & HIP_REMOVED) ||
+bool Statistics::isTargetRemoved(const dppCounter &counter) {
+  return TARGET_REMOVED == (counter.supportDegree & TARGET_REMOVED) ||
          REMOVED == (counter.supportDegree & REMOVED);
 }
 
 bool Statistics::isRemoved(const dppCounter &counter) {
   return REMOVED == (counter.supportDegree & REMOVED) || (
          CUDA_REMOVED == (counter.supportDegree & CUDA_REMOVED) &&
-         HIP_REMOVED == (counter.supportDegree & HIP_REMOVED));
+         TARGET_REMOVED == (counter.supportDegree & TARGET_REMOVED));
 }
 
-bool Statistics::isHipSupportedV2Only(const dppCounter &counter) {
-  return HIP_SUPPORTED_V2_ONLY == (counter.supportDegree & HIP_SUPPORTED_V2_ONLY);
+bool Statistics::isTargetSupportedV2Only(const dppCounter &counter) {
+  return TARGET_SUPPORTED_V2_ONLY == (counter.supportDegree & TARGET_SUPPORTED_V2_ONLY);
 }
 
 bool Statistics::isCudaOverloaded(const dppCounter &counter) {

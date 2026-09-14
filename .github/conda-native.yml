@@ -1,0 +1,12 @@
+name: ascify-native
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11
+  - clang=23.1.0
+  - clangxx=23.1.0
+  - clangdev=23.1.0
+  - llvmdev=23.1.0
+  - cmake>=3.16.8
+  - ninja

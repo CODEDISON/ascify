@@ -58,7 +58,7 @@ THE SOFTWARE.
 #define STRINGIFY(x) #x
 #define STRINGIFY_EXPANDED(x) STRINGIFY(x)
 
-constexpr auto DEBUG_TYPE = "cuda2hip";
+constexpr auto DEBUG_TYPE = "ascify";
 
 namespace ct = clang::tooling;
 
@@ -131,64 +131,67 @@ void Init(int argc, const char **argv, std::vector<std::string> &files) {
   files.assign(sortedFiles.begin(), sortedFiles.end());
 }
 
-bool checkLLVM(std::string &path_to_check) {
-  const std::string file_name_to_check = "__clang_cuda_runtime_wrapper.h";
-  const std::string file_name_to_check_2 = "algorithm";
-  const std::string cuda_wrappers_dir = "cuda_wrappers";
-  std::string fileToCheck = path_to_check + "/" + file_name_to_check;
-  bool bExist = llvm::sys::fs::exists(llvm::Twine(fileToCheck.c_str()));
-  if (bExist) {
-    fileToCheck = path_to_check + "/" + cuda_wrappers_dir + "/" + file_name_to_check_2;
-    bExist = llvm::sys::fs::exists(llvm::Twine(fileToCheck.c_str()));
-  }
-  return bExist;
+bool checkLLVM(const std::string &path_to_check) {
+  const std::filesystem::path includeDirectory(path_to_check);
+  std::error_code filesystemError;
+  return std::filesystem::is_regular_file(
+             includeDirectory / "__clang_cuda_runtime_wrapper.h",
+             filesystemError) &&
+         !filesystemError &&
+         std::filesystem::is_regular_file(
+             includeDirectory / "cuda_wrappers" / "algorithm",
+             filesystemError) &&
+         !filesystemError;
 }
 
 bool setLLVM(ct::RefactoringTool &Tool, const char *ascify_exe) {
   static int Dummy;
-  std::string ascify = llvm::sys::fs::getMainExecutable(ascify_exe, (void*)&Dummy);
-  std::string ascify_parent_path = std::string(llvm::sys::path::parent_path(ascify));
-  std::string clang_ver = STRINGIFY_EXPANDED(LIB_CLANG_RES);
-  std::string clang_res_path, clang_inc_path, fileToCheck;
-  const std::string include_dir = "include";
-  bool bExist = false;
-  // 1. --clang-resource-dir is specified
-  if (!ClangResourceDir.empty()) {
-    clang_res_path = ClangResourceDir;
-    clang_inc_path = clang_res_path + "/" + include_dir;
-    bExist = checkLLVM(clang_inc_path);
+  const std::filesystem::path executable =
+      llvm::sys::fs::getMainExecutable(ascify_exe, (void *)&Dummy);
+  const std::filesystem::path executableDirectory = executable.parent_path();
+  auto selectResource = [&](const std::filesystem::path &root) {
+    if (root.empty() || !checkLLVM((root / "include").string()))
+      return false;
+    const std::string argument = "-resource-dir=" + root.lexically_normal().string();
+    Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster(
+        argument.c_str(), ct::ArgumentInsertPosition::BEGIN));
+    return true;
+  };
+
+  // An explicit path is a configuration contract, including an explicitly
+  // empty value. Never mask a typo by selecting another installed toolchain.
+  if (ClangResourceDir.getNumOccurrences() != 0) {
+    if (selectResource(std::string(ClangResourceDir)))
+      return true;
+    llvm::errs() << sAscify << sError
+                 << "invalid --clang-resource-directory: '" << ClangResourceDir
+                 << "'; expected include/__clang_cuda_runtime_wrapper.h and "
+                    "include/cuda_wrappers/algorithm\n";
+    return false;
   }
-  // 2. Check for ROCm LLVM
-  if (!bExist) {
-#if defined(_WIN32)
-    // HIP SDK for Windows
-    clang_res_path = ascify_parent_path + "/../lib/clang/" + clang_ver;
-#else
-    // ROCm Linux
-    clang_res_path = ascify_parent_path + "/../lib/llvm/lib/clang/" + clang_ver;
+
+#ifdef ASCIFY_CLANG_RESOURCE_INSTALL_FROM_BINDIR
+  // CMake computes this relative path from the configured GNUInstallDirs
+  // bindir; the installed executable can therefore move with its prefix.
+  if (selectResource(executableDirectory /
+                     ASCIFY_CLANG_RESOURCE_INSTALL_FROM_BINDIR))
+    return true;
 #endif
-    clang_inc_path = clang_res_path + "/" + include_dir;
-    bExist = checkLLVM(clang_inc_path);
-  }
-#ifndef _WIN32
-  if (!bExist) {
-    // 2.1. ROCm Linux: ascify-clang standalone package
-    clang_res_path = ascify_parent_path + "/../" + include_dir + "/ascify";
-    clang_inc_path = clang_res_path + "/" + include_dir;
-    bExist = checkLLVM(clang_inc_path);
-  }
+
+#if defined(ASCIFY_CLANG_RESOURCE_BUILD_DIR) && defined(ASCIFY_EXECUTABLE_BUILD_DIR)
+  // Only the executable in the build tree may depend on the build machine's
+  // LLVM installation. A copied/installed executable must resolve its own
+  // resources or use an explicit user-supplied directory.
+  std::error_code directoryError;
+  if (std::filesystem::equivalent(executableDirectory,
+                                  ASCIFY_EXECUTABLE_BUILD_DIR,
+                                  directoryError) &&
+      !directoryError && selectResource(ASCIFY_CLANG_RESOURCE_BUILD_DIR))
+    return true;
 #endif
-  // 3. Check for clang include copied by cmake install
-  if (!bExist) {
-    clang_res_path = ascify_parent_path;
-    clang_inc_path = clang_res_path + "/" + include_dir;
-    bExist = checkLLVM(clang_inc_path);
-  }
-  if (bExist) {
-    std::string sRes = "-resource-dir=" + clang_res_path;
-    Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster(sRes.c_str(), ct::ArgumentInsertPosition::BEGIN));
-  }
-  return bExist;
+
+  return selectResource(executableDirectory / ".." / "lib" / "clang" /
+                        STRINGIFY_EXPANDED(LIB_CLANG_RES));
 }
 
 bool appendArgumentsAdjusters(
@@ -197,7 +200,10 @@ bool appendArgumentsAdjusters(
     const char *ascify_exe,
     ascify::FrontendCompatibilityConfig &frontendCompatibility) {
   if (!setLLVM(Tool, ascify_exe)) {
-    llvm::errs() << "\n" << sAscify << sError << "LLVM to work with not found. Ascification is impossible. Exiting. To provide ascify-clang with LLVM to work with, please specify the `--clang-resource-directory` option." << "\n";
+    llvm::errs() << "\n" << sAscify << sError
+                 << "Clang CUDA parsing resources are unavailable. Install the "
+                    "configured resource headers or set "
+                    "--clang-resource-directory to a matching Clang resource root.\n";
     return false;
   }
   if (!IncludeDirs.empty()) {
@@ -212,7 +218,7 @@ bool appendArgumentsAdjusters(
       Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster("-D", ct::ArgumentInsertPosition::BEGIN));
     }
   }
-  // Standard c++ to use in hipification by default
+  // Default C++ standard for CUDA parsing
   llcompat::setStdCPP(Tool);
   std::string sInclude = "-I" + sys::path::parent_path(sSourceAbsPath).str();
   Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster(sInclude.c_str(), ct::ArgumentInsertPosition::BEGIN));
@@ -294,7 +300,7 @@ bool ascifySingleSource(const std::string &srcPath,
   SmallString<128> tmpFile;
   StringRef srcFileName = sys::path::filename(srcPath);
 
-  EC = sys::fs::createTemporaryFile(srcFileName, "hip", tmpFile);
+  EC = sys::fs::createTemporaryFile(srcFileName, "ascify", tmpFile);
   if (EC) {
     llvm::errs() << "\n" << sAscify << sError << "Failed to create temporary file: " << EC.message() << "\n";
     return false;
@@ -354,14 +360,12 @@ bool ascifySingleSource(const std::string &srcPath,
   return true;
 }
 
-bool generatePython() {
-    return true;
-}
-
-void printVersions() {
-  llvm::errs() << "\n" << sAscify << "Supports DPP compatibility versions from " << Statistics::getDppVersion(dppVersions::DPP_1050) << " up to " << Statistics::getDppVersion(dppVersions::DPP_LATEST);
-  llvm::errs() << "\n" << sAscify << "Supports CUDA Toolkit from " << Statistics::getCudaVersion(cudaVersions::CUDA_70) << " up to " << Statistics::getCudaVersion(cudaVersions::CUDA_LATEST);
-  llvm::errs() << "\n" << sAscify << "Supports cuDNN from " << Statistics::getCudaVersion(cudaVersions::CUDNN_705) << " up to " << Statistics::getCudaVersion(cudaVersions::CUDNN_LATEST) << " \n";
+void printVersions(llvm::raw_ostream &output) {
+  output << "ascify-clang: CUDA to Ascend source translator\n"
+         << "LLVM build version: " << LLVM_VERSION_STRING << "\n"
+         << "Clang resource version: "
+         << STRINGIFY_EXPANDED(LIB_CLANG_RES) << "\n"
+         << "Target validation: docs/validation-matrix.md\n";
 }
 
 std::string migrationReceiptLocalHeaderMode() {
@@ -409,6 +413,13 @@ bool migrationReceiptPathConflicts(const std::string &receiptPath,
 }
 
 int main(int argc, const char **argv) {
+  llvm::cl::SetVersionPrinter(printVersions);
+  // LLVM groups single-letter options. Its built-in -h alias prints help and
+  // exits before the rest of an unknown option such as --helpful is checked.
+  // Record short-help requests and print only after the entire parse succeeds.
+  llvm::cl::getRegisteredOptions().erase("h");
+  llvm::cl::opt<bool> shortHelp(
+      "h", llvm::cl::desc("Alias for --help"), llvm::cl::Hidden);
   std::vector<const char*> new_argv(argv, argv + argc);
   std::string sCompilationDatabaseDir;
   auto it = std::find(new_argv.begin(), new_argv.end(), std::string("-p"));
@@ -451,6 +462,10 @@ int main(int argc, const char **argv) {
 #else
   ct::CommonOptionsParser OptionsParser(argc, argv, ToolTemplateCategory, llvm::cl::ZeroOrMore);
 #endif
+  if (shortHelp) {
+    llvm::cl::PrintHelpMessage(false, true);
+    return 0;
+  }
   if (!llcompat::CheckCompatibility()) {
     return 1;
   }
@@ -467,11 +482,11 @@ int main(int argc, const char **argv) {
   } else {
     fileSources = OptionsParser.getSourcePathList();
   }
-  if (fileSources.empty() && !GeneratePerl && !GeneratePython && !GenerateMarkdown && !GenerateCSV && !Versions) {
+  if (fileSources.empty() && !Versions) {
     llvm::errs() << "\n" << sAscify << sError << "Must specify at least 1 positional argument for source file" << "\n";
     return 1;
   }
-  if (Versions) printVersions();
+  if (Versions) printVersions(llvm::outs());
   if (fileSources.empty()) {
     return 0;
   }
@@ -754,7 +769,7 @@ int main(int argc, const char **argv) {
     if (!conversionOk) {
       Statistics::current().hasErrors = true;
       Result = 1;
-      LLVM_DEBUG(llvm::dbgs() << "Hipification failed for: " << src << "\n");
+      LLVM_DEBUG(llvm::dbgs() << "Translation failed for: " << src << "\n");
     }
 
     receiptInput.status = conversionOk

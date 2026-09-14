@@ -64,10 +64,9 @@ THE SOFTWARE.
 
 using namespace ascify;
 
-const std::string sDPP = "DPP";
+const std::string sTargetPlatform = "Ascend";
 const std::string s_string_literal = "[string literal]";
 // Matchers' names
-const StringRef sCudaLaunchKernel = "cudaLaunchKernel";
 const StringRef sCudaGlobalScalarDoubleParam = "cudaGlobalScalarDoubleParam";
 const StringRef sCudaDefaultDim3 = "cudaDefaultDim3";
 const StringRef sCudaHalf2DirectInit = "cudaHalf2DirectInit";
@@ -1309,17 +1308,15 @@ void AscifyAction::FindAndReplace(StringRef name,
   Statistics::current().incrementCounter(found->second, name.str());
   clang::DiagnosticsEngine &DE = getCompilerInstance().getDiagnostics();
 
-  // Warn about the deprecated identifier in CUDA but hipify it.
+  // Warn about CUDA deprecation before applying the target mapping.
   if (Statistics::isCudaDeprecated(found->second)) {
     const auto ID = DE.getCustomDiagID(clang::DiagnosticsEngine::Warning, "'%0' is deprecated in CUDA.");
     DE.Report(sl, ID) << found->first;
   }
 
-  // TODO: Similar to hipify, add statistics analysis
-
-    // Warn about the unsupported identifier.
+  // Warn about the unsupported identifier.
   if (Statistics::isUnsupported(found->second)) {
-    std::string sWarn = sDPP;
+    std::string sWarn = sTargetPlatform;
     const auto ID = DE.getCustomDiagID(clang::DiagnosticsEngine::Warning, "'%0' is unsupported in '%1'.");
     DE.Report(sl, ID) << found->first << sWarn;
     return;
@@ -3507,10 +3504,6 @@ bool AscifyAction::RewriteToken(clang::Lexer &, clang::Token &tok) {
   return false;
 }
 
-bool AscifyAction::Exclude(const dppCounter &hipToken) {
-  return false;
-}
-
 void AscifyAction::FileChanged(
     clang::SourceLocation location,
     clang::PPCallbacks::FileChangeReason reason,
@@ -3747,37 +3740,27 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
   }
   const auto found = CUDA_INCLUDE_MAP.find(file_name);
   if (found != CUDA_INCLUDE_MAP.end()) {
-    bool exclude = Exclude(found->second);
     Statistics::current().incrementCounter(found->second, file_name.str());
     clang::SourceLocation sl = filename_range.getBegin();
 
     if (Statistics::isUnsupported(found->second)) {
       clang::DiagnosticsEngine &DE = getCompilerInstance().getDiagnostics();
-      std::string sWarn = sDPP;
+      std::string sWarn = sTargetPlatform;
       const auto ID = DE.getCustomDiagID(
           clang::DiagnosticsEngine::Warning,
           "'%0' is unsupported header in '%1'.");
       DE.Report(sl, ID) << found->first << sWarn;
       return;
     }
-    clang::StringRef newInclude;
-    // Keep the same include type that the user gave.
-    if (!exclude) {
-      clang::SmallString<128> includeBuffer;
-      llvm::StringRef name = found->second.dppName;
-      if (is_angled)
-        newInclude = llvm::Twine("<" + name + ">").toStringRef(includeBuffer);
-      else
-        newInclude =
-            llvm::Twine("\"" + name + "\"").toStringRef(includeBuffer);
-    } else {
-      // hashLoc is location of the '#', thus replacing the whole include
-      // directive by empty newInclude starting with '#'.
-      sl = hash_loc;
-    }
+    // Preserve the source delimiter style and own the replacement text until
+    // Replacement has copied it. A StringRef into a block-local SmallString
+    // would dangle after that block ends.
+    const std::string name = found->second.dppName.str();
+    const std::string newInclude =
+        is_angled ? "<" + name + ">" : "\"" + name + "\"";
     const char *B = SM.getCharacterData(sl);
     const char *E = SM.getCharacterData(filename_range.getEnd());
-    ct::Replacement Rep(SM, sl, E - B, newInclude.str());
+    ct::Replacement Rep(SM, sl, E - B, newInclude);
     const clang::SourceLocation replacementEnd =
         sl.getLocWithOffset(static_cast<int>(E - B));
     // The raw identifier pass also sees tokens inside include spellings (for
@@ -3974,10 +3957,6 @@ void AscifyAction::finalizePendingNvidiaSampleHelperPragma() {
   llvm::errs()
       << "Ascify NVIDIA sample-helper closure: unresolved trusted-system "
       << "macro-generated pragma keeps all helper edits\n";
-}
-
-bool AscifyAction::cudaLaunchKernel(const mat::MatchFinder::MatchResult &Result) {
-  return true;
 }
 
 bool AscifyAction::lowerCudaGlobalScalarDoubleParam(
@@ -4932,8 +4911,6 @@ bool AscifyAction::insertSemanticReplacement(
 std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::CompilerInstance &CI, StringRef) {
   Finder.reset(new mat::MatchFinder);
   davC310TargetRecipe.reset();
-  // Replace the <<<...>>> language extension with a hip kernel launch
-  Finder->addMatcher(mat::cudaKernelCallExpr(mat::isExpansionInMainFile()).bind(sCudaLaunchKernel), this);
   if (!NoLowerDeviceDoubleParams) {
     Finder->addMatcher(
         mat::parmVarDecl(mat::isExpansionInMainFile())
@@ -6530,7 +6507,7 @@ void AscifyAction::ExecuteAction() {
   llcompat::Memory_Buffer FromFile = llcompat::getMemoryBuffer(SM);
   clang::Lexer RawLex(SM.getMainFileID(), FromFile, SM, PP.getLangOpts());
   RawLex.SetKeepWhitespaceMode(true);
-  // Perform a token-level rewrite of CUDA identifiers to hip ones. The raw-mode lexer gives us enough
+  // Rewrite mapped CUDA identifiers to their Ascend spellings. The raw lexer gives us enough
   // information to tell the difference between identifiers, string literals, and "other stuff". It also
   // ignores preprocessor directives, so this transformation will operate inside preprocessor-deleted code.
   rawTokenWindow.clear();
@@ -6579,10 +6556,6 @@ void AscifyAction::AddSkippedSourceRange(clang::SourceRange Range) {
 void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
   if (davC310TargetRecipe.collect(Result))
     return;
-  if (Result.Nodes.getNodeAs<clang::CUDAKernelCallExpr>(sCudaLaunchKernel) != nullptr) {
-    (void)cudaLaunchKernel(Result);
-    return;
-  }
   if (Result.Nodes.getNodeAs<clang::ParmVarDecl>(
           sCudaGlobalScalarDoubleParam) != nullptr) {
     (void)lowerCudaGlobalScalarDoubleParam(Result);

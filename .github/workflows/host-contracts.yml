@@ -1,0 +1,112 @@
+name: Build and host contracts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: host-contracts-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-contracts:
+    name: Host-only contracts (no CUDA or device execution)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CC: clang
+      CXX: clang++
+      CLANG: clang
+      PYTHON: python3
+      ASCIFY_BINARY: ""
+      ASCIFY_CUDA_PATH: ""
+      ASCIFY_CLANG_RESOURCE_DIRECTORY: ""
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install host test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential clang cmake ninja-build python3
+
+      - name: Require host test tools
+        run: |
+          for tool in bash sh clang clang++ c++ cmake ctest ninja python3 sha256sum; do
+            command -v "$tool"
+          done
+
+      - name: Configure host-only checks
+        run: |
+          cmake -S . -B build/host-ci -G Ninja \
+            -DASCIFY_CLANG_TESTS_ONLY=ON \
+            -DASCIFY_TEST_BINARY= \
+            -DASCIFY_TEST_CUDA_PATH= \
+            -DASCIFY_TEST_CLANG_RESOURCE_DIRECTORY=
+
+      - name: Run existing host release checks
+        run: ctest --test-dir build/host-ci --output-on-failure --no-tests=error
+
+  native-build:
+    name: LLVM 23 native build and install (no device execution)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash -el {0}
+    env:
+      ASCIFY_BINARY: ""
+      ASCIFY_CUDA_PATH: ""
+      ASCIFY_CLANG_RESOURCE_DIRECTORY: ""
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up LLVM development environment
+        uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5 # v4.0.1
+        with:
+          activate-environment: ascify-native
+          environment-file: .github/conda-native.yml
+          channel-priority: strict
+
+      - name: Record resolved dependency versions
+        run: |
+          conda list --explicit
+          clang --version
+          cmake --version
+
+      - name: Configure and build the translator
+        run: |
+          LLVM_BUILD_DIR="$CONDA_PREFIX" \
+          ASCIFY_CC="$CONDA_PREFIX/bin/clang" \
+          ASCIFY_CXX="$CONDA_PREFIX/bin/clang++" \
+          BUILD_DIR="$PWD/build/native-ci" \
+          INSTALL_ROOT="$PWD/build/native-install" \
+          ./build.sh -DASCIFY_CLANG_TESTS=ON
+
+      - name: Check the built command-line interface
+        run: |
+          ctest --test-dir build/native-ci --output-on-failure \
+            --no-tests=error -R '^ascify-cli-surface$'
+
+      - name: Install and check the installed command-line interface
+        run: |
+          cmake --install build/native-ci
+          python3 tests/engineering/test_cli_surface.py \
+            --binary "$PWD/build/native-install/bin/ascify-clang"
+          test -f build/native-install/include/ascify/ascify_cuda_compat.hpp
+          test -f build/native-install/libexec/ascify/clang/23/include/__clang_cuda_runtime_wrapper.h
+          test -f build/native-install/libexec/ascify/frontend-compat/ascify-admitted-v1/profile.manifest
+          test -f build/native-install/share/licenses/ascify/THIRD_PARTY_NOTICES.md
+          test -f build/native-install/share/licenses/ascify/Clang.txt
+          test -f build/native-install/share/licenses/ascify/LLVM.txt

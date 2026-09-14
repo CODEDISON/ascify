@@ -22,7 +22,7 @@ THE SOFTWARE.
 
 #include "ArgParse.h"
 
-cl::OptionCategory ToolTemplateCategory("CUDA to HIP source translator options");
+cl::OptionCategory ToolTemplateCategory("CUDA to Ascend source translator options");
 
 cl::opt<std::string> OutputFilename("o",
   cl::desc("Output filename"),
@@ -31,26 +31,6 @@ cl::opt<std::string> OutputFilename("o",
 
 cl::opt<std::string> OutputDir("o-dir",
   cl::desc("Output directory"),
-  cl::value_desc("directory"),
-  cl::cat(ToolTemplateCategory));
-
-cl::opt<bool> GeneratePerl("perl",
-  cl::desc("Generate ascify-perl"),
-  cl::value_desc("perl"),
-  cl::cat(ToolTemplateCategory));
-
-cl::opt<bool> GeneratePython("python",
-  cl::desc("Generate ascify-python"),
-  cl::value_desc("python"),
-  cl::cat(ToolTemplateCategory));
-
-cl::opt<std::string> OutputAscifyPerlDir("o-ascify-perl-dir",
-  cl::desc("Output directory for ascify-perl script"),
-  cl::value_desc("directory"),
-  cl::cat(ToolTemplateCategory));
-
-cl::opt<std::string> OutputPythonMapDir("o-python-map-dir",
-  cl::desc("Output directory for Python map"),
   cl::value_desc("directory"),
   cl::cat(ToolTemplateCategory));
 
@@ -80,7 +60,7 @@ cl::opt<bool> Inplace("inplace",
   cl::cat(ToolTemplateCategory));
 
 cl::opt<bool> NoBackup("no-backup",
-  cl::desc("Don't create a backup file for the hipified source"),
+  cl::desc("Don't create a backup file for the translated source"),
   cl::value_desc("no-backup"),
   cl::cat(ToolTemplateCategory));
 
@@ -150,26 +130,6 @@ cl::opt<std::string> CudaGpuArch("cuda-gpu-arch",
   cl::Prefix,
   cl::cat(ToolTemplateCategory));
 
-cl::opt<bool> GenerateMarkdown("md",
-  cl::desc("Generate documentation in Markdown format"),
-  cl::value_desc("markdown"),
-  cl::cat(ToolTemplateCategory));
-
-cl::opt<bool> GenerateCSV("csv",
-  cl::desc("Generate documentation in CSV format"),
-  cl::value_desc("csv"),
-  cl::cat(ToolTemplateCategory));
-
-cl::opt<std::string> DocFormat("doc-format",
-  cl::desc("Documentation format: 'full' (default), 'strict', or 'compact'; the '--md' or '--csv' option must be specified"),
-  cl::value_desc("value"),
-  cl::cat(ToolTemplateCategory));
-
-cl::opt<bool> Experimental("experimental",
-  cl::desc("ascify DPP APIs that are experimentally supported, otherwise, the corresponding warnings will be emitted"),
-  cl::value_desc("experimental"),
-  cl::cat(ToolTemplateCategory));
-
 cl::opt<bool> NoLowerDeviceDoubleParams("no-lower-device-double-params",
   cl::desc("Keep by-value scalar double parameters on CUDA __global__ functions "
            "(default: lower them to float for Ascend SIMT)"),
@@ -206,31 +166,8 @@ cl::opt<std::string> MigrationReceiptPath("migration-receipt",
   cl::value_desc("filename"),
   cl::cat(ToolTemplateCategory));
 
-cl::opt<bool> NoUndocumented("no-undocumented-features",
-  cl::desc("Do not rely on undocumented features in code transformation"),
-  cl::value_desc("no-undocumented-features"),
-  cl::init(false),
-  cl::cat(ToolTemplateCategory));
-
-cl::opt<bool> NoWarningsUndocumented("no-warnings-on-undocumented-features",
-  cl::desc("Suppress warnings on undocumented features in code transformation"),
-  cl::value_desc("no-warnings-on-undocumented-features"),
-  cl::init(false),
-  cl::cat(ToolTemplateCategory));
-
-cl::opt<bool> CudaKernelExecutionSyntax("cuda-kernel-execution-syntax",
-  cl::desc("Keep CUDA kernel launch syntax (default)"),
-  cl::value_desc("cuda-kernel-execution-syntax"),
-  cl::init(true),
-  cl::cat(ToolTemplateCategory));
-
-cl::opt<bool> HipKernelExecutionSyntax("hip-kernel-execution-syntax",
-  cl::desc("Transform CUDA kernel launch syntax to a regular HIP function call (overrides '--cuda-kernel-execution-syntax')"),
-  cl::value_desc("hip-kernel-execution-syntax"),
-  cl::cat(ToolTemplateCategory));
-
 cl::opt<bool> Versions("versions",
-  cl::desc("Display the versions of the supported 3rd-party software"),
+  cl::desc("Display LLVM build and resource versions; target validation is documented separately"),
   cl::value_desc("versions"),
   cl::cat(ToolTemplateCategory));
 
@@ -241,12 +178,12 @@ cl::opt<std::string> ClangResourceDir("clang-resource-directory",
   cl::cat(ToolTemplateCategory));
 
 cl::opt<bool> OptLocalHeaders("local-headers",
-  cl::desc("Enable hipification of quoted local headers (non-recursive)"),
+  cl::desc("Translate quoted local headers (non-recursive)"),
   cl::init(false),
   cl::cat(ToolTemplateCategory));
 
 cl::opt<bool> OptLocalHeadersRecursive("local-headers-recursive",
-  cl::desc("Enable hipification of quoted local headers recursively"),
+  cl::desc("Translate quoted local headers recursively"),
   cl::init(false),
   cl::cat(ToolTemplateCategory));
 
@@ -257,23 +194,13 @@ const std::vector<std::string> ascifyOptions {
   std::string(PrintStats.ArgStr),
   std::string(SkipExcludedPPConditionalBlocks.ArgStr),
   std::string(DefaultPreprocessor.ArgStr),
-  std::string(HipKernelExecutionSyntax.ArgStr),
-  std::string(CudaKernelExecutionSyntax.ArgStr),
-  std::string(GeneratePerl.ArgStr),
-  std::string(GeneratePython.ArgStr),
-  std::string(GenerateMarkdown.ArgStr),
-  std::string(GenerateCSV.ArgStr),
   std::string(NoBackup.ArgStr),
   std::string(NoOutput.ArgStr),
   std::string(Inplace.ArgStr),
   std::string(Examine.ArgStr),
   std::string(SaveTemps.ArgStr),
-  std::string(DocFormat.ArgStr),
-  std::string(Experimental.ArgStr),
   std::string(NoLowerDeviceDoubleParams.ArgStr),
   std::string(Versions.ArgStr),
-  std::string(NoUndocumented.ArgStr),
-  std::string(NoWarningsUndocumented.ArgStr),
   std::string(AscifyAMAP.ArgStr),
   std::string(OptLocalHeaders.ArgStr),
   std::string(OptLocalHeadersRecursive.ArgStr),
@@ -281,8 +208,6 @@ const std::vector<std::string> ascifyOptions {
 
 const std::vector<std::string> ascifyOptionsWithTwoArgs {
   std::string(OutputDir.ArgStr),
-  std::string(OutputAscifyPerlDir.ArgStr),
-  std::string(OutputPythonMapDir.ArgStr),
   std::string(OutputStatsFilename.ArgStr),
   std::string(TemporaryDir.ArgStr),
   std::string(ClangResourceDir.ArgStr),

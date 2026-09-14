@@ -196,18 +196,18 @@ constexpr int NUM_API_TYPES = (int) ApiTypes::API_LAST;
 
 enum SupportDegree {
   FULL = 0x0,
-  HIP_UNSUPPORTED = 0x1,
+  TARGET_UNSUPPORTED = 0x1,
   UNSUPPORTED = 0x4,
   CUDA_DEPRECATED = 0x8,
-  HIP_DEPRECATED = 0x10,
+  TARGET_DEPRECATED = 0x10,
   DEPRECATED = 0x40,
   CUDA_REMOVED = 0x80,
-  HIP_REMOVED = 0x100,
+  TARGET_REMOVED = 0x100,
   REMOVED = 0x400,
-  HIP_EXPERIMENTAL = 0x800,
-  HIP_SUPPORTED_V2_ONLY = 0x1000,
+  TARGET_EXPERIMENTAL = 0x800,
+  TARGET_SUPPORTED_V2_ONLY = 0x1000,
   CUDA_OVERLOADED = 0x2000,
-  HIP_PARTIALLY_SUPPORTED = 0x4000,
+  TARGET_PARTIALLY_SUPPORTED = 0x4000,
 };
 
 enum cudaVersions {
@@ -519,28 +519,28 @@ public:
     * timestamp into the currently active one.
     */
   static void setActive(const std::string &name);
-  // Check whether the counter is HIP_EXPERIMENTAL or not.
-  static bool isHipExperimental(const dppCounter &counter);
-  // Check whether the counter is HIP_PARTIALLY_SUPPORTED or not.
-  static bool isHipPartiallySupported(const dppCounter &counter);
-  // Check whether the counter is HIP_UNSUPPORTED or not.
-  static bool isHipUnsupported(const dppCounter &counter);
-  // Check whether the counter is HIP_UNSUPPORTED/UNSUPPORTED or not.
+  // Check whether the counter is TARGET_EXPERIMENTAL or not.
+  static bool isTargetExperimental(const dppCounter &counter);
+  // Check whether the counter is TARGET_PARTIALLY_SUPPORTED or not.
+  static bool isTargetPartiallySupported(const dppCounter &counter);
+  // Check whether the counter is TARGET_UNSUPPORTED or not.
+  static bool isTargetUnsupported(const dppCounter &counter);
+  // Check whether the counter is TARGET_UNSUPPORTED/UNSUPPORTED or not.
   static bool isUnsupported(const dppCounter &counter);
   // Check whether the counter is CUDA_DEPRECATED or not.
   static bool isCudaDeprecated(const dppCounter &counter);
-  // Check whether the counter is HIP_DEPRECATED or not.
-  static bool isHipDeprecated(const dppCounter &counter);
+  // Check whether the counter is TARGET_DEPRECATED or not.
+  static bool isTargetDeprecated(const dppCounter &counter);
   // Check whether the counter is DEPRECATED or not.
   static bool isDeprecated(const dppCounter &counter);
   // Check whether the counter is CUDA_REMOVED or not.
   static bool isCudaRemoved(const dppCounter &counter);
-  // Check whether the counter is HIP_REMOVED or not.
-  static bool isHipRemoved(const dppCounter &counter);
+  // Check whether the counter is TARGET_REMOVED or not.
+  static bool isTargetRemoved(const dppCounter &counter);
   // Check whether the counter is REMOVED or not.
   static bool isRemoved(const dppCounter &counter);
-  // Check whether the counter is HIP_SUPPORTED_V2_ONLY or not.
-  static bool isHipSupportedV2Only(const dppCounter &counter);
+  // Check whether the counter is TARGET_SUPPORTED_V2_ONLY or not.
+  static bool isTargetSupportedV2Only(const dppCounter &counter);
   // Check whether the counter is CUDA_OVERLOADED or not.
   static bool isCudaOverloaded(const dppCounter &counter);
   // Get string CUDA version.
@@ -551,7 +551,7 @@ public:
   static cudaVersions getCudaVersionForCuFileVersion(const cudaVersions &ver);
   // Get cuFile versions by CUDA version.
   static const std::vector<cudaVersions> &getCuFileVersionsForCudaVersion(const cudaVersions &ver);
-  // Set this flag in case of hipification errors.
+  // Set this flag in case of translation errors.
   bool hasErrors = false;
 #if LLVM_VERSION_MAJOR > 3
   // Converts CUDA version used by clang to CUDA version ASCIFY type.

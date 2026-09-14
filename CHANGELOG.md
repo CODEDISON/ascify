@@ -4,6 +4,16 @@
 
 ### Added
 
+- Repository checks for product identity, generated artifacts, and local
+  documentation links; native build/install CI and executable CLI contracts.
+- Open-source landing pages in English and Chinese, an FP32 introductory
+  example, and a dedicated conversion reference.
+
+- Host-only GitHub CI, contribution templates, editor settings, documentation
+  navigation, and commit-bound validation summaries for phase-one closeout.
+  The release process separates host checks, real translation, target execution,
+  and performance acceptance; this engineering change adds no new device result.
+
 - Single-warp int/float cooperative reductions with typed tile metadata and
   identical result bits across lanes, plus legacy CANN ballot/down-shuffle
   adapters for masks that match the currently active lanes. Generic multi-warp
@@ -71,6 +81,18 @@
 
 ### Changed
 
+- Public help and diagnostics now describe CUDA-to-Ascend translation. Removed
+  inactive legacy launch switches and unimplemented script/document generators;
+  actual statistics CSV output remains available. `--versions` reports the
+  linked LLVM build instead of an unverified target support range.
+- Standalone CMake builds respect the selected host compiler and use
+  target-scoped settings, explicit source lists, relocatable install paths,
+  and Python 3.9+ for tests. Build/run scripts provide help before requiring
+  environment configuration. Installed distributions include license notices.
+- Clang resource discovery uses the explicit resource directory or the
+  matching build/install layout. An explicitly invalid resource directory
+  reports an error instead of silently searching other installations.
+
 - Device/SIMT mappings now preserve unsupported semantics conservatively and
   use AST context for device scalar-double lowering.
 - Explicit row-wise Hybrid calls retain the original whole-SIMT launch for
@@ -111,9 +133,16 @@
 
 ### Fixed
 
+- The include-rewrite buffer now remains alive until the replacement has
+  consumed it; it previously exposed a dangling `StringRef` after leaving an
+  inactive legacy branch.
+- Removed the obsolete checked-in generated vector-add output. Examples now
+  generate into an ignored work directory using the current translator.
+
 - Mixed-kernel launches now pass the full dynamic UB capacity required by
   their `TPipe` allocations: 163,904 bytes for Softmax recompute, 65,600 bytes
-  for RMSNorm cached, 147,520 bytes for RMSNorm plain row-batch, and 32,832
+  for the original RMSNorm cached domain (131,136 bytes for the 16K-column
+  extension), 147,520 bytes for RMSNorm plain row-batch, and 32,832
   bytes for LayerNorm cached. A second launch argument of `0` or `nullptr` is
   invalid; both forms are covered by the host static gate and selected-route
   device correctness tests.

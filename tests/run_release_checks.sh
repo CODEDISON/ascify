@@ -12,12 +12,17 @@ run_check() {
 }
 
 if ! command -v "$python" >/dev/null 2>&1; then
-  echo "Python 3 executable not found: $python" >&2
+  echo "Python 3.9+ executable not found: $python" >&2
   exit 1
 fi
+"$python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else "Python 3.9 or newer is required")'
 
 cd -- "$repo_root"
 
+run_check "repository identity, artifacts, and documentation links" \
+  "$python" -B tools/check_repository.py
+run_check "engineering entry points and CLI contracts" \
+  "$python" -B -m unittest discover -s tests/engineering -p 'test_*.py' -q
 run_check "dav-c310 recipe static contract" \
   sh "$rewrite_dir/check_dav_c310_recipe.sh"
 run_check "canonical warp reduction static contract" \

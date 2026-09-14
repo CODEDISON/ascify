@@ -362,9 +362,8 @@ bool ResolveFrontendCompatibilityRoot(
       ascifyExecutable, &executableAnchor);
   llvm::SmallString<256> installed(
       llvm::sys::path::parent_path(executable));
-  llvm::sys::path::append(installed, "..");
   llvm::sys::path::append(installed,
-                          ASCIFY_FRONTEND_COMPAT_INSTALL_RELPATH);
+                          ASCIFY_FRONTEND_COMPAT_INSTALL_FROM_BINDIR);
   llvm::sys::path::append(installed, profile);
   llvm::sys::path::remove_dots(installed, true);
   std::error_code filesystemError;

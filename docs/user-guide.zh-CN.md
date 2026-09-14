@@ -4,14 +4,14 @@
 
 ## 1. Ascify 是什么
 
-Ascify 是一个 CUDA C/C++ 源码转换工具。它使用 Clang 读取 CUDA 源码，再把源码改成面向 ACL、DPP 和 Ascend 兼容层的代码。
+Ascify 是一个 CUDA C/C++ 到昇腾（Ascend）的源码转换工具。它使用 Clang 读取 CUDA 源码，将支持的 CUDA API 和核函数结构转换为 Ascify 兼容层和 Ascend ACL 接口。
 
 完整流程有两个部分：
 
 ```text
 CUDA 源码
   -> ascify-clang 转换源码
-  -> ACL/DPP/Ascend 兼容源码
+  -> Ascend 兼容源码
   -> CANN 或目标工程编译、链接和设备测试
 ```
 
@@ -38,9 +38,9 @@ CUDA 源码
 | LLVM 和 Clang 开发文件 | 提供 Clang 前端、库和 CMake 配置 | 只有 `clang` 命令通常不够 |
 | CUDA Toolkit | 提供 CUDA 头文件和 `libdevice` | 不要求有 NVIDIA GPU |
 
-编译 Ascify 不需要 Python 3。但测试脚本需要 Python 3。Python 3 也方便查看 JSON 回执。
+编译 Ascify 不需要 Python。仓库检查、转换封装脚本和测试需要 Python 3.9 或更高版本。
 
-下面这组环境已经通过测试：
+以下是历史验证中记录的环境；其结果归属和当前候选状态见 [验证矩阵](validation-matrix.md)：
 
 | 项目 | 测试值 |
 |---|---|
@@ -73,6 +73,10 @@ python3 --version
 如果 CMake 低于 3.16.8，请先升级。LLVM 也可能要求更高版本的 CMake。请按你所用 LLVM 版本的要求准备环境。
 
 ## 3. 准备 LLVM 和 Clang
+
+可以直接把 `LLVM_BUILD_DIR` 设置为包含 `LLVMConfig.cmake` 和
+`ClangConfig.cmake` 的 LLVM 开发安装前缀。`build.sh` 不要求存在 LLVM 源码目录。
+下面以已有源码构建目录为例。
 
 ### 3.1 使用已有的 LLVM 构建目录
 
@@ -139,18 +143,18 @@ cmake -S llvm -B build -G Ninja \
   -DLLVM_TARGETS_TO_BUILD="${LLVM_HOST_TARGET};NVPTX" \
   -DLLVM_DEFAULT_TARGET_TRIPLE="${LLVM_HOST_TRIPLE}"
 
-cmake --build build --target clang lld --parallel 2
+cmake --build build --parallel 2
 cd ..
 ```
 
-编译完成后设置：
+编译完整默认目标会生成 Ascify 链接所需的 Clang 开发库；仅编译 `clang` 可执行文件不足以准备全部开发依赖。编译完成后设置：
 
 ```bash
 export LLVM_PROJECT_PATH=/path/to/llvm-project
 export LLVM_BUILD_DIR="$LLVM_PROJECT_PATH/build"
 ```
 
-你也可以使用 Linux 发行版提供的 LLVM 开发包。这时，`LLVM_BUILD_DIR` 要指向一个完整目录。这个目录要有 `bin/clang`、LLVM CMake 配置和 Clang CMake 配置。如果缺少 `ClangConfig.cmake`，请安装对应的 Clang 开发包，或使用完整的 LLVM 源码构建目录。
+你也可以使用 Linux 发行版提供的 LLVM 开发包。`LLVM_BUILD_DIR` 应指向包含 LLVM 与 Clang CMake 配置、开发库和匹配解析资源的前缀。主机编译器可以位于其他目录，通过 `ASCIFY_CC`/`ASCIFY_CXX` 或 `CC`/`CXX` 指定；未指定时，脚本优先查找该前缀中的 Clang，再由 CMake 查找。如果缺少 `ClangConfig.cmake`，请安装匹配的 Clang 开发包，或使用完整的 LLVM 源码构建目录。
 
 ## 4. 准备 CUDA Toolkit
 
@@ -184,11 +188,10 @@ git status --short --branch
 
 ### 5.2 编译
 
-先确认第 3 节中的两个 LLVM 变量仍然有效。然后运行：
+先将 `LLVM_BUILD_DIR` 设为第 3 节准备的开发安装前缀或源码构建目录。只需要这个变量，不要求同时设置 `LLVM_PROJECT_PATH`：
 
 ```bash
-export LLVM_PROJECT_PATH=/path/to/llvm-project
-export LLVM_BUILD_DIR="$LLVM_PROJECT_PATH/build"
+export LLVM_BUILD_DIR=/path/to/llvm
 export ASCIFY_BUILD_JOBS=2
 
 ./build.sh
@@ -200,8 +203,8 @@ export ASCIFY_BUILD_JOBS=2
 - 构建类型：Release。
 - 构建目录：`build/`。
 - 安装目录：`ascify_install/`。
-- C/C++ 编译器：LLVM 构建目录中的 `clang` 和 `clang++`。
-- 链接器：LLVM 构建目录中的 `lld`，如果该文件存在。
+- C/C++ 编译器：优先使用 `ASCIFY_CC`/`ASCIFY_CXX` 或 `CC`/`CXX`；未设置时使用 LLVM 前缀中的 Clang，再由 CMake 查找主机编译器。
+- 链接器：由编译器选择；需要指定时设置 `ASCIFY_LINKER`。
 
 检查生成的程序：
 
@@ -238,35 +241,45 @@ export CMAKE_GENERATOR=Ninja
 cmake --install build
 
 test -x ascify_install/bin/ascify-clang
-test -f ascify_install/include/ascify/include/__clang_cuda_runtime_wrapper.h
+test -f ascify_install/libexec/ascify/clang/23/include/__clang_cuda_runtime_wrapper.h
 test -f ascify_install/include/ascify/ascify_cuda_compat.hpp
 ```
 
-安装命令会复制 Ascify 程序、兼容头文件、前端兼容文件和 Clang resource headers。
+安装命令会复制 Ascify 程序、兼容头、前端配置、Clang 解析头和许可证声明。
+两类头文件分别安装：
+
+| 安装路径 | 使用方 |
+|---|---|
+| `include/ascify/` 和 `include/acl_cub/` | 生成的 Ascend 源码；编译时使用 `-I<安装目录>/include` |
+| `libexec/ascify/clang/<major>/include/` | 转换器自用的 Clang 解析资源 |
+
+本手册命令使用已测试的 Clang 主版本 `23`，其他工具链请替换为实际 resource 版本。
+resource-directory 选项应指向 `libexec/ascify/clang/<major>`，即其 `include/` 的父目录。
+未显式覆盖时，安装后的程序会自动发现这个位置。
 
 不要只把 `ascify-clang` 复制到另一台机器。程序还需要匹配的 resource headers。它也可能需要 LLVM 共享库。
 
 ## 6. 完成第一次转换
 
-下面的命令会转换 `examples/vector_add.cu`。它使用纯 SIMT 模式，并生成一个 JSON 回执。
+下面的命令会转换 FP32 示例 `examples/vector_add.cu`。它使用纯 SIMT 模式，并生成一个 JSON 回执。
 
 ```bash
 export CUDA_PATH=/usr/local/cuda
-export CLANG_RESOURCE_DIRECTORY="$PWD/ascify_install/include/ascify"
+export CLANG_RESOURCE_DIRECTORY="$PWD/ascify_install/libexec/ascify/clang/23"
 export ASCIFY_BINARY="$PWD/ascify_install/bin/ascify-clang"
 
-mkdir -p generated
+mkdir -p .work/examples
 
 ./run.sh examples/vector_add.cu \
   --target-policy=dav-c310-vec \
   --simt-math=precise \
   --target-recipe=none \
-  --migration-receipt="$PWD/generated/vector_add.receipt.json" \
-  -o "$PWD/generated/vector_add.cu.dpp" \
+  --migration-receipt="$PWD/.work/examples/vector_add.receipt.json" \
+  -o "$PWD/.work/examples/vector_add.cu.dpp" \
   -- -std=c++17
 ```
 
-如果 CUDA Toolkit 不在 `/usr/local/cuda`，请改为实际路径。`run.sh` 会读取三个环境变量。然后它会调用 `ASCIFY_BINARY`。
+如果 CUDA Toolkit 不在 `/usr/local/cuda`，请改为实际路径。`run.sh` 会读取这些环境变量并调用 `ASCIFY_BINARY`。安装后的程序可以自动发现解析资源；`CLANG_RESOURCE_DIRECTORY` 用于显式覆盖该位置。
 
 命令末尾的 `--` 用来分开 Ascify 选项和 Clang 选项。这里的 `-std=c++17` 会传给 Clang。
 
@@ -275,18 +288,18 @@ mkdir -p generated
 如果转换命令没有报错，请检查输出文件：
 
 ```bash
-test -s generated/vector_add.cu.dpp
-test -s generated/vector_add.receipt.json
+test -s .work/examples/vector_add.cu.dpp
+test -s .work/examples/vector_add.receipt.json
 ```
 
 再检查主要改写和回执状态：
 
 ```bash
 grep -E 'ascify_cuda_compat|acl/acl.h|aclrtMalloc' \
-  generated/vector_add.cu.dpp
+  .work/examples/vector_add.cu.dpp
 
 grep -Eq '"status"[[:space:]]*:[[:space:]]*"succeeded"' \
-  generated/vector_add.receipt.json
+  .work/examples/vector_add.receipt.json
 ```
 
 回执中的 `succeeded` 只表示源码转换完成。它不表示目标编译、链接、设备运行、数值检查或性能测试已经通过。
@@ -300,13 +313,13 @@ export ASCIFY_BINARY="$PWD/build/ascify-clang"
 export CLANG_RESOURCE_DIRECTORY="$("$LLVM_BUILD_DIR/bin/clang" -print-resource-dir)"
 export CUDA_PATH=/usr/local/cuda
 
-mkdir -p generated
+mkdir -p .work/examples
 
 ./run.sh examples/vector_add.cu \
   --target-policy=dav-c310-vec \
   --simt-math=precise \
   --target-recipe=none \
-  -o "$PWD/generated/vector_add.cu.dpp" \
+  -o "$PWD/.work/examples/vector_add.cu.dpp" \
   -- -std=c++17
 ```
 
@@ -321,7 +334,7 @@ mkdir -p generated
   --target-policy=dav-c310-vec \
   --simt-math=precise \
   --target-recipe=none \
-  -o "$PWD/generated/kernel.cu.dpp" \
+  -o "$PWD/.work/examples/kernel.cu.dpp" \
   -- -std=c++17 -I/path/to/project/include -DMY_FEATURE=1
 ```
 
@@ -341,11 +354,11 @@ Ascify 默认只转换输入文件。你可以让它一起转换双引号引用�
   --local-headers-recursive \
   --target-policy=dav-c310-vec \
   --simt-math=precise \
-  -o "$PWD/generated/kernel.cu.dpp" \
+  -o "$PWD/.work/examples/kernel.cu.dpp" \
   -- -std=c++17 -I/path/to/project/include
 ```
 
-转换后的头文件会放在 `generated/kernel.cu.dpp.headers/`。这个选项不会处理所有系统头文件，也不会增加 Ascify 支持的 CUDA API。详细规则请看 [本地头文件说明](local-header-closure.md)。
+转换后的头文件会放在 `.work/examples/kernel.cu.dpp.headers/`。这个选项不会处理所有系统头文件，也不会增加 Ascify 支持的 CUDA API。详细规则请看 [本地头文件说明](local-header-closure.md)。
 
 ### 7.3 直接运行 `ascify-clang`
 
@@ -417,17 +430,18 @@ Hybrid 模式需要下面三个选项：
 ### 10.1 运行 host 测试
 
 ```bash
-sh tests/run_release_checks.sh
+python3 tools/check_repository.py --root .
+ASCIFY_BINARY= sh tests/run_release_checks.sh
 ```
 
-这组测试不需要真实的 Ascify 程序。它会检查转换规则和 Python 测试。
+第一条命令检查仓库契约和文档链接。第二条命令显式清空先前设置的 `ASCIFY_BINARY`，执行 host 测试；这组测试检查转换规则和 Python 工具，不调用真实转换器。
 
 ### 10.2 使用真实程序运行测试
 
 ```bash
 ASCIFY_BINARY="$PWD/build/ascify-clang" \
 ASCIFY_CUDA_PATH="$CUDA_PATH" \
-ASCIFY_CLANG_RESOURCE_DIRECTORY="$PWD/ascify_install/include/ascify" \
+ASCIFY_CLANG_RESOURCE_DIRECTORY="$PWD/ascify_install/libexec/ascify/clang/23" \
 sh tests/run_release_checks.sh
 ```
 
@@ -455,18 +469,17 @@ Ascify 不会为每个 CUDA 项目自动创建完整的 CANN 工程。源码转�
 
 ## 12. 常见问题
 
-### `LLVM_PROJECT_PATH` 没有设置
+### 没有指定 LLVM 开发文件
 
-`build.sh` 会立即退出。请运行：
+设置 LLVM 开发安装前缀或源码构建目录：
 
 ```bash
-export LLVM_PROJECT_PATH=/absolute/path/to/llvm-project
-export LLVM_BUILD_DIR="$LLVM_PROJECT_PATH/build"
+export LLVM_BUILD_DIR=/absolute/path/to/llvm
 ```
 
-### 提示 `missing build dependency: .../bin/clang`
+### 提示 `Host compiler is not executable`
 
-`LLVM_BUILD_DIR` 路径不对，或 LLVM 还没有编译完成。请检查 `bin/clang` 和 `bin/clang++`。
+检查显式设置的 `ASCIFY_CC`、`ASCIFY_CXX`、`CC` 和 `CXX`。它们需要指向可执行的主机编译器，或是在 `PATH` 中可以找到的命令。
 
 ### CMake 找不到 LLVM 或 Clang
 
@@ -507,10 +520,10 @@ export CMAKE_GENERATOR="Unix Makefiles"
 test -f "$CLANG_RESOURCE_DIRECTORY/include/__clang_cuda_runtime_wrapper.h"
 ```
 
-默认安装路径是：
+本手册 Clang 23 构建的默认私有资源路径是：
 
 ```bash
-export CLANG_RESOURCE_DIRECTORY="$PWD/ascify_install/include/ascify"
+export CLANG_RESOURCE_DIRECTORY="$PWD/ascify_install/libexec/ascify/clang/23"
 ```
 
 ### 找不到 CUDA 头文件或 `libdevice`
