@@ -177,7 +177,7 @@ test -d "$CUDA_PATH/nvvm"
 ### 5.1 下载源码
 
 ```bash
-git clone https://github.com/Edconeone/ascify.git
+git clone https://github.com/CODEDISON/ascify.git
 cd ascify
 
 git rev-parse HEAD

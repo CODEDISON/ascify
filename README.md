@@ -36,7 +36,7 @@ files, and a CUDA Toolkit directory for parsing. Conversion does not require a
 GPU or NPU. Python 3.9+ is required for repository checks and test tooling.
 
 ```bash
-git clone https://github.com/Edconeone/ascify.git
+git clone https://github.com/CODEDISON/ascify.git
 cd ascify
 
 export LLVM_BUILD_DIR=/path/to/llvm

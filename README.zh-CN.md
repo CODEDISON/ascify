@@ -29,7 +29,7 @@ CUDA 源码  →  ascify-clang  →  Ascend 兼容源码  →  CANN 编译与设
 解析的 CUDA Toolkit。源码转换本身不需要 GPU 或 NPU；仓库检查和测试需要 Python 3.9+。
 
 ```bash
-git clone https://github.com/Edconeone/ascify.git
+git clone https://github.com/CODEDISON/ascify.git
 cd ascify
 
 export LLVM_BUILD_DIR=/path/to/llvm
