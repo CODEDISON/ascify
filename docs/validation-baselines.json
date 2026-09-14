@@ -3,6 +3,7 @@
   "evidence_review_date": "2026-09-13",
   "review_scope": "Retained evidence only; no new source conversion or device run",
   "candidate_source_commit": "721ca1fa45568337b4865ce62f331ec45eeaae60",
+  "candidate_role": "Pre-normalization source baseline; see engineering-validation.md for the later engineering candidate",
   "candidate_target_validation": "pending; no inherited full hardware acceptance",
   "performance": {
     "source_commit": "32b33a3c8b33a379cf862f20afd056120015baad",

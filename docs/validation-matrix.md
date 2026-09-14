@@ -1,6 +1,9 @@
 # Validation matrix
 
-Evidence reviewed on 2026-09-13 without rerunning conversion or device tests.
+Historical performance and coverage evidence reviewed on 2026-09-13 without
+rerunning those populations or device tests. The separate
+[engineering verification record](engineering-validation.md) covers the cleanup's
+native build, installation, and limited frontend checks.
 The [machine-readable baselines](validation-baselines.json) contain full source
 commits, evidence identifiers, hashes, and counts. Raw logs remain in the
 project evidence workspace; they are not bundled with the source repository.
@@ -52,7 +55,8 @@ not independent operators or fully migrated Sample projects.
 | Previously generated 100 CUDA files / `ac3dced` | DT: 100/100 | DT: 23/100 | Not measured in this batch |
 | Fixed phase-one 20 files / `32b33a3` | 13/20 (65%) | DT and 950PR: 7/20 (35%) | Not measured |
 | Fixed phase-one 20 files / `6e9da55` | 18/20 (90%) | DT: 10/20 (50%) | Not measured |
-| Current local candidate / `721ca1f` | No new full-population measurement | DT validation pending | Not measured |
+| Pre-normalization candidate / `721ca1f` | No new full-population measurement | DT validation pending | Not measured |
+| Engineering normalization / `593ed58` | No new full-population measurement | DT validation pending | Not measured |
 
 The 100-file DT replay is a selected successful subset, not a full-repository
 100% conversion result. Do not combine different commits or platforms into a

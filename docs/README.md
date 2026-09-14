@@ -34,6 +34,9 @@ input populations, platforms, and evidence identities. It separates source
 conversion from target compilation, execution, correctness, and performance.
 Historical results do not establish acceptance for a newer binary.
 
+The [engineering verification record](engineering-validation.md) records the
+normalization candidate's build, installation, CLI checks, and remaining gates.
+
 The [Softmax/RMSNorm tuning record](softmax-rmsnorm-950pr-tuning-report.md)
 preserves experiment context. Generalization experiments have their own pinned
 inputs and denominators; reusable implementation changes return to this repository.
