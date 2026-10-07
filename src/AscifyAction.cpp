@@ -6245,6 +6245,18 @@ public:
 
 bool AscifyAction::BeginInvocation(clang::CompilerInstance &CI) {
   clang::DiagnosticsEngine &DE = CI.getDiagnostics();
+  // This ClangTool invocation supplies its own FileManager. A driver overlay
+  // is not guaranteed to be installed into that VFS, so silently proceeding
+  // would parse different bytes from the input explicitly selected by the
+  // caller. Reject before preprocessing or publishing any transformation.
+  if (!CI.getHeaderSearchOpts().VFSOverlayFiles.empty()) {
+    const auto ID = DE.getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "Ascify cannot translate input selected by VFS overlay arguments; "
+        "this frontend does not support -ivfsoverlay");
+    DE.Report(ID);
+    return false;
+  }
   if (TargetPolicy != "portable" && TargetPolicy != "dav-c310-vec") {
     const auto ID = DE.getCustomDiagID(
         clang::DiagnosticsEngine::Error,

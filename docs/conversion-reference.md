@@ -6,6 +6,13 @@ the [English tutorial](user-guide.en.md) or [中文教程](user-guide.zh-CN.md).
 Supported APIs and limitations are described in the
 [compatibility reference](compatibility.md).
 
+## Input filesystem overlays
+
+Ascify rejects `-ivfsoverlay` before preprocessing. Its current LibTooling entry
+does not install the driver's overlay into the supplied file manager; accepting
+the option would silently parse different input bytes. This rejection applies
+to all conversions.
+
 ## Build options
 
 | CMake option | Default | Purpose |

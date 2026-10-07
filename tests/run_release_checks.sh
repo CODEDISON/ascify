@@ -123,6 +123,12 @@ cleanup() {
 }
 trap cleanup 0 1 2 15
 
+run_check "unsupported VFS overlay configuration refusal" \
+  "$python" -B "$rewrite_dir/check_vfs_overlay_refusal.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+
 run_check "real Ascify NVIDIA sample-helper frontend closure" \
   sh "$rewrite_dir/check_sample_helper_compat.sh" \
     --binary "$ASCIFY_BINARY" \
@@ -144,6 +150,11 @@ run_check "real sample-helper dependent status domain and atomic publication" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
 run_check "uniform block reduction whole-TU admission and publication boundaries" \
   "$python" -B "$repo_root/tests/frontend_compat/check_uniform_block_reduction.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+run_check "uniform scratch empty namespace import and reactivation boundaries" \
+  "$python" -B "$repo_root/tests/frontend_compat/check_uniform_namespace_context.py" \
     --binary "$ASCIFY_BINARY" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"

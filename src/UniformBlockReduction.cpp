@@ -160,8 +160,16 @@ class Proof {
             proof.userCooperativeDeclaration = true;
       return true;
     }
+    bool VisitNamespaceDecl(NamespaceDecl* declaration) {
+      // RecursiveASTVisitor skips the implicit using-directive synthesized for
+      // an anonymous namespace. Record its target from the written declaration.
+      if (declaration->isAnonymousNamespace())
+        proof.anonymousImports.insert(declaration->getCanonicalDecl());
+      return true;
+    }
     bool VisitUsingDirectiveDecl(UsingDirectiveDecl* declaration) {
-      if (!proof.system(declaration)) proof.userUsingDirective = true;
+      if (!proof.system(declaration) && !proof.emptyNamespaceImport(declaration))
+        proof.userUsingDirective = true;
       return true;
     }
     bool VisitFunctionDecl(FunctionDecl* function) {
@@ -232,12 +240,56 @@ class Proof {
     return path == profile.canonicalRoot + "/cooperative_groups.h" ||
            path == profile.canonicalRoot + "/cooperative_groups/reduce.h";
   }
+  bool emptyNamespaceImport(const UsingDirectiveDecl* declaration) const {
+    // libstdc++ debug/debug.h imports the empty std::__debug namespace into
+    // __gnu_debug even in ordinary non-debug CUDA translation units. Such an
+    // import contributes no lookup candidates. Prove that semantic property
+    // over the complete namespace instead of trusting a system/header path.
+    // Keep aliases, implicit/global/function imports, macros, inline namespaces
+    // and lazy module declarations outside this deliberately narrow exception.
+    if (!declaration || declaration->isImplicit() ||
+        declaration->getUsingLoc().isInvalid() || declaration->getUsingLoc().isMacroID() ||
+        !isa<NamespaceDecl>(declaration->getDeclContext()) ||
+        !isa<NamespaceDecl>(declaration->getNominatedNamespaceAsWritten()))
+      return false;
+    const auto* nominated = declaration->getNominatedNamespace();
+    if (!nominated || nominated->isAnonymousNamespace() || nominated->isInline())
+      return false;
+    for (const auto* extension : nominated->getCanonicalDecl()->redecls()) {
+      // Any declaration is enough to reject, including nested namespaces,
+      // aliases, using shadows/directives and uninstantiated templates. A late
+      // namespace reopening therefore cannot reactivate an admitted import.
+      if (extension->hasAttrs() || extension->hasExternalLexicalStorage() ||
+          extension->hasExternalVisibleStorage() || !extension->decls_empty())
+        return false;
+    }
+    return true;
+  }
   bool trustedFunction(const FunctionDecl* function) const {
     if (!function || function->isNoReturn() || function->hasAttr<AsmLabelAttr>() ||
         function->getTemplateSpecializationKind() == TSK_ExplicitSpecialization) return false;
     for (const auto* declaration : function->redecls())
       if (!trustedLocation(declaration->getLocation())) return false;
     return true;
+  }
+  bool namespaceExportsName(const NamespaceDecl* space, DeclarationName name,
+                            std::set<const NamespaceDecl*>& visited) const {
+    if (!space) return true;
+    space = space->getCanonicalDecl();
+    if (!visited.insert(space).second) return false;
+    for (const auto* extension : space->redecls()) {
+      if (extension->hasExternalLexicalStorage() || extension->hasExternalVisibleStorage())
+        return true;
+      for (const auto* declaration : extension->decls()) {
+        if (const auto* named = dyn_cast<NamedDecl>(declaration))
+          if (named->getDeclName() == name) return true;
+        if (const auto* import = dyn_cast<UsingDirectiveDecl>(declaration))
+          if (namespaceExportsName(import->getNominatedNamespace(), name, visited)) return true;
+        if (const auto* nested = dyn_cast<NamespaceDecl>(declaration))
+          if (nested->isInline() && namespaceExportsName(nested, name, visited)) return true;
+      }
+    }
+    return false;
   }
   bool owned(const FunctionDecl* function, const char* name) const {
     if (!trustedFunction(function) || function->getQualifiedNameAsString() !=
@@ -299,6 +351,14 @@ class Proof {
     }
     // A distinct parser tile must not alter source overload selection. Accept
     // only the unconstrained, unique two-type forwarding template.
+    // Anonymous namespaces add implicit using-directives with invalid source
+    // locations. They still participate in ordinary lookup: prove absence of
+    // the forwarder name across all reopenings and indirect/inline exports.
+    for (const auto* space : anonymousImports) {
+      std::set<const NamespaceDecl*> visited;
+      if (namespaceExportsName(space, function->getDeclName(), visited))
+        return false;
+    }
     std::set<const NamedDecl*> overloads;
     for (const auto* declaration : function->getDeclContext()->lookup(function->getDeclName())) {
       if (const auto* candidate = dyn_cast<FunctionTemplateDecl>(declaration))
@@ -602,6 +662,7 @@ class Proof {
   std::string& error;
   bool standard;
   bool userCooperativeDeclaration = false;
+  std::set<const NamespaceDecl*> anonymousImports;
   bool userUsingDirective = false;
   std::set<const FunctionDecl*> patterns, kernels, admittedFunctions;
   std::set<const VarDecl*> allVariables, admittedVariables;
