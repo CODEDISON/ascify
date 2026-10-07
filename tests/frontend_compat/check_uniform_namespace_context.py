@@ -56,6 +56,10 @@ def main():
         "anonymous_using_shadow": (original.replace(anchor, anchor + "\nnamespace observer { template<class T, unsigned N, class P> __device__ T forward_sum(T value, cg::thread_block_tile<N, P>&) { return value + T(1); } }\nnamespace { using observer::forward_sum; }"), False, "collective requires a pure unique forwarder", []),
         "anonymous_inline_export": (original.replace(anchor, anchor + "\nnamespace { inline namespace observer { template<class T, unsigned N, class P> __device__ T forward_sum(T value, cg::thread_block_tile<N, P>&) { return value + T(1); } } }"), False, "collective requires a pure unique forwarder", []),
         "anonymous_dormant_template": (original.replace(anchor, anchor + "\nnamespace { template<class Future> __device__ Future forward_sum(Future); }"), False, "collective requires a pure unique forwarder", []),
+        # The existing six CUDA SDK instantiations do not select this overload;
+        # a future admitted int/512/256 instantiation does. Its name must already
+        # be excluded before publishing the dependent kernel template.
+        "anonymous_future_allowed_instantiation": (original.replace(anchor, anchor + "\nnamespace { template<class T, unsigned N, class P, typename std::enable_if<std::is_same<T,int>::value && N == 256, int>::type = 0> __device__ T forward_sum(T value, cg::thread_block_tile<N,P>&) { return value + T(1); } }"), False, "collective requires a pure unique forwarder", []),
         "anonymous_nested_export": (original.replace(anchor, anchor + "\nnamespace { namespace { template<class T, unsigned N, class P> __device__ T forward_sum(T value, cg::thread_block_tile<N, P>&) { return value + T(1); } } }"), False, "collective requires a pure unique forwarder", []),
         "anonymous_late_reactivation": (original.replace(anchor, anchor + "\nnamespace { __device__ int unrelated_observer(int value) { return value; } }") + "\nnamespace { template<class T, unsigned N, class P> __device__ T forward_sum(T value, cg::thread_block_tile<N, P>&) { return value + T(1); } }\n", False, "collective requires a pure unique forwarder", []),
     }
