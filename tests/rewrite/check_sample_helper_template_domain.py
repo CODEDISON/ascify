@@ -10,6 +10,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "tests/rewrite/fixtures/sample_helper_template_domain.cu"
+POSITIVE = ROOT / "tests/rewrite/fixtures/sample_helper_template_domain_positive.cu"
 HELPERS = ROOT / "tests/rewrite/fixtures/nvidia_samples/Common"
 MESSAGE = "Ascify: dependent helper status is only proven for the emitted template type domain"
 PENDING = "proved dependent template status domain for 'template_memory'; guard pending helper transaction: "
@@ -95,23 +96,24 @@ def main():
     args = parser.parse_args()
     assert bool(args.binary) == bool(args.cuda_path) == bool(args.resource_dir)
     assert not args.expect_retained_closure or args.binary
-    before = hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
+    before = {path: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in (FIXTURE, POSITIVE)}
     with tempfile.TemporaryDirectory(prefix="ascify-template-helper-") as temp:
         work = Path(temp)
         host_guard_contract(work)
         if not args.binary:
             print("native template helper transformation gate not run (no binary supplied)")
             return
-        for mode in range(13):
+        for mode in range(14):
             output = work / (str(mode) + ".cpp")
             conflicting_macro = {6: "__is_same", 7: "static_assert", 8: "T"}.get(mode)
             result = run([
-                args.binary, str(FIXTURE), "--target-policy=dav-c310-vec",
+                args.binary, str(POSITIVE if mode <= 1 else FIXTURE), "--target-policy=dav-c310-vec",
                 "--simt-math=fast", "--default-preprocessor",
                 "--cuda-path=" + args.cuda_path,
                 "--clang-resource-directory=" + args.resource_dir,
                 "-o", str(output), "--", "-x", "cuda", "-std=c++17",
-                "-I" + str(HELPERS), "-DASCIFY_TEMPLATE_CASE=" + str(mode),
+                "-I" + str(HELPERS), "-DASCIFY_TEMPLATE_CASE=" + str(0 if mode == 13 else mode),
             ], success=conflicting_macro is None)
             if conflicting_macro is not None:
                 # These tokens also belong to the frozen compat surface. Its
@@ -135,6 +137,21 @@ def main():
             if mode == 0:
                 expected_guard += ' || __is_same(T, int)'
             expected_guard += ', "' + MESSAGE + '");'
+            if mode == 13:
+                # This original positive variant also contains an inactive
+                # helper call. Raw PP auditing must keep the whole transaction
+                # even though its active template domain was proved.
+                retained_reason = (PRAGMA_BOUNDARY if args.expect_retained_closure
+                                   else "residual raw PP use of 'checkCudaErrors'")
+                assert retained_reason in result.stderr, result.stderr
+                assert "#include <helper_cuda.h>" in text, result.stderr
+                assert MESSAGE not in text, text
+                assert "ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS" not in text, text
+                assert "::ascify::sampleFindCudaDevice" not in text, text
+                assert "committed 1 explicit template" not in result.stderr
+                assert "include kept" in result.stderr, result.stderr
+                print("native template case 13: inactive helper use retains entire transaction")
+                continue
             if args.expect_retained_closure:
                 # The Mac system headers currently trip a separate, existing
                 # pragma provenance boundary. Check the real AST proof without
@@ -193,12 +210,13 @@ def main():
                 assert "include kept" in result.stderr, result.stderr
                 assert "status domain not proven" in result.stderr, result.stderr
                 print(f"native template case {mode}: transaction retained without guard")
-        assert hashlib.sha256(FIXTURE.read_bytes()).hexdigest() == before
+        assert {path: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (FIXTURE, POSITIVE)} == before
         if args.expect_retained_closure:
-            print("native AST-planning-only: 2 positive proofs and 11 negative proofs passed; "
+            print("native AST-planning-only: 2 positive proofs and 12 negative proofs passed; "
                   "helper publication and target validation remain pending")
         else:
-            print("native template helper gate: 2 positive and 11 negative cases passed")
+            print("native template helper gate: 2 positive and 12 negative cases passed")
 
 
 if __name__ == "__main__":

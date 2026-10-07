@@ -176,7 +176,7 @@ if command -v "$raw_token_clang" >/dev/null 2>&1; then
     "$repo_root/include/ascify/device_memory_compat.hpp" \
     "$repo_root/include/ascify/cooperative_groups_compat.hpp" \
     "$repo_root/include/ascify/uniform_block_reduction_compat.hpp" 2>&1 | \
-    sed -n "s/^raw_identifier '\([^']*\)'.*/\1/p" | \
+    sed -n "s/^raw_identifier[[:space:]][[:space:]]*'\([^']*\)'.*/\1/p" | \
     LC_ALL=C sort -u >"$test_tmp/compat-identifiers.expected"
   sed -n 's/^[[:space:]]*"\([^"]*\)",$/\1/p' \
     "$compat_identifiers" >"$test_tmp/compat-identifiers.actual"
@@ -503,7 +503,15 @@ done
 
 # Only the known ACL-error return domain is admitted. This does not assert
 # device symbol availability: SDK registration errors must still propagate.
-translate "$fixtures/sample_helper_new_runtime_status.cu" \
+runtime_status_fixture="$fixtures/sample_helper_runtime_status_current.cu"
+runtime_status_checks=2
+if search_fixed 'cudaGetDeviceProperties_v2' "$cuda_path/include/cuda_runtime_api.h" >/dev/null; then
+  # CUDA 12.x exposes the explicit ABI spelling; newer SDKs may only declare
+  # the canonical API. Exercise that legacy spelling only when it exists.
+  runtime_status_fixture="$fixtures/sample_helper_new_runtime_status.cu"
+  runtime_status_checks=3
+fi
+translate "$runtime_status_fixture" \
   "$fixtures/nvidia_samples/Common" \
   "$test_tmp/new-runtime-status.cpp" "$test_tmp/new-runtime-status"
 require_fixed 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaGetDeviceProperties' \
@@ -511,7 +519,7 @@ require_fixed 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaGetDevicePrope
 require_fixed 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaMemcpyToSymbol' \
   "$test_tmp/new-runtime-status.cpp"
 forbid_fixed 'helper_cuda.h' "$test_tmp/new-runtime-status.cpp"
-require_fixed 'check_rewrites=3' "$test_tmp/new-runtime-status.stderr"
+require_fixed "check_rewrites=$runtime_status_checks" "$test_tmp/new-runtime-status.stderr"
 require_fixed 'include removed' "$test_tmp/new-runtime-status.stderr"
 
 forbid_fixed 'cudaGetDeviceProperties_v2' "$test_tmp/new-runtime-status.cpp"
@@ -1502,5 +1510,8 @@ for pp_case in ifdef defined undef stringize forward; do
   require_fixed "$pp_diagnostic" "$test_tmp/pp-${pp_case}.stderr"
   require_fixed 'include kept' "$test_tmp/pp-${pp_case}.stderr"
 done
+
+"${PYTHON:-python3}" -B "$repo_root/tests/rewrite/check_sample_helper_profiles.py" \
+  --binary "$binary" --cuda-path "$cuda_path" --resource-dir "$resource_dir"
 
 echo "sample-helper frontend provenance and closure contracts passed"

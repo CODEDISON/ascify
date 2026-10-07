@@ -44,6 +44,14 @@ aliases and symbol redirection are rejected. The call must use an unqualified, n
 using aliases, device calls and external-header uses outside the proven leaf context retain the
 dependency. Only the callee token changes, preserving both arguments and return-value use.
 
+Reviewed profiles include CUDA Samples commits `b7c5481c556c3fe98db060207ecaa41a4b9a9abc`
+and `5443602d89ed99aede2e4b7bf329daddeadb320e` (v13.4). The latter adds SM `0xa7`
+architecture-table entries; its four helper dependencies are byte-identical to the earlier profile.
+This extends exact official-source identity admission. Device selection still requires exactly one
+visible logical device and binds device zero; the active-definition, provenance and transaction checks
+continue to apply. The [v13.4 fixture](../tests/rewrite/fixtures/nvidia_samples_v13_4/README.md)
+records the pinned source and original license.
+
 Trust in system files is recorded at their first physical-file entry. Later `system_header` pragmas,
 re-entry, forged `#line` filenames, remapped provider files and command-line definitions cannot acquire
 that provenance. The configured converter, Clang resources, CUDA SDK, sysroot and system include paths

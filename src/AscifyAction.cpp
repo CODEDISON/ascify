@@ -213,6 +213,15 @@ unsigned frozenNvidiaSampleHelperFileRole(
             contents,
             "997f9ac1f8e5f8e5f45f8b11eebab5b89305dee7430b90654bafe62283cffee1"))
       return FrozenOfficialNvidiaSampleHelperCuda;
+    // Reviewed v13.4 commit 5443602d89ed99aede2e4b7bf329daddeadb320e:
+    // only the SM 0xa7 cores/name table entries differ; helper contracts and
+    // all four frozen dependencies are unchanged. Admit these exact parsed
+    // bytes while retaining every active-definition and call-closure proof.
+    if (contents.size() == 28219 &&
+        sha256Equals(
+            contents,
+            "0494246768a4e3dbfcd688d79f4abad1fa39fc9f2d9dc3264a894f1c96d3785d"))
+      return FrozenOfficialNvidiaSampleHelperCuda;
   } else if (filename == "helper_string.h") {
     if (contents.size() == 15079 &&
         sha256Equals(

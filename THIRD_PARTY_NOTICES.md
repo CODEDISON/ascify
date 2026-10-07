@@ -88,8 +88,13 @@ Samples at commit `b7c5481c556c3fe98db060207ecaa41a4b9a9abc`:
 - `tests/rewrite/fixtures/nvidia_samples/Common/helper_timer.h`
 - `tests/rewrite/fixtures/mutated_dependency_nvidia_samples/Common/helper_cuda.h`
 
+`tests/rewrite/fixtures/nvidia_samples_v13_4/Common/helper_cuda.h` is copied
+byte-for-byte from NVIDIA CUDA Samples v13.4 at commit
+`5443602d89ed99aede2e4b7bf329daddeadb320e` and retains the same NVIDIA license.
+
 The following negative-test fixtures are modified or reduced derivatives of
-`Common/helper_cuda.h` or `Common/helper_string.h` from that same commit:
+`Common/helper_cuda.h` or `Common/helper_string.h` from commit
+`b7c5481c556c3fe98db060207ecaa41a4b9a9abc`:
 
 - `tests/rewrite/fixtures/altered_nvidia_samples/Common/helper_cuda.h`
 - `tests/rewrite/fixtures/altered_find_nvidia_samples/Common/helper_cuda.h`
