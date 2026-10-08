@@ -5719,6 +5719,16 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
     bool VisitTypeLoc(clang::TypeLoc type) {
       return inspect(type.getType(), type.getBeginLoc());
     }
+    bool VisitArrayTypeLoc(clang::ArrayTypeLoc type) {
+      return inspectEnumNumericOperand(type.getSizeExpr(), type.getLBracketLoc());
+    }
+    bool VisitFieldDecl(clang::FieldDecl *field) {
+      return !field->isBitField() ||
+          inspectEnumNumericOperand(field->getBitWidth(), field->getLocation());
+    }
+    bool VisitEnumConstantDecl(clang::EnumConstantDecl *constant) {
+      return inspectEnumNumericOperand(constant->getInitExpr(), constant->getLocation());
+    }
     bool VisitExpr(clang::Expr *expression) {
       // Aggregate value-initialization of an admitted runtime adapter also
       // creates zero-initializers for SDK-only subobjects. They are not a
@@ -5800,6 +5810,8 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
       if (!attribute->isAlignmentExpr() && attribute->getAlignmentType() != nullptr)
         return inspect(attribute->getAlignmentType()->getType(),
                        attribute->getLocation(), false);
+      if (attribute->isAlignmentExpr())
+        return inspectEnumNumericOperand(attribute->getAlignmentExpr(), attribute->getLocation());
       return true;
     }
     bool VisitCastExpr(clang::CastExpr *expression) {
@@ -5870,6 +5882,23 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
     std::string badName;
     std::string badReason = "unproved SDK record ABI";
   private:
+    bool inspectEnumNumericOperand(const clang::Expr *operand,
+                                   clang::SourceLocation location) {
+      location = source.getExpansionLoc(location);
+      if (operand == nullptr || location.isInvalid() ||
+          !audited.count(source.getFileID(location).getHashValue()))
+        return true;
+      operand = operand->IgnoreParenImpCasts();
+      while (const auto *constant = llvm::dyn_cast<clang::ConstantExpr>(operand))
+        operand = constant->getSubExpr()->IgnoreParenImpCasts();
+      const auto *enumeration = sdkEnumeration(operand->getType());
+      if (enumeration == nullptr)
+        return true;
+      badLocation = location;
+      badName = enumeration->getNameAsString();
+      badReason = "unproved SDK enum numeric observation";
+      return false;
+    }
     const clang::EnumDecl *sdkEnumeration(clang::QualType type) const {
       if (type.isNull())
         return nullptr;

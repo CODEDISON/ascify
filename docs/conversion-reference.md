@@ -60,8 +60,9 @@ unproved. SDK enum conversion operators are also rejected: converting an enum
 adapter to a native integer can merge distinct conversion interfaces. Ordinary
 Runtime calls, error comparisons and non-template status returns retain the
 explicit adapter contract, including ordinary member-function status returns.
-Numeric SDK enum casts and constructions, arithmetic, ordering, switch conditions, array bounds
-and assignments to native integers are rejected. Symbolic equality/inequality
+Numeric SDK enum casts and constructions, arithmetic, ordering, switch conditions,
+array bounds, alignment values, bit-field widths, enumerator initializers and
+assignments to native integers are rejected. Symbolic equality/inequality
 within the same SDK enum and error-code truth preserve the adapter contract;
 the target's native error ordinals are not CUDA ordinals.
 The audit also visits instantiated function templates and generic lambdas.
