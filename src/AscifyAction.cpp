@@ -1440,8 +1440,51 @@ static bool isConfiguredCudaSdkDependencyRole(llvm::StringRef path) {
       "crt/host_config.h", "crt/host_defines.h", "crt/host_runtime.h",
       "crt/math_functions.h", "crt/math_functions.hpp", "crt/sm_70_rt.hpp",
       "crt/storage_class.h", "nv/target", "nv/detail/__target_macros",
-      "nv/detail/__preprocessor"};
+      "nv/detail/__preprocessor", "cccl/nv/target",
+      "cccl/nv/detail/__target_macros", "cccl/nv/detail/__preprocessor"};
   return dependencies.count(relative.str()) != 0;
+}
+
+// CUDA installs these three nv headers both at the legacy include root and
+// below cccl. An explicit -I<SDK>/include/cccl may select the latter inode.
+// Admit that finite alias only when its physical bytes match the canonical
+// dependency. FileEntered independently checks the selected parsed buffer.
+static bool physicalCudaSdkNvAliasMatches(llvm::StringRef expected,
+                                          llvm::StringRef resolved) {
+  if (!pathIsWithinConfiguredCudaInclude(expected) ||
+      !pathIsWithinConfiguredCudaInclude(resolved))
+    return false;
+  llvm::SmallString<256> root(CudaPath.getValue()), physicalRoot;
+  llvm::sys::path::append(root, "include");
+  if (llvm::sys::fs::real_path(root, physicalRoot))
+    return false;
+  const auto relative = expected.drop_front(physicalRoot.size() + 1);
+  if (relative != "nv/target" && relative != "nv/detail/__target_macros" &&
+      relative != "nv/detail/__preprocessor")
+    return false;
+  const auto resolvedRelative = resolved.drop_front(physicalRoot.size() + 1);
+  if (resolvedRelative != "cccl/" + relative.str())
+    return false;
+  const auto canonicalBytes = llvm::MemoryBuffer::getFile(expected);
+  const auto aliasBytes = llvm::MemoryBuffer::getFile(resolved);
+  return canonicalBytes && aliasBytes &&
+         (*canonicalBytes)->getBuffer() == (*aliasBytes)->getBuffer();
+}
+
+static bool physicalCudaSdkNvRoleMatches(llvm::StringRef path) {
+  llvm::SmallString<256> root(CudaPath.getValue()), physicalRoot, physicalFile;
+  llvm::sys::path::append(root, "include");
+  if (llvm::sys::fs::real_path(root, physicalRoot) ||
+      llvm::sys::fs::real_path(path, physicalFile))
+    return false;
+  const auto relative = llvm::StringRef(physicalFile).drop_front(physicalRoot.size() + 1);
+  if (relative != "cccl/nv/target" &&
+      relative != "cccl/nv/detail/__target_macros" &&
+      relative != "cccl/nv/detail/__preprocessor")
+    return true;
+  llvm::SmallString<256> canonical(physicalRoot);
+  llvm::sys::path::append(canonical, relative.drop_front(5));
+  return physicalCudaSdkNvAliasMatches(canonical, physicalFile);
 }
 
 static bool physicalFileIdentityMatches(llvm::StringRef path,
@@ -3777,7 +3820,8 @@ void AscifyAction::FileChanged(
          isOwnedCudaCompilerInput(parentFile, getCompilerInstance()))));
   if (sdkRole) {
     if (sdkEntry != nullptr && physicalSourceFileMatches(
-            sourceManager.getFilename(spelling), *sdkEntry, sourceManager))
+            sourceManager.getFilename(spelling), *sdkEntry, sourceManager) &&
+        physicalCudaSdkNvRoleMatches(sourceManager.getFilename(spelling)))
       cudaRuntimeApiSdkFileIds.insert(file.getHashValue());
     else
       cudaRuntimeApiSdkIdentityFailure = spelling;
@@ -3903,7 +3947,8 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
       llvm::SmallString<256> expectedPhysical, resolvedPhysical;
       if (llvm::sys::fs::real_path(expected, expectedPhysical) ||
           llvm::sys::fs::real_path(resolved_file_name, resolvedPhysical) ||
-          expectedPhysical != resolvedPhysical)
+          (expectedPhysical != resolvedPhysical &&
+           !physicalCudaSdkNvAliasMatches(expectedPhysical, resolvedPhysical)))
         cudaRuntimeApiSdkIdentityFailure = hash_loc;
     }
   }

@@ -213,6 +213,13 @@ def main():
         cases["sdk_root_caller_main"] = (INCLUDE + '#if CUDART_VERSION >= 13000\nint version = 1;\n#endif\n', False, "removed SDK macro")
         cases["sdk_root_caller_header"] = (INCLUDE + '#include "' + str(sdk_observer) + '"\nstatic_assert(sdk_observed() == 1, "SDK branch");\n', False, "removed SDK macro")
         cases["sdk_mirror_positive"] = (DIRECT.read_text(), True, "")
+        cases["sdk_cccl_search_positive"] = (DIRECT.read_text(), True, "")
+        cccl_shadow = work / "sdk_cccl_shadow"
+        shutil.copytree(sdk_mirror, cccl_shadow, symlinks=True)
+        cccl_macros = cccl_shadow / "include/cccl/nv/detail/__target_macros"
+        cccl_macros.write_bytes(cccl_macros.read_bytes() + b"\n")
+        cases["sdk_cccl_modified_dependency"] = (
+            DIRECT.read_text(), False, "physical SDK dependency contents")
         dependency = Path(args.cuda_path).resolve() / "include/vector_types.h"
         dependency_shadow = work / "overridden_vector_types.h"
         dependency_shadow.write_bytes(dependency.read_bytes() + b"\n")
@@ -232,12 +239,18 @@ def main():
             before = hashlib.sha256(source.read_bytes()).hexdigest()
             resource = copied_resources if label.startswith("resource_") or label == "copied_resources_positive" else args.resource_dir
             sdk = sdk_mirror if label.startswith("sdk_root_") or label == "sdk_mirror_positive" else args.cuda_path
+            if label == "sdk_cccl_modified_dependency":
+                sdk = cccl_shadow
             argv = [args.binary, str(source), "--default-preprocessor",
                     "--target-policy=dav-c310-vec", "--simt-math=fast",
                     "--cuda-path=" + str(sdk),
                     "--clang-resource-directory=" + str(resource),
                     "-o", str(output), "--", "-x", "cuda", "-std=c++17",
                     "-I" + str(work)]
+            if label in ("sdk_cccl_search_positive", "sdk_cccl_modified_dependency"):
+                argv.remove("--default-preprocessor")
+                argv.extend(["-fgpu-rdc", "-I" + str(Path(sdk) / "include/cccl"),
+                             "-I" + str(Path(sdk) / "nvvm/include")])
             if label == "spoof":
                 argv.append("-I" + str(spoof))
             if label == "vfs_override":

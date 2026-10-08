@@ -19,6 +19,10 @@ the CUDA include directory. SDK ownership requires the actual runtime-API or
 compiler-bootstrap dependency chain as well as physical input identity.
 Its dependency roles are limited to verified Runtime and forced-wrapper
 relative paths; unknown SDK child files remain retained audit inputs.
+The three `nv/target` and `nv/detail` bootstrap dependencies may resolve to
+their physical `cccl/nv` copies through an SDK CCCL include path when those
+copies have identical bytes. Their include ancestry and parsed bytes are
+still checked; a modified copy or a caller shadow is rejected.
 
 The projection rejects observations of CUDA SDK macros such as `CUDART_VERSION`
 and header guards, including conditions, inactive branches, macro replacement
