@@ -31,8 +31,8 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_TYPE_NAME_MAP = [] {
   m["cudaError_t"]               = {"aclError",                          CONV_TYPE, API_RUNTIME, SEC::ERROR_HANDLING};
   m["cudaSuccess"]               = {"ACL_SUCCESS",                       CONV_DEFINE, API_RUNTIME, SEC::ERROR_HANDLING};
   m["cudaErrorInvalidValue"]     = {"ACL_ERROR_RT_PARAM_INVALID",       CONV_DEFINE, API_RUNTIME, SEC::ERROR_HANDLING};
-  m["cudaErrorMemoryAllocation"] = {"ACL_ERROR_RT_MALLOC_FAILED",        CONV_DEFINE, API_RUNTIME, SEC::ERROR_HANDLING};
-  m["cudaErrorInvalidDevice"]    = {"ACL_ERROR_RT_DEVICE_NOT_FOUND",     CONV_DEFINE, API_RUNTIME, SEC::ERROR_HANDLING};
+  m["cudaErrorMemoryAllocation"] = {"ACL_ERROR_RT_MEMORY_ALLOCATION",    CONV_DEFINE, API_RUNTIME, SEC::ERROR_HANDLING};
+  m["cudaErrorInvalidDevice"]    = {"ACL_ERROR_RT_INVALID_DEVICEID",     CONV_DEFINE, API_RUNTIME, SEC::ERROR_HANDLING};
   // Stream type
   m["cudaStream_t"]              = {"aclrtStream",                       CONV_TYPE, API_RUNTIME, SEC::STREAM};
   // Keep CUDA flag values in the Ascify namespace. CUDA bit 0 is not

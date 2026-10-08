@@ -65,11 +65,11 @@ void testAllocationContracts() {
   assert(ascify_test_malloc_calls == 1);
   assert(ascify_test_malloc_host_calls == 1);
 
-  ascify_test_runtime_status = ACL_ERROR_RT_MALLOC_FAILED;
+  ascify_test_runtime_status = ACL_ERROR_RT_MEMORY_ALLOCATION;
   device = reinterpret_cast<int*>(1);
   host = reinterpret_cast<int*>(1);
-  assert(ascify::cudaMalloc(&device, 32) == ACL_ERROR_RT_MALLOC_FAILED);
-  assert(ascify::cudaMallocHost(&host, 32) == ACL_ERROR_RT_MALLOC_FAILED);
+  assert(ascify::cudaMalloc(&device, 32) == ACL_ERROR_RT_MEMORY_ALLOCATION);
+  assert(ascify::cudaMallocHost(&host, 32) == ACL_ERROR_RT_MEMORY_ALLOCATION);
   assert(device == nullptr);
   assert(host == nullptr);
 
@@ -169,16 +169,16 @@ void testMemsetAndErrorContracts() {
   assert(ascify::cudaMemsetAsync(nullptr, 0, 0, stream) == ACL_SUCCESS);
   assert(ascify_test_memset_async_calls == async_calls);
 
-  ascify_test_last_error = ACL_ERROR_RT_MALLOC_FAILED;
-  assert(ascify::cudaGetLastError() == ACL_ERROR_RT_MALLOC_FAILED);
+  ascify_test_last_error = ACL_ERROR_RT_MEMORY_ALLOCATION;
+  assert(ascify::cudaGetLastError() == ACL_ERROR_RT_MEMORY_ALLOCATION);
   assert(std::strcmp(ascify::cudaGetErrorString(ACL_SUCCESS),
                      "ACL_SUCCESS") == 0);
   assert(std::strcmp(ascify::cudaGetErrorString(
-                         ACL_ERROR_RT_MALLOC_FAILED),
+                         ACL_ERROR_RT_MEMORY_ALLOCATION),
                      "recorded ACL failure") == 0);
   ascify_test_recent_error_message = nullptr;
   assert(std::strcmp(ascify::cudaGetErrorString(
-                         ACL_ERROR_RT_MALLOC_FAILED),
+                         ACL_ERROR_RT_MEMORY_ALLOCATION),
                      "ACL runtime error") == 0);
 }
 

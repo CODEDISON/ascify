@@ -46,7 +46,8 @@ enum aclrtLastErrLevel {
 
 static const aclError ACL_SUCCESS = 0;
 static const aclError ACL_ERROR_RT_PARAM_INVALID = 1;
-static const aclError ACL_ERROR_RT_MALLOC_FAILED = 2;
+static const aclError ACL_ERROR_RT_MEMORY_ALLOCATION = 207001;
+static const aclError ACL_ERROR_RT_INVALID_DEVICEID = 107001;
 static const aclError ACL_ERROR_BAD_ALLOC = 200000;
 static const aclError ACL_ERROR_FEATURE_UNSUPPORTED = 200006;
 static const aclError ACL_ERROR_REPEAT_INITIALIZE = 100002;
