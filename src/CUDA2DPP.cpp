@@ -29,6 +29,9 @@ const std::map <llvm::StringRef, dppCounter> CUDA_INCLUDE_MAP {
   // Verified against CANN 9.0.0: acl_runtime.h does not exist; use acl/acl.h
   {"cuda.h",                                                {"acl/acl.h",                                                                                                  CONV_INCLUDE_CUDA_MAIN_H,    API_DRIVER, 0}},
   {"cuda_runtime.h",                                        {"acl/acl.h",                                                                                                  CONV_INCLUDE_CUDA_MAIN_H,    API_RUNTIME, 0}},
+  // The action admits only the configured SDK's direct runtime-API include
+  // after auditing observations of its preprocessor and ABI surface.
+  {"cuda_runtime_api.h", {"acl/acl.h", CONV_INCLUDE_CUDA_MAIN_H, API_RUNTIME, 0}},
   // acl_cub/aclcub.hpp not yet available in CANN 9.0.0; cub::BlockReduce needs software re-implementation
   {"cub/cub.cuh",                                          {"acl_cub/aclcub.hpp",                                                                                         CONV_INCLUDE,                API_CUB, 0}},
   // acl/acl_bf16.h does not exist in CANN 9.0.0; use simt_api/asc_bf16.h for bfloat16_t support

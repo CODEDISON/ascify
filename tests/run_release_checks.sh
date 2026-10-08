@@ -129,6 +129,12 @@ run_check "unsupported VFS overlay configuration refusal" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
 
+run_check "real CUDA runtime-API header admission and refusal" \
+  "$python" -B "$rewrite_dir/check_runtime_api_header.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+
 run_check "real Ascify NVIDIA sample-helper frontend closure" \
   sh "$rewrite_dir/check_sample_helper_compat.sh" \
     --binary "$ASCIFY_BINARY" \

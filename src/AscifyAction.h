@@ -24,6 +24,7 @@ THE SOFTWARE.
 
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <set>
 #include <utility>
 #include <vector>
@@ -142,6 +143,16 @@ private:
   ascify::DavC310TargetRecipe davC310TargetRecipe;
   bool firstHeader = false;
   bool needsCudaCompatHeader = false;
+  bool cudaRuntimeApiHeaderAdmitted = false;
+  bool cudaRuntimeApiBoundaryFailed = false;
+  bool cudaRuntimeApiStrictControlModified = false;
+  clang::SourceLocation cudaRuntimeApiSdkIdentityFailure;
+  std::set<unsigned> cudaRuntimeApiSdkFileIds;
+  std::set<std::string> cudaRuntimeApiSdkMacros;
+  std::set<std::string> cudaRuntimeApiExternalMacroUses;
+  std::map<unsigned, bool> cudaRuntimeApiCompilerInputAtExpansion;
+  std::map<std::string, std::set<std::string>> cudaRuntimeApiRetainedMacroDependencies;
+  std::set<std::string> cudaRuntimeApiRetainedPasteMacros;
   bool hasCudaCompatHeader = false;
   bool hasCudaCompatHeaderBeforeNvidiaHelper = false;
   bool needsDavC310TargetHeader = false;
@@ -178,6 +189,8 @@ private:
   void auditRawNvidiaSampleHelperToken(const clang::Token &token);
   void auditRawPublishedCompatTokensInFile(clang::FileID file);
   void auditActiveAscifyCudaCompatMacrosAtInsertion();
+  void observeCudaRuntimeApiMacroUse(const clang::Token &token);
+  bool auditCudaRuntimeApiSurface();
   void auditExternalNvidiaSampleHelperPreprocessorUse(
       clang::SourceLocation location,
       const clang::Token &macroNameToken,

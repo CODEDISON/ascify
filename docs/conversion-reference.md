@@ -6,12 +6,97 @@ the [English tutorial](user-guide.en.md) or [中文教程](user-guide.zh-CN.md).
 Supported APIs and limitations are described in the
 [compatibility reference](compatibility.md).
 
+## CUDA runtime-API includes
+
+A direct, unconditional literal `#include <cuda_runtime_api.h>` (or its quoted
+form) can use the same existing Runtime adapters as `cuda_runtime.h`. It must
+resolve to the physical `include/cuda_runtime_api.h` in explicit `--cuda-path`;
+macro includes, conditional includes, same-named user headers and virtual file
+overrides are rejected. The output uses ACL and Ascify compatibility declarations.
+This adds an include spelling; it does not expand supported Runtime APIs.
+Caller source and extra caller headers remain audited even when placed under
+the CUDA include directory. SDK ownership requires the actual runtime-API or
+compiler-bootstrap dependency chain as well as physical input identity.
+Its dependency roles are limited to verified Runtime and forced-wrapper
+relative paths; unknown SDK child files remain retained audit inputs.
+
+The projection rejects observations of CUDA SDK macros such as `CUDART_VERSION`
+and header guards, including conditions, inactive branches, macro replacement
+lists and pragma macro-stack operations in retained headers. User token pasting
+is rejected because unused paste macros can construct SDK names later. Native
+standard-library implementation paste macros remain available internally;
+unexpanded caller replacements that depend on them are rejected, including
+nested aliases. An arbitrary `-isystem` path grants no exemption. CUDA compiler
+conditions such as `__CUDACC__` are also rejected. One physical native-library
+condition is admitted by a boolean proof: in strict C++17 or later, the initial
+`!defined(__STRICT_ANSI__)` conjunct is false in both source and target builds,
+independently of CUDA or float128 macro values. Modifying that compiler control
+or using GNU language mode invalidates the proof. This does not promise that
+the entire CUDA and target C++ compilation modes are equivalent. Existing supported qualifier
+and API macro rewrites are admitted only in ordinary code. A source that uses
+an unadapted SDK record (including CUDA vector structs with a different target
+ABI) is rejected; `dim3` and existing explicit Runtime type adapters retain their
+separately documented boundaries. Unsupported APIs, including managed allocation,
+remain visible and fail target compilation instead of gaining a placeholder.
+Those adapters do not admit SDK record reflection or template-type arguments:
+`sizeof`, `alignof`, RTTI, class traits and template arguments can observe an
+unproved target ABI or constructor property even for `dim3`.
+SDK enum reflection is also rejected: an error-code adapter may use a native
+integer rather than preserve the source enum category.
+Compiler builtin classification and object-size inquiries also audit their
+original SDK operands, including a member pointer whose containing object
+has an unproved SDK layout. Direct native objects and constant aliases with
+proved native origins retain their behavior. Mutable, externally supplied,
+pointer-valued field and pointer-returning accessor origins are rejected when
+their containing object cannot be proved. Caller macro replacements containing
+these builtin inquiries are rejected because their future operands are unknown.
+Empty `cudaDeviceProp{}` and `cudaFuncAttributes{}` initializers retain the
+published zero-initialization contract without exposing SDK-only implicit
+subobjects. Nonempty positional aggregate lists are rejected because their
+SDK field order has no adapter proof.
+Caller function parameters containing an SDK enum and template returns of an
+SDK enum are rejected because their overload and type-selection domains are
+unproved. SDK enum conversion operators are also rejected: converting an enum
+adapter to a native integer can merge distinct conversion interfaces. Ordinary
+Runtime calls, error comparisons and non-template status returns retain the
+explicit adapter contract, including ordinary member-function status returns.
+Numeric SDK enum casts and constructions, arithmetic, ordering, switch conditions, array bounds
+and assignments to native integers are rejected. Symbolic equality/inequality
+within the same SDK enum and error-code truth preserve the adapter contract;
+the target's native error ordinals are not CUDA ordinals.
+The audit also visits instantiated function templates and generic lambdas.
+Caller dependent types are rejected even before instantiation; a future caller
+could supply an SDK record with a different target contract. This admission
+covers nondependent caller code, including ordinary explicit Runtime adapter
+functions. Native standard-library template implementation bodies do not grant
+this exemption to caller templates. Alignment operands and enclosing record
+layout observations are also audited.
+Retained declarations that reuse a mapped Runtime type name are rejected;
+their caller-owned namespace does not establish the SDK type identity.
+
+An explicit Clang resource directory changes header lookup. Its extra files
+remain retained inputs subject to this audit. A compiler-input exception
+requires matching bytes from the executable's own installed resources (or its
+exact build-tree resources) and the actual include chain rooted in the
+predefined CUDA runtime wrapper. A caller header or preinclude cannot inherit
+that exception from its location. Escaped caller pragma strings are rejected
+because they can conceal SDK macro names from raw-token inspection.
+Caller compiler inquiries such as `__has_include` and `__has_feature` are also
+rejected; SDK header availability and CUDA features can change after projection.
+
+`builtin_types.h`, `vector_types.h` and `cuda/cmath` do not have whole-header
+compatibility mappings. In particular, CUDA vector struct layouts and libcu++'s
+`cuda::` utilities cannot be inferred from similarly named target types or the
+standard `<cmath>` header. Generated source must compile against the target
+SDK without adding NVIDIA include directories.
+
 ## Input filesystem overlays
 
 Ascify rejects `-ivfsoverlay` before preprocessing. Its current LibTooling entry
 does not install the driver's overlay into the supplied file manager; accepting
 the option would silently parse different input bytes. This rejection applies
-to all conversions.
+to all conversions. Explicit remapped SDK contents also cannot qualify for a
+physical runtime-API header projection.
 
 ## Build options
 

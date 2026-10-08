@@ -31,9 +31,11 @@ THE SOFTWARE.
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/Expr.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/Stmt.h"
 #include "clang/AST/TypeLoc.h"
+#include "clang/Basic/FileManager.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/TokenKinds.h"
@@ -1383,6 +1385,209 @@ static const clang::Token *previousSignificantToken(
 
 static bool isUnqualifiedFloatMathName(llvm::StringRef name) {
   return name == "exp" || name == "log" || name == "sqrt" || name == "rsqrt";
+}
+
+// A new header projection must use the configured physical SDK, never a
+// same-named user header or a virtual override. This also anchors which macro
+// definitions and record declarations belong to the removed SDK surface.
+static bool pathIsWithinPhysicalDirectory(llvm::StringRef path,
+                                          llvm::StringRef directory) {
+  if (directory.empty() || path.empty())
+    return false;
+  llvm::SmallString<256> physicalRoot, physicalPath;
+  if (llvm::sys::fs::real_path(directory, physicalRoot) ||
+      llvm::sys::fs::real_path(path, physicalPath))
+    return false;
+  physicalRoot += "/";
+  return llvm::StringRef(physicalPath).starts_with(physicalRoot);
+}
+
+static bool pathIsWithinConfiguredCudaInclude(llvm::StringRef path) {
+  if (CudaPath.empty())
+    return false;
+  llvm::SmallString<256> root(CudaPath.getValue());
+  llvm::sys::path::append(root, "include");
+  return pathIsWithinPhysicalDirectory(path, root);
+}
+
+// These are the Runtime and forced-wrapper dependency roles verified with the
+// real SDK. Merely adding a native-header shadow (or another caller file) under
+// --cuda-path does not make it part of the removed SDK surface. Unknown SDK
+// dependencies remain retained audit inputs until their role is established.
+static bool isConfiguredCudaSdkDependencyRole(llvm::StringRef path) {
+  if (!pathIsWithinConfiguredCudaInclude(path))
+    return false;
+  llvm::SmallString<256> root(CudaPath.getValue()), physicalRoot, physicalFile;
+  llvm::sys::path::append(root, "include");
+  if (llvm::sys::fs::real_path(root, physicalRoot) ||
+      llvm::sys::fs::real_path(path, physicalFile))
+    return false;
+  const auto relative = llvm::StringRef(physicalFile).drop_front(physicalRoot.size() + 1);
+  static const std::set<std::string> dependencies = {
+      "builtin_types.h", "channel_descriptor.h", "cuda.h",
+      "cuda_device_runtime_api.h", "cuda_runtime.h", "cuda_runtime_api.h",
+      "cudart_platform.h", "curand.h", "curand_mtgp32.h", "curand_mtgp32_kernel.h",
+      "device_atomic_functions.h", "device_atomic_functions.hpp",
+      "device_launch_parameters.h", "device_types.h", "driver_functions.h",
+      "driver_types.h", "host_config.h", "host_defines.h", "library_types.h",
+      "math_constants.h", "surface_indirect_functions.h", "surface_types.h",
+      "texture_indirect_functions.h", "texture_types.h", "vector_functions.h",
+      "vector_functions.hpp", "vector_types.h", "sm_20_atomic_functions.hpp",
+      "sm_20_intrinsics.hpp", "sm_32_atomic_functions.hpp", "sm_60_atomic_functions.hpp",
+      "sm_61_intrinsics.hpp", "crt/common_functions.h", "crt/device_functions.h",
+      "crt/device_functions.hpp", "crt/device_double_functions.hpp", "crt/func_macro.h",
+      "crt/host_config.h", "crt/host_defines.h", "crt/host_runtime.h",
+      "crt/math_functions.h", "crt/math_functions.hpp", "crt/sm_70_rt.hpp",
+      "crt/storage_class.h", "nv/target", "nv/detail/__target_macros",
+      "nv/detail/__preprocessor"};
+  return dependencies.count(relative.str()) != 0;
+}
+
+static bool physicalFileIdentityMatches(llvm::StringRef path,
+                                        const clang::FileEntry &entry) {
+  llvm::sys::fs::UniqueID physical;
+  return !llvm::sys::fs::getUniqueID(path, physical) &&
+         physical == entry.getUniqueID();
+}
+
+static bool physicalSourceFileMatches(llvm::StringRef path,
+                                      const clang::FileEntry &entry,
+                                      clang::SourceManager &source) {
+  if (source.isFileOverridden(&entry) ||
+      !physicalFileIdentityMatches(path, entry))
+    return false;
+  const auto physical = llvm::MemoryBuffer::getFile(path);
+  if (!physical)
+    return false;
+  const auto file = source.translateFile(&entry);
+  if (file.isValid()) {
+    bool invalid = false;
+    const auto contents = source.getBufferData(file, &invalid);
+    return !invalid && contents == (*physical)->getBuffer();
+  }
+  const auto contents = source.getFileManager().getBufferForFile(path);
+  return contents && (*contents)->getBuffer() == (*physical)->getBuffer();
+}
+
+// A caller-selected ResourceDir is an include-search setting, not an owner
+// identity. Only compiler-bootstrap inputs with matching product resources
+// may be excluded from the retained SDK-observation audit.
+static std::string ownedClangResourceDirectory() {
+  static int executableAnchor;
+  const auto executable = llvm::sys::fs::getMainExecutable(nullptr,
+                                                         &executableAnchor);
+  const auto directory = llvm::sys::path::parent_path(executable);
+#ifdef ASCIFY_CLANG_RESOURCE_INSTALL_FROM_BINDIR
+  llvm::SmallString<256> installed(directory);
+  llvm::sys::path::append(installed, ASCIFY_CLANG_RESOURCE_INSTALL_FROM_BINDIR);
+  llvm::SmallString<256> wrapper(installed);
+  llvm::sys::path::append(wrapper, "include", "__clang_cuda_runtime_wrapper.h");
+  if (llvm::sys::fs::exists(wrapper))
+    return installed.str().str();
+#endif
+#if defined(ASCIFY_CLANG_RESOURCE_BUILD_DIR) && defined(ASCIFY_EXECUTABLE_BUILD_DIR)
+  if (llvm::sys::fs::equivalent(directory, ASCIFY_EXECUTABLE_BUILD_DIR))
+    return ASCIFY_CLANG_RESOURCE_BUILD_DIR;
+#endif
+  return {};
+}
+
+static bool isOwnedCudaCompilerInput(clang::FileID file,
+                                     clang::CompilerInstance &compiler) {
+  auto &source = compiler.getSourceManager();
+  const auto &resourceRoot = compiler.getHeaderSearchOpts().ResourceDir;
+  const auto ownedRoot = ownedClangResourceDirectory();
+  if (ownedRoot.empty() || file.isInvalid() ||
+      !pathIsWithinPhysicalDirectory(
+          source.getFilename(source.getLocForStartOfFile(file)), resourceRoot))
+    return false;
+  llvm::SmallString<256> physicalRoot;
+  if (llvm::sys::fs::real_path(resourceRoot, physicalRoot))
+    return false;
+  std::set<unsigned> visited;
+  while (file.isValid() && visited.insert(file.getHashValue()).second) {
+    const auto begin = source.getLocForStartOfFile(file);
+    const auto filename = source.getFilename(begin);
+    if (pathIsWithinPhysicalDirectory(filename, resourceRoot)) {
+      const auto *entry = source.getFileEntryForID(file);
+      if (entry == nullptr || !physicalSourceFileMatches(filename, *entry, source))
+        return false;
+      llvm::SmallString<256> physicalFile;
+      if (llvm::sys::fs::real_path(filename, physicalFile))
+        return false;
+      const auto relative = llvm::StringRef(physicalFile).drop_front(
+          physicalRoot.size() + 1);
+      llvm::SmallString<256> reference(ownedRoot);
+      llvm::sys::path::append(reference, relative);
+      const auto expected = llvm::MemoryBuffer::getFile(reference);
+      bool invalid = false;
+      const auto contents = source.getBufferData(file, &invalid);
+      if (!expected || invalid || contents != (*expected)->getBuffer())
+        return false;
+      const auto include = source.getSpellingLoc(source.getIncludeLoc(file));
+      if (llvm::sys::path::filename(filename) == "__clang_cuda_runtime_wrapper.h" &&
+          include.isValid() && source.getFileID(include) ==
+              compiler.getPreprocessor().getPredefinesFileID())
+        return true;
+    } else {
+      // A resource child cannot acquire compiler ownership through a caller
+      // header that merely intercepts an include in the forced wrapper.
+      const auto *entry = source.getFileEntryForID(file);
+      const bool sdkParent = isConfiguredCudaSdkDependencyRole(filename);
+      const bool nativeParent = source.isInSystemHeader(begin) &&
+          (pathIsWithinPhysicalDirectory(filename, "/usr/include") ||
+           pathIsWithinPhysicalDirectory(filename, "/usr/lib/gcc"));
+      if (entry == nullptr || (!sdkParent && !nativeParent) ||
+          !physicalSourceFileMatches(filename, *entry, source))
+        return false;
+    }
+    const auto include = source.getSpellingLoc(source.getIncludeLoc(file));
+    if (include.isInvalid() || source.isWrittenInMainFile(include))
+      return false;
+    file = source.getFileID(include);
+  }
+  return false;
+}
+
+static bool isConfiguredCudaRuntimeApiPath(llvm::StringRef path,
+                                           clang::SourceManager &source) {
+  if (!pathIsWithinConfiguredCudaInclude(path))
+    return false;
+  llvm::SmallString<256> expected(CudaPath.getValue()), physicalExpected,
+      physicalActual;
+  llvm::sys::path::append(expected, "include", "cuda_runtime_api.h");
+  if (llvm::sys::fs::real_path(expected, physicalExpected) ||
+      llvm::sys::fs::real_path(path, physicalActual) ||
+      physicalExpected != physicalActual)
+    return false;
+#if LLVM_VERSION_MAJOR >= 10
+  auto file = source.getFileManager().getFileRef(path);
+  if (!file) {
+    llvm::consumeError(file.takeError());
+    return false;
+  }
+  return physicalSourceFileMatches(physicalExpected, file->getFileEntry(), source);
+#else
+  const auto file = source.getFileManager().getFile(path);
+  return file && physicalSourceFileMatches(physicalExpected, **file, source);
+#endif
+}
+
+// Member-pointer class access changed with the value NestedNameSpecifier API.
+// Select the available primary API rather than guessing a version boundary.
+template <class Member>
+static auto runtimeHeaderMemberClass(const Member *member, int)
+    -> decltype(member->getClass(), clang::QualType()) {
+  return clang::QualType(member->getClass(), 0);
+}
+template <class Member>
+static auto runtimeHeaderMemberClass(const Member *member, long)
+    -> decltype(member->getQualifier().getAsType(), clang::QualType()) {
+  const auto qualifier = member->getQualifier();
+  using Qualifier = decltype(member->getQualifier());
+  if (qualifier.getKind() != Qualifier::Kind::Type)
+    return {};
+  return clang::QualType(qualifier.getAsType(), 0);
 }
 
 static bool requiresCudaCompatHeader(llvm::StringRef name) {
@@ -3560,6 +3765,22 @@ void AscifyAction::FileChanged(
       }
     }
   }
+  const auto *sdkEntry = sourceManager.getFileEntryForID(file);
+  const auto include = sourceManager.getSpellingLoc(sourceManager.getIncludeLoc(file));
+  const auto parentFile = include.isValid() ? sourceManager.getFileID(include) : clang::FileID();
+  const bool sdkRole = !sourceManager.isWrittenInMainFile(spelling) &&
+      isConfiguredCudaSdkDependencyRole(sourceManager.getFilename(spelling)) &&
+      (isConfiguredCudaRuntimeApiPath(sourceManager.getFilename(spelling), sourceManager) ||
+       (parentFile.isValid() &&
+        (cudaRuntimeApiSdkFileIds.count(parentFile.getHashValue()) ||
+         isOwnedCudaCompilerInput(parentFile, getCompilerInstance()))));
+  if (sdkRole) {
+    if (sdkEntry != nullptr && physicalSourceFileMatches(
+            sourceManager.getFilename(spelling), *sdkEntry, sourceManager))
+      cudaRuntimeApiSdkFileIds.insert(file.getHashValue());
+    else
+      cudaRuntimeApiSdkIdentityFailure = spelling;
+  }
   const unsigned frozenRole =
       frozenNvidiaSampleHelperFileRole(sourceManager, spelling);
   const bool parentInsideRemovedHelper =
@@ -3661,6 +3882,31 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
       localHeaderContext->inputEvidence->quotedIncludeParents.insert(parent);
   }
 
+  // A selected SDK header may not silently obtain a same-named dependency
+  // from a caller include directory. Account for quoted relative lookup
+  // first, then the configured include root; native-library dependencies
+  // without a corresponding SDK file remain subject to the retained audit.
+  const auto includeParent = SM.getFilename(SM.getExpansionLoc(hash_loc));
+  if (pathIsWithinConfiguredCudaInclude(includeParent)) {
+    llvm::SmallString<256> expected;
+    if (!is_angled) {
+      expected = llvm::sys::path::parent_path(includeParent);
+      llvm::sys::path::append(expected, file_name);
+    }
+    if (expected.empty() || !llvm::sys::fs::exists(expected)) {
+      expected = CudaPath.getValue();
+      llvm::sys::path::append(expected, "include", file_name);
+    }
+    if (llvm::sys::fs::exists(expected) &&
+        pathIsWithinConfiguredCudaInclude(expected)) {
+      llvm::SmallString<256> expectedPhysical, resolvedPhysical;
+      if (llvm::sys::fs::real_path(expected, expectedPhysical) ||
+          llvm::sys::fs::real_path(resolved_file_name, resolvedPhysical) ||
+          expectedPhysical != resolvedPhysical)
+        cudaRuntimeApiSdkIdentityFailure = hash_loc;
+    }
+  }
+
   const bool recognizedNvidiaHelper =
       isRecognizedNvidiaSampleHelperCuda(resolved_file_name);
   if (!SM.isWrittenInMainFile(hash_loc)) {
@@ -3699,6 +3945,21 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
       SM.isWrittenInMainFile(endFile) &&
       SM.getFileID(hashFile) == SM.getFileID(beginFile) &&
       SM.getFileID(beginFile) == SM.getFileID(endFile);
+  if (file_name == "cuda_runtime_api.h") {
+    if (!directRange || !directSpelling || preprocessorConditionalDepth != 0 ||
+        !isConfiguredCudaRuntimeApiPath(resolved_file_name, SM)) {
+      cudaRuntimeApiBoundaryFailed = true;
+      const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error,
+          "CUDA runtime-API header boundary: requires an unconditional direct "
+          "literal include of the physical --cuda-path/include/cuda_runtime_api.h");
+      getCompilerInstance().getDiagnostics().Report(hash_loc, diagnostic);
+      return;
+    }
+    cudaRuntimeApiHeaderAdmitted = true;
+    needsCudaCompatHeader = true;
+    auditActiveAscifyCudaCompatMacrosAtInsertion();
+  }
   if (file_name == "helper_functions.h" && directRange && directSpelling &&
       preprocessorConditionalDepth == 0 &&
       isFrozenOfficialNvidiaSampleHelperFunctionsPath(resolved_file_name)) {
@@ -5028,6 +5289,9 @@ void AscifyAction::Defined(const clang::Token &MacroNameTok,
 void AscifyAction::MacroUndefined(
     const clang::Token &MacroNameTok,
     const clang::MacroDefinition &MD) {
+  if (MacroNameTok.getIdentifierInfo() != nullptr &&
+      MacroNameTok.getIdentifierInfo()->getName() == "__STRICT_ANSI__")
+    cudaRuntimeApiStrictControlModified = true;
   auditExternalNvidiaSampleHelperPreprocessorUse(
       MacroNameTok.getLocation(), MacroNameTok, "#undef");
   auditFrozenNvidiaSampleHelperMacroDependency(
@@ -5045,6 +5309,31 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
     frontendHostMathBuiltinMacroDefined = true;
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
+  const auto definitionFile = sourceManager.getFileID(
+      sourceManager.getSpellingLoc(MacroNameTok.getLocation()));
+  if (name == "__STRICT_ANSI__" &&
+      (definitionFile != getCompilerInstance().getPreprocessor().getPredefinesFileID() ||
+       !sourceManager.isWrittenInBuiltinFile(MacroNameTok.getLocation())))
+    cudaRuntimeApiStrictControlModified = true;
+  if (definitionFile.isValid() &&
+      cudaRuntimeApiSdkFileIds.count(definitionFile.getHashValue()))
+    cudaRuntimeApiSdkMacros.insert(name.str());
+  else if (const auto *info = getCompilerInstance().getPreprocessor().getMacroInfo(
+               MacroNameTok.getIdentifierInfo())) {
+    auto &dependencies = cudaRuntimeApiRetainedMacroDependencies[name.str()];
+    for (const auto &token : info->tokens()) {
+      if (token.is(clang::tok::hashhash))
+        cudaRuntimeApiRetainedPasteMacros.insert(name.str());
+      if (token.getIdentifierInfo() == nullptr)
+        continue;
+      bool parameter = false;
+      if (info->isFunctionLike())
+        for (const auto *argument : info->params())
+          parameter |= argument == token.getIdentifierInfo();
+      if (!parameter)
+        dependencies.insert(token.getIdentifierInfo()->getName().str());
+    }
+  }
   const bool fromCompat = locationComesFromAscifyCudaCompat(
       sourceManager, MacroNameTok.getLocation());
   if (isAscifyCudaCompatReservedMacro(name) && !fromCompat) {
@@ -5175,9 +5464,635 @@ void AscifyAction::auditActiveAscifyCudaCompatMacrosAtInsertion() {
   }
 }
 
+void AscifyAction::observeCudaRuntimeApiMacroUse(const clang::Token &token) {
+  if (token.getIdentifierInfo() == nullptr)
+    return;
+  auto &source = getCompilerInstance().getSourceManager();
+  const auto location = source.getExpansionLoc(token.getLocation());
+  if (location.isInvalid())
+    return;
+  const auto file = source.getFileID(location);
+  // A consumed direct qualifier owns its official internal expansion chain,
+  // e.g. __global__ -> __annotate__. This is not an independent SDK macro
+  // observation. Conditional and replacement-list uses still fail raw audit.
+  if (token.getLocation().isMacroID()) {
+    clang::Token outer;
+    if (!clang::Lexer::getRawToken(location, outer, source,
+                                  getCompilerInstance().getLangOpts(), true)) {
+      const auto spelling = clang::Lexer::getSpelling(
+          outer, source, getCompilerInstance().getLangOpts());
+      if (spelling == "__global__" || spelling == "__device__" ||
+          spelling == "__shared__" || spelling == "__forceinline__" ||
+          spelling == "__align__")
+        return;
+    }
+  }
+  if (!file.isValid() || cudaRuntimeApiSdkFileIds.count(file.getHashValue()))
+    return;
+  const auto identity = file.getHashValue();
+  auto ownership = cudaRuntimeApiCompilerInputAtExpansion.find(identity);
+  if (ownership == cudaRuntimeApiCompilerInputAtExpansion.end())
+    ownership = cudaRuntimeApiCompilerInputAtExpansion.emplace(
+        identity, isOwnedCudaCompilerInput(file, getCompilerInstance())).first;
+  if (!ownership->second)
+    cudaRuntimeApiExternalMacroUses.insert(token.getIdentifierInfo()->getName().str());
+}
+
+bool AscifyAction::auditCudaRuntimeApiSurface() {
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  const auto reject = [&](clang::SourceLocation location,
+                          llvm::StringRef reason, llvm::StringRef name) {
+    const auto diagnostic = compiler.getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "CUDA runtime-API header boundary: %0 '%1'");
+    compiler.getDiagnostics().Report(location, diagnostic) << reason << name;
+    return false;
+  };
+  if (cudaRuntimeApiSdkIdentityFailure.isValid())
+    return reject(cudaRuntimeApiSdkIdentityFailure,
+                  "cannot prove physical SDK dependency contents",
+                  source.getFilename(cudaRuntimeApiSdkIdentityFailure));
+  const auto isSdkMacro = [&](llvm::StringRef name) {
+    return cudaRuntimeApiSdkMacros.count(name.str()) != 0;
+  };
+  const auto isCudaCompilerCondition = [](llvm::StringRef name) {
+    return name.starts_with("__CUDA") || name.starts_with("__NVCC");
+  };
+  const auto admittedCodeMacro = [&](llvm::StringRef name) {
+    const auto mapped = CUDA_RENAMES_MAP().find(name);
+    return mapped != CUDA_RENAMES_MAP().end() &&
+           !Statistics::isUnsupported(mapped->second);
+  };
+  std::set<std::string> unprovedRetainedMacros = cudaRuntimeApiRetainedPasteMacros;
+  unprovedRetainedMacros.insert(cudaRuntimeApiSdkMacros.begin(),
+                               cudaRuntimeApiSdkMacros.end());
+  for (const auto &macro : cudaRuntimeApiRetainedMacroDependencies)
+    for (const auto &dependency : macro.second)
+      if (isCudaCompilerCondition(dependency))
+        unprovedRetainedMacros.insert(dependency);
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (const auto &macro : cudaRuntimeApiRetainedMacroDependencies)
+      for (const auto &dependency : macro.second)
+        if (unprovedRetainedMacros.count(dependency) &&
+            unprovedRetainedMacros.insert(macro.first).second)
+          changed = true;
+  }
+  // Expansion callbacks also expose SDK macro names assembled by ##. Raw
+  // scanning below covers inactive branches, #if/#ifdef/defined, replacement
+  // lists, undefinitions and string operands to pragma macro-stack operations.
+  for (const auto &name : cudaRuntimeApiExternalMacroUses) {
+    if (isSdkMacro(name) && !admittedCodeMacro(name))
+      return reject({}, "observes removed SDK macro", name);
+    if (isCudaCompilerCondition(name) && !admittedCodeMacro(name))
+      return reject({}, "observes CUDA compiler condition", name);
+  }
+  auto &preprocessor = compiler.getPreprocessor();
+  const auto *strict = preprocessor.getMacroInfo(
+      preprocessor.getIdentifierInfo("__STRICT_ANSI__"));
+  bool strictModeInvariant = !cudaRuntimeApiStrictControlModified &&
+      compiler.getLangOpts().CPlusPlus17 && !compiler.getLangOpts().GNUMode &&
+      strict != nullptr && strict->getNumTokens() == 1 &&
+      source.getFileID(strict->getDefinitionLoc()) == preprocessor.getPredefinesFileID() &&
+      source.isWrittenInBuiltinFile(strict->getDefinitionLoc()) &&
+      clang::Lexer::getSpelling(strict->getReplacementToken(0), source,
+                               compiler.getLangOpts()) == "1";
+  for (const auto &macro : compiler.getPreprocessorOpts().Macros) {
+    const llvm::StringRef definition(macro.first);
+    if (definition.split('=').first == "__STRICT_ANSI__" ||
+        definition.contains('\n') || definition.contains('\r'))
+      strictModeInvariant = false;
+  }
+  // This is a boolean proof of one native-library condition, not a blanket
+  // exemption for __CUDACC__. Both the CUDA parser and the documented strict
+  // C++17 target compile define __STRICT_ANSI__, so the first conjunct is
+  // false independently of CUDA and native float128 macro values.
+  const auto isFalseNativeStrictCondition = [&](llvm::StringRef data,
+                                                unsigned offset) {
+    if (!strictModeInvariant || offset >= data.size())
+      return false;
+    const auto begin = data.rfind('\n', offset);
+    const auto end = data.find('\n', offset);
+    const auto line = data.slice(begin == llvm::StringRef::npos ? 0 : begin + 1,
+                                end == llvm::StringRef::npos ? data.size() : end);
+    std::string compact;
+    for (const char character : line)
+      if (character != ' ' && character != '\t' && character != '\r')
+        compact += character;
+    return compact == "#if!defined(__STRICT_ANSI__)&&defined(_GLIBCXX_USE_FLOAT128)&&!defined(__CUDACC__)";
+  };
+  std::set<unsigned> auditedFiles;
+  std::set<unsigned> nativeFiles;
+  for (auto info = source.fileinfo_begin(); info != source.fileinfo_end(); ++info) {
+    const auto file = source.translateFile(info->first);
+    if (file.isInvalid() || cudaRuntimeApiSdkFileIds.count(file.getHashValue()))
+      continue;
+    const auto begin = source.getLocForStartOfFile(file);
+    // Product-matching bytes and the actual forced-wrapper include ancestry
+    // establish compiler ownership. Extra files under a caller ResourceDir
+    // remain audited, including -include and -isystem inputs.
+    if (isOwnedCudaCompilerInput(file, compiler))
+      continue;
+    auditedFiles.insert(file.getHashValue());
+    const auto *entry = source.getFileEntryForID(file);
+    const bool physicalNativeSystemHeader =
+        source.isInSystemHeader(begin) && entry != nullptr &&
+        !source.isFileOverridden(entry) &&
+        physicalSourceFileMatches(source.getFilename(begin), *entry, source) &&
+        (pathIsWithinPhysicalDirectory(source.getFilename(begin), "/usr/include") ||
+         pathIsWithinPhysicalDirectory(source.getFilename(begin), "/usr/lib/gcc"));
+    if (physicalNativeSystemHeader)
+      nativeFiles.insert(file.getHashValue());
+    bool invalid = false;
+    const auto data = source.getBufferData(file, &invalid);
+    if (invalid)
+      return reject(begin, "cannot audit retained file", source.getFilename(begin));
+    clang::Lexer lexer(begin, compiler.getLangOpts(), data.begin(), data.begin(), data.end());
+    clang::Token token;
+    bool directive = false;
+    bool pragmaOperand = false;
+    bool pragmaDirective = false;
+    lexer.LexFromRawLexer(token);
+    while (!token.is(clang::tok::eof)) {
+      if (token.isAtStartOfLine()) {
+        directive = token.is(clang::tok::hash);
+        pragmaDirective = false;
+      }
+      if (token.is(clang::tok::hashhash) && !physicalNativeSystemHeader)
+        return reject(token.getLocation(), "unproved retained token paste", "##");
+      if (token.is(clang::tok::r_paren))
+        pragmaOperand = false;
+      if (token.isAnyIdentifier()) {
+        const auto name = clang::Lexer::getSpelling(token, source, compiler.getLangOpts());
+        if (name == "_Pragma" || name == "__pragma")
+          pragmaOperand = true;
+        if (directive && name == "pragma")
+          pragmaDirective = true;
+        if (!physicalNativeSystemHeader &&
+            (name == "__has_include" || name == "__has_include_next" ||
+             name == "__has_feature" || name == "__has_extension" ||
+             name == "__has_builtin" || name == "__has_attribute" ||
+             name == "__has_cpp_attribute" || name == "__is_identifier" ||
+             name == "__is_target_arch" || name == "__is_target_environment"))
+          return reject(token.getLocation(), "unproved retained compiler inquiry", name);
+        if (!physicalNativeSystemHeader && directive &&
+            (name == "__builtin_classify_type" || name == "__builtin_object_size" ||
+             name == "__builtin_dynamic_object_size" || name == "__builtin_dump_struct" ||
+             name == "__builtin_preserve_access_index"))
+          return reject(token.getLocation(), "unproved retained compiler SDK inquiry", name);
+        const bool provedFalseNativeCondition = physicalNativeSystemHeader &&
+            directive && name == "__CUDACC__" &&
+            isFalseNativeStrictCondition(data, source.getFileOffset(token.getLocation()));
+        if (!provedFalseNativeCondition &&
+            isSdkMacro(name) && (directive || !admittedCodeMacro(name)))
+          return reject(token.getLocation(), "observes removed SDK macro", name);
+        if (!provedFalseNativeCondition && isCudaCompilerCondition(name) &&
+            (directive || !admittedCodeMacro(name)))
+          return reject(token.getLocation(), "observes CUDA compiler condition", name);
+        // A caller need not spell ## itself: e.g. an unexpanded replacement
+        // may call glibc __CONCAT through multiple aliases. Native paste
+        // implementation files are retained, but their caller-side use has
+        // no proof of the removed SDK observation or future expansion domain.
+        if (!physicalNativeSystemHeader &&
+            unprovedRetainedMacros.count(name) &&
+            (directive || !admittedCodeMacro(name)))
+          return reject(token.getLocation(), "unproved retained macro dependency", name);
+      } else if ((directive || pragmaOperand) && token.is(clang::tok::string_literal)) {
+        const auto literal = clang::Lexer::getSpelling(token, source, compiler.getLangOpts());
+        if ((pragmaOperand || pragmaDirective) && !physicalNativeSystemHeader &&
+            literal.find('\\') != std::string::npos)
+          return reject(token.getLocation(), "unproved escaped pragma string", literal);
+        for (const auto &name : cudaRuntimeApiSdkMacros) {
+          if (literal.find(name) != std::string::npos)
+            return reject(token.getLocation(), "observes SDK macro in pragma/replacement string", name);
+        }
+        if (literal.find("__CUDA") != std::string::npos ||
+            literal.find("__NVCC") != std::string::npos)
+          return reject(token.getLocation(), "observes CUDA compiler condition in string", literal);
+      }
+      lexer.LexFromRawLexer(token);
+    }
+  }
+  class RecordAudit : public clang::RecursiveASTVisitor<RecordAudit> {
+  public:
+    RecordAudit(clang::ASTContext &context, clang::SourceManager &source,
+                const std::set<unsigned> &sdk,
+                const std::set<unsigned> &audited,
+                const std::set<unsigned> &native)
+        : context(context), source(source), sdk(sdk), audited(audited), native(native) {}
+    bool shouldVisitTemplateInstantiations() const { return true; }
+    bool shouldVisitImplicitCode() const { return true; }
+    bool TraverseInitListExpr(clang::InitListExpr *expression) {
+      // An empty adapter initializer zero-initializes the published fields.
+      // Its semantic form also contains SDK-only subobject initializers whose
+      // source location is the caller's '{}'. Do not mistake those implicit
+      // expressions for separately written SDK type observations. Nonempty
+      // lists still expose SDK aggregate order and remain fully audited.
+      const auto *syntax = expression->isSemanticForm()
+          ? expression->getSyntacticForm() : expression;
+      const auto *record = expression->getType()->getAs<clang::RecordType>();
+      if (syntax != nullptr && record != nullptr) {
+        const auto *declaration = record->getDecl();
+        const auto definition = source.getSpellingLoc(declaration->getLocation());
+        const auto name = declaration->getName();
+        if (definition.isValid() &&
+            sdk.count(source.getFileID(definition).getHashValue()) &&
+            declaration->getDeclContext()->getRedeclContext()->isTranslationUnit() &&
+            (name == "cudaDeviceProp" || name == "cudaFuncAttributes")) {
+          if (syntax->getNumInits() == 0)
+            return true;
+          const auto location = source.getExpansionLoc(syntax->getBeginLoc());
+          if (location.isValid() &&
+              audited.count(source.getFileID(location).getHashValue())) {
+            badLocation = location;
+            badName = name.str();
+            badReason = "unproved SDK aggregate initializer";
+            return false;
+          }
+        }
+      }
+      return clang::RecursiveASTVisitor<RecordAudit>::TraverseInitListExpr(expression);
+    }
+    bool VisitTypeLoc(clang::TypeLoc type) {
+      return inspect(type.getType(), type.getBeginLoc());
+    }
+    bool VisitExpr(clang::Expr *expression) {
+      // Aggregate value-initialization of an admitted runtime adapter also
+      // creates zero-initializers for SDK-only subobjects. They are not a
+      // separately written SDK type observation. Explicit TypeLocs and all
+      // reflection operands remain audited.
+      if (llvm::isa<clang::ImplicitValueInitExpr>(expression))
+        return true;
+      return inspect(expression->getType(), expression->getExprLoc());
+    }
+    bool VisitFunctionDecl(clang::FunctionDecl *function) {
+      const auto location = source.getExpansionLoc(function->getLocation());
+      if (location.isInvalid() ||
+          !audited.count(source.getFileID(location).getHashValue()) ||
+          native.count(source.getFileID(location).getHashValue()))
+        return true;
+      for (const auto *parameter : function->parameters())
+        if (!inspectEnumInterface(parameter->getType(), location))
+          return false;
+      // Ordinary error-code returns are part of the explicit runtime API
+      // contract. A template return instead exposes an unproved future
+      // interface/type-selection domain.
+      const auto result = function->getReturnType();
+      const auto *status = result->getAs<clang::EnumType>();
+      if (function->getTemplatedKind() == clang::FunctionDecl::TK_NonTemplate &&
+          !llvm::isa<clang::CXXConversionDecl>(function) &&
+          status != nullptr && status->getDecl()->getName() == "cudaError" &&
+          status->getDecl()->getDeclContext()->isTranslationUnit()) {
+        const auto declaration = source.getSpellingLoc(status->getDecl()->getLocation());
+        if (declaration.isValid() &&
+            sdk.count(source.getFileID(declaration).getHashValue()))
+          return true;
+      }
+      return inspectEnumInterface(result, location);
+    }
+    bool VisitTypeDecl(clang::TypeDecl *declaration) {
+      const auto location = source.getExpansionLoc(declaration->getLocation());
+      if (location.isInvalid() ||
+          !audited.count(source.getFileID(location).getHashValue()))
+        return true;
+      const auto name = declaration->getName();
+      const auto mapped = CUDA_RUNTIME_TYPE_NAME_MAP.find(name);
+      if (name != "dim3" &&
+          (mapped == CUDA_RUNTIME_TYPE_NAME_MAP.end() ||
+           Statistics::isUnsupported(mapped->second)))
+        return true;
+      badLocation = location;
+      badName = name.str();
+      badReason = "conflicting retained runtime type identity";
+      return false;
+    }
+    bool VisitTemplateSpecializationTypeLoc(clang::TemplateSpecializationTypeLoc type) {
+      for (unsigned i = 0; i < type.getNumArgs(); ++i) {
+        const auto argument = type.getArgLoc(i);
+        if (argument.getArgument().getKind() == clang::TemplateArgument::Type &&
+            !inspect(argument.getArgument().getAsType(), argument.getLocation(), false))
+          return false;
+      }
+      return true;
+    }
+    bool VisitTypeTraitExpr(clang::TypeTraitExpr *expression) {
+      for (unsigned i = 0; i < expression->getNumArgs(); ++i)
+        if (!inspect(expression->getArg(i)->getType(), expression->getExprLoc(), false))
+          return false;
+      return true;
+    }
+    bool VisitUnaryExprOrTypeTraitExpr(clang::UnaryExprOrTypeTraitExpr *expression) {
+      return inspect(expression->getTypeOfArgument(), expression->getExprLoc(), false);
+    }
+    bool VisitCXXTypeidExpr(clang::CXXTypeidExpr *expression) {
+      if (expression->isTypeOperand())
+        return inspect(expression->getTypeOperand(context), expression->getExprLoc(), false);
+      return inspect(expression->getExprOperand()->getType(), expression->getExprLoc(), false);
+    }
+    bool VisitOffsetOfExpr(clang::OffsetOfExpr *expression) {
+      return inspect(expression->getTypeSourceInfo()->getType(),
+                     expression->getExprLoc(), false);
+    }
+    bool VisitAlignedAttr(clang::AlignedAttr *attribute) {
+      if (!attribute->isAlignmentExpr() && attribute->getAlignmentType() != nullptr)
+        return inspect(attribute->getAlignmentType()->getType(),
+                       attribute->getLocation(), false);
+      return true;
+    }
+    bool VisitCastExpr(clang::CastExpr *expression) {
+      const auto location = source.getExpansionLoc(expression->getExprLoc());
+      if (location.isInvalid() ||
+          !audited.count(source.getFileID(location).getHashValue()))
+        return true;
+      const auto *enumeration = sdkEnumeration(
+          expression->getSubExpr()->IgnoreParenImpCasts()->getType());
+      const auto destination = expression->getType();
+      const auto *constructed = sdkEnumeration(destination);
+      if (constructed != nullptr && constructed == enumeration)
+        return true;
+      if (constructed != nullptr && constructed != enumeration) {
+        badLocation = location;
+        badName = constructed->getNameAsString();
+        badReason = "unproved SDK enum numeric observation";
+        return false;
+      }
+      if (enumeration == nullptr ||
+          (!destination->isIntegerType() && !destination->isRealFloatingType() &&
+           !destination->isPointerType()))
+        return true;
+      // Error truth and symbolic equality belong to the error adapter;
+      // numeric ordinals do not. In particular ACL's invalid-parameter code
+      // is different from CUDA's enum ordinal 1.
+      if (destination->isBooleanType() && enumeration->getName() == "cudaError")
+        return true;
+      if (llvm::isa<clang::ImplicitCastExpr>(expression)) {
+        const auto parents = context.getParents(*expression);
+        if (parents.size() == 1)
+          if (const auto *comparison = parents[0].get<clang::BinaryOperator>())
+            if ((comparison->getOpcode() == clang::BO_EQ ||
+                 comparison->getOpcode() == clang::BO_NE) &&
+                sdkEnumeration(comparison->getLHS()->IgnoreParenImpCasts()->getType()) == enumeration &&
+                sdkEnumeration(comparison->getRHS()->IgnoreParenImpCasts()->getType()) == enumeration)
+              return true;
+      }
+      badLocation = location;
+      badName = enumeration->getNameAsString();
+      badReason = "unproved SDK enum numeric observation";
+      return false;
+    }
+    bool VisitCallExpr(clang::CallExpr *expression) {
+      const auto location = source.getExpansionLoc(expression->getExprLoc());
+      if (location.isInvalid() ||
+          !audited.count(source.getFileID(location).getHashValue()) ||
+          native.count(source.getFileID(location).getHashValue()))
+        return true;
+      const auto *callee = expression->getDirectCallee();
+      if (callee == nullptr || callee->getBuiltinID() == 0 ||
+          expression->getNumArgs() == 0)
+        return true;
+      const auto name = callee->getName();
+      inquiryVariables.clear();
+      if (name == "__builtin_classify_type")
+        return inspectCompilerInquiry(expression->getArg(0)->IgnoreParenImpCasts(),
+                                      expression->getExprLoc(), false);
+      if (name == "__builtin_object_size" ||
+          name == "__builtin_dynamic_object_size" ||
+          name == "__builtin_dump_struct" ||
+          name == "__builtin_preserve_access_index")
+        return inspectCompilerInquiry(expression->getArg(0),
+                                      expression->getExprLoc(), true);
+      return true;
+    }
+    clang::SourceLocation badLocation;
+    std::string badName;
+    std::string badReason = "unproved SDK record ABI";
+  private:
+    const clang::EnumDecl *sdkEnumeration(clang::QualType type) const {
+      if (type.isNull())
+        return nullptr;
+      const auto *enumeration = type->getAs<clang::EnumType>();
+      if (enumeration == nullptr)
+        return nullptr;
+      const auto *declaration = enumeration->getDecl();
+      const auto definition = source.getSpellingLoc(declaration->getLocation());
+      return definition.isValid() &&
+          sdk.count(source.getFileID(definition).getHashValue()) ? declaration : nullptr;
+    }
+    bool rejectInquiryOrigin(clang::SourceLocation location) {
+      location = source.getExpansionLoc(location);
+      if (location.isInvalid() ||
+          !audited.count(source.getFileID(location).getHashValue()))
+        return true;
+      badLocation = location;
+      badName = "<pointer origin>";
+      badReason = "unproved compiler SDK inquiry";
+      return false;
+    }
+    bool inspectCompilerInquiry(const clang::Expr *operand,
+                                clang::SourceLocation location,
+                                bool inspectPointerOrigin) {
+      // Builtin prototypes can erase the argument to void*. Inspect the
+      // original operand, and for object/layout inquiries its pointer origin
+      // as well: '&properties.name[0]' otherwise hides the containing SDK ABI.
+      if (!inspect(operand->IgnoreParenImpCasts()->getType(), location, false)) {
+        if (badReason == "unproved SDK record ABI" ||
+            badReason == "unproved SDK enum reflection")
+          badReason = "unproved compiler SDK inquiry";
+        return false;
+      }
+      if (inspectPointerOrigin) {
+        const auto *original = operand->IgnoreParenImpCasts();
+        if (const auto *reference = llvm::dyn_cast<clang::DeclRefExpr>(original)) {
+          if (const auto *variable = llvm::dyn_cast<clang::VarDecl>(reference->getDecl())) {
+            if (variable->getType()->isPointerType()) {
+              // Mutable and externally supplied pointers can acquire an SDK
+              // object after initialization. Constant aliases must prove the
+              // initializer's origin, rather than stop at their erased type.
+              if (!variable->getType().isConstQualified() || !variable->hasInit() ||
+                  !inquiryVariables.insert(variable).second)
+                return rejectInquiryOrigin(location);
+              return inspectCompilerInquiry(variable->getInit(), location, true);
+            }
+          }
+        }
+        // A pointer-returning accessor/lambda or pointer-valued field has no
+        // local origin proof. Its erased result can hide an SDK record.
+        if (original->getType()->isPointerType() &&
+            (llvm::isa<clang::CallExpr>(original) ||
+             llvm::isa<clang::MemberExpr>(original) ||
+             llvm::isa<clang::CXXThisExpr>(original)))
+          return rejectInquiryOrigin(location);
+        for (auto *child : operand->children())
+          if (auto *expression = llvm::dyn_cast_or_null<clang::Expr>(child))
+            if (!inspectCompilerInquiry(expression, location, true))
+              return false;
+      }
+      return true;
+    }
+    bool inspectEnumInterface(clang::QualType type, clang::SourceLocation location) {
+      if (type.isNull())
+        return true;
+      if (const auto *pointer = type->getAs<clang::PointerType>())
+        return inspectEnumInterface(pointer->getPointeeType(), location);
+      if (const auto *reference = type->getAs<clang::ReferenceType>())
+        return inspectEnumInterface(reference->getPointeeType(), location);
+      if (const auto *array = context.getAsArrayType(type))
+        return inspectEnumInterface(array->getElementType(), location);
+      if (const auto *atomic = type->getAs<clang::AtomicType>())
+        return inspectEnumInterface(atomic->getValueType(), location);
+      if (const auto *member = type->getAs<clang::MemberPointerType>()) {
+        if (!inspectEnumInterface(member->getPointeeType(), location))
+          return false;
+        const auto owner = runtimeHeaderMemberClass(member, 0);
+        if (owner.isNull()) {
+          badLocation = location;
+          badName = "<member-pointer qualifier>";
+          badReason = "unproved caller member pointer interface";
+          return false;
+        }
+        return inspectEnumInterface(owner, location);
+      }
+      if (const auto *function = type->getAs<clang::FunctionProtoType>()) {
+        if (!inspectEnumInterface(function->getReturnType(), location))
+          return false;
+        for (const auto parameter : function->param_types())
+          if (!inspectEnumInterface(parameter, location))
+            return false;
+      }
+      const auto *enumeration = type->getAs<clang::EnumType>();
+      if (enumeration == nullptr)
+        return true;
+      const auto *declaration = enumeration->getDecl();
+      const auto definition = source.getSpellingLoc(declaration->getLocation());
+      if (definition.isInvalid() ||
+          !sdk.count(source.getFileID(definition).getHashValue()))
+        return true;
+      badLocation = location;
+      badName = declaration->getNameAsString();
+      badReason = "unproved caller SDK enum function interface";
+      return false;
+    }
+    bool inspect(clang::QualType type, clang::SourceLocation location,
+                 bool permitExplicitAdapters = true) {
+      location = source.getExpansionLoc(location);
+      if (location.isInvalid() || type.isNull() ||
+          !audited.count(source.getFileID(location).getHashValue()))
+        return true;
+      // A caller's dependent type has no proven exclusion of the mapped SDK
+      // records. This includes SFINAE/member probes, not only sizeof and
+      // currently instantiated reflection. Keep the admission nondependent;
+      // native implementation templates remain independently audited.
+      if (type->isDependentType() &&
+          !native.count(source.getFileID(location).getHashValue())) {
+        badLocation = location;
+        badName = "<dependent type>";
+        badReason = "unproved retained dependent type observation";
+        return false;
+      }
+      if (const auto *pointer = type->getAs<clang::PointerType>())
+        return inspect(pointer->getPointeeType(), location, permitExplicitAdapters);
+      if (const auto *reference = type->getAs<clang::ReferenceType>())
+        return inspect(reference->getPointeeType(), location, permitExplicitAdapters);
+      if (const auto *array = context.getAsArrayType(type))
+        return inspect(array->getElementType(), location, permitExplicitAdapters);
+      if (const auto *atomic = type->getAs<clang::AtomicType>())
+        return inspect(atomic->getValueType(), location, permitExplicitAdapters);
+      if (const auto *member = type->getAs<clang::MemberPointerType>()) {
+        if (!inspect(member->getPointeeType(), location, permitExplicitAdapters))
+          return false;
+        const auto owner = runtimeHeaderMemberClass(member, 0);
+        if (owner.isNull()) {
+          badLocation = location;
+          badName = "<member-pointer qualifier>";
+          badReason = "unproved retained member pointer type";
+          return false;
+        }
+        return inspect(owner, location, permitExplicitAdapters);
+      }
+      if (const auto *function = type->getAs<clang::FunctionProtoType>()) {
+        if (!inspect(function->getReturnType(), location, permitExplicitAdapters))
+          return false;
+        for (const auto parameter : function->param_types())
+          if (!inspect(parameter, location, permitExplicitAdapters))
+            return false;
+      }
+      if (!permitExplicitAdapters)
+        if (const auto *enumeration = type->getAs<clang::EnumType>()) {
+          const auto *declaration = enumeration->getDecl();
+          const auto definition = source.getSpellingLoc(declaration->getLocation());
+          if (definition.isValid() &&
+              sdk.count(source.getFileID(definition).getHashValue())) {
+            badLocation = location;
+            badName = declaration->getNameAsString();
+            badReason = "unproved SDK enum reflection";
+            return false;
+          }
+        }
+      const auto *record = type->getAs<clang::RecordType>();
+      if (record == nullptr)
+        return true;
+      const auto *declaration = record->getDecl();
+      const auto definition = source.getSpellingLoc(declaration->getLocation());
+      if (definition.isInvalid() ||
+          !sdk.count(source.getFileID(definition).getHashValue())) {
+        // A caller record can carry a mapped SDK object as a field or base.
+        // Reflection on that enclosing record still observes the removed SDK
+        // layout, even when the reflected spelling never names the SDK type.
+        if (!permitExplicitAdapters) {
+          const auto *complete = declaration->getDefinition();
+          if (complete != nullptr && reflectedRecords.insert(complete).second) {
+            for (const auto *field : complete->fields())
+              if (!inspect(field->getType(), location, false))
+                return false;
+            if (const auto *cxx = llvm::dyn_cast<clang::CXXRecordDecl>(complete))
+              for (const auto &base : cxx->bases())
+                if (!inspect(base.getType(), location, false))
+                  return false;
+          }
+        }
+        return true;
+      }
+      const auto name = declaration->getName();
+      // Existing explicit runtime type adapters retain their published
+      // contracts. dim3 retains the separately proven host-local initializer
+      // rule; native vector records and unadapted SDK records have no ABI proof.
+      // Runtime adapters do not prove record reflection or template-type
+      // equivalence. In particular CUDA dim3 is default/constexpr constructible
+      // whereas the native target class has a different constructor contract.
+      if (permitExplicitAdapters &&
+          declaration->getDeclContext()->getRedeclContext()->isTranslationUnit() &&
+          name == "dim3")
+        return true;
+      const auto mapped = CUDA_RUNTIME_TYPE_NAME_MAP.find(name);
+      if (permitExplicitAdapters &&
+          declaration->getDeclContext()->getRedeclContext()->isTranslationUnit() &&
+          (name == "cudaDeviceProp" || name == "cudaFuncAttributes") &&
+          mapped != CUDA_RUNTIME_TYPE_NAME_MAP.end() &&
+          !Statistics::isUnsupported(mapped->second))
+        return true;
+      badLocation = location;
+      badName = name.str();
+      return false;
+    }
+    clang::ASTContext &context;
+    clang::SourceManager &source;
+    const std::set<unsigned> &sdk;
+    const std::set<unsigned> &audited;
+    const std::set<unsigned> &native;
+    std::set<const clang::RecordDecl *> reflectedRecords;
+    std::set<const clang::VarDecl *> inquiryVariables;
+  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles);
+  if (!records.TraverseDecl(compiler.getASTContext().getTranslationUnitDecl()))
+    return reject(records.badLocation, records.badReason, records.badName);
+  return true;
+}
+
 void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
                                 const clang::MacroDefinition &MD,
                                 clang::SourceRange Range) {
+  observeCudaRuntimeApiMacroUse(MacroNameTok);
   if (MacroNameTok.getIdentifierInfo() == nullptr)
     return;
   clang::SourceManager &sourceManager =
@@ -5978,6 +6893,8 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
 }
 
 void AscifyAction::EndSourceFileAction() {
+  if (cudaRuntimeApiBoundaryFailed)
+    return;
   finalizePendingNvidiaSampleHelperPragma();
   if (needsCudaCompatHeader &&
       nvidiaSampleHelperOutputMacroEverDefined) {
@@ -6356,6 +7273,10 @@ void AscifyAction::ExecuteAction() {
   // Reset the contextual token watcher above before any diagnostic early exit.
   if (getCompilerInstance().getDiagnostics().hasErrorOccurred())
     return;
+  if (cudaRuntimeApiHeaderAdmitted && !auditCudaRuntimeApiSurface()) {
+    cudaRuntimeApiBoundaryFailed = true;
+    return;
+  }
   ascify::UniformBlockReductionStats uniformReduction;
   std::string uniformReductionError;
   if (!ascify::ValidateUniformBlockReduction(
