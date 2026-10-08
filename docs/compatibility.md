@@ -44,7 +44,7 @@ ownership, rebinding, callback ordering, rollback, and normal process exit.
 | Surface | Contract and limit |
 |---|---|
 | Allocation, copies, and streams | Preserve admitted CUDA call shapes through typed ACL adapters and propagate errors; this is not the entire CUDA Runtime API |
-| Vector constructors | Use the target's vector types and constructors rather than redeclaring a competing ABI |
+| Vector constructors | Use the target's vector types and constructors; the reviewed CUDA `float3`/`uint3` record ABI is rejected before publication as described below |
 | Default `dim3` | Only proven, direct, host-local declarations of CUDA's uninitialized type gain explicit `(1,1,1)` initialization; global, device, array, macro, and user-defined cases remain unchanged |
 | Event recording | Explicit streams are preserved; the omitted-stream form queries the current default stream only on the admitted legacy/ACL 1.17+ surface, otherwise returns unsupported |
 | Stream flags | Default creation uses the runtime adapter; nonblocking creation returns unsupported, and unknown bits return invalid-parameter status |
@@ -67,6 +67,43 @@ insufficient. Without these APIs, including the compatibility headers remains
 valid, but calling a symbol copy is rejected at compile time. This transfer
 path remains experimental; validate generated code with the target toolchain.
 Host-memory substitutes and fabricated registrations are not supported fallbacks.
+
+### CUDA float3 and uint3
+
+The reviewed CUDA 13.4.1 `float3` and `uint3` are three-field records with
+size 12, alignment 4, field offsets 0/4/8, and array stride 12. Native DPP
+types with the same spellings on the reviewed CANN 9.1 target are extended
+vectors with size and alignment 16. Leaving those spellings unchanged cannot
+preserve the CUDA record ABI.
+
+Ascify diagnoses observed uses of those reviewed records with
+`CUDA vec3 ABI boundary` and publishes no translated output. This includes
+pointer/array declarations, aliases, layout observations, helper results with
+deduced types, function signatures, and dormant template patterns. Existing
+complete output is preserved on failure. Ordinary scalar types, `dim3` scalar
+construction, vector2/vector4, and distinct user records named `float3` or
+`uint3` do not match this rejection rule.
+
+This is a bounded rejection profile, not an automatic adapter or a guarantee
+for every SDK. Recognition requires the parsed `vector_types.h` buffer to
+match the reviewed CUDA 13.4.1 bytes, the canonical global record identity,
+and a complete record definition. Diagnostics report the actual AST layout;
+a source `#pragma pack` that changes it is also rejected. Exact reviewed SDK
+and Clang 23 provider
+buffers are exempt from use auditing so implicit SDK declarations alone do
+not reject scalar programs. Other system headers, `-isystem`, `#pragma
+system_header`, and presumed `#line` filenames do not grant exemptions.
+The hash check requires LLVM 13 or newer. Unknown or modified SDK headers
+remain outside this rule and receive no vec3 rewrite authority; successful
+generation on those headers does not prove their target ABI.
+
+An explicit three-field storage adapter needs separate source provenance,
+type identity, overload/ADL, template, and ABI escape proofs before it can be
+automatically substituted. Native vector consumers and `uint3`/`dim3`
+conversions need their own explicit semantics. The
+[real frontend matrix](../tests/rewrite/check_vec3_abi_boundary.py) checks
+rejection, legal controls, and output preservation; this safety rejection
+does not count as a conversion or object success-rate gain.
 
 Relevant checks: [target ABI](../tests/rewrite/check_target_abi_compat.sh),
 [device properties](../tests/rewrite/check_device_properties.sh),

@@ -63,6 +63,7 @@ THE SOFTWARE.
 #include "StringUtils.h"
 #include "DeviceMemoryLowering.h"
 #include "UniformBlockReduction.h"
+#include "CudaVec3AbiBoundary.h"
 
 using namespace ascify;
 
@@ -7275,6 +7276,17 @@ void AscifyAction::ExecuteAction() {
     return;
   if (cudaRuntimeApiHeaderAdmitted && !auditCudaRuntimeApiSurface()) {
     cudaRuntimeApiBoundaryFailed = true;
+    return;
+  }
+  std::string vec3AbiError;
+  clang::SourceLocation vec3AbiLocation;
+  if (!ascify::ValidateCudaVec3AbiBoundary(
+          getCompilerInstance().getASTContext(), vec3AbiError, vec3AbiLocation)) {
+    const auto diagnostic =
+        getCompilerInstance().getDiagnostics().getCustomDiagID(
+            clang::DiagnosticsEngine::Error, "CUDA vec3 ABI boundary: %0");
+    getCompilerInstance().getDiagnostics().Report(vec3AbiLocation, diagnostic)
+        << vec3AbiError;
     return;
   }
   ascify::UniformBlockReductionStats uniformReduction;
