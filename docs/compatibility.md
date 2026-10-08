@@ -70,6 +70,41 @@ Host-memory substitutes and fabricated registrations are not supported fallbacks
 
 ### CUDA float3 and uint3
 
+The frozen CUDA 13.4.1 CUB `util_type.cuh` and its CCCL
+`cuda/std/__tuple_dir/vector_types.h` and
+`thrust/type_traits/is_trivially_relocatable.h` dependencies contain dormant
+`CubVector<...,3>`, vector tuple-interface, and relocation-trait definitions even in scalar
+`BlockReduce<float>` programs. Their internal
+declarations are exempt only when the parsed and physical bytes match the
+reviewed provider, its real include ancestry reaches the reviewed physical
+`cub/cub.cuh` under the explicitly configured CUDA root, and that literal
+main-file include has a successfully queued mapping to `acl_cub/aclcub.hpp`.
+A CUB/tuple provider parsed through an independently retained include, a copied
+CUB entry, arbitrary system-header status, or a CUB path/name grants no
+exemption. Caller uses of
+the SDK records, including their inherited `CubVector<...,3>` ABI, remain
+subject to the boundary.
+This proof follows the declarations' actual parsed include ancestry. It does
+not prove that every later guarded include of the same physical header is
+removed. In the reviewed mixed case, a mapped CUB umbrella followed by a
+direct `cub/util_type.cuh` include passes generation, but the existing token
+rewrite emits unsupported `aclcub/util_type.cuh`; real CCEC compilation fails
+with that missing header and produces no object. Generation alone grants no
+target support for this mixed include pattern.
+The frozen `cub/block/radix_rank_sort_operations.cuh`,
+`thrust/detail/functional/actor.h`, `cuda/std/__memory/compressed_pair.h`,
+`cub/device/dispatch/dispatch_transform.cuh`, `cuda/__iterator/zip_iterator.h`,
+and `cub/detail/binary_search_helpers.cuh`
+have dependent tuple `get` lookups that list vector overloads even in scalar
+templates. Only when both the exact physical/parsed use site and candidate
+tuple provider are proved to belong to the actually mapped CUB closure, the
+boundary audits the return type rather than unselected parameter types.
+The exact removed `cuda/std/__mdspan/submdspan_helper.h` provider's
+tuple `get` using-declarations receive the same candidate-provider and return
+checks; importing this overload set does not select a CUDA vector overload.
+Concrete caller types, resolved function references, and other lookups retain
+the full audit.
+
 The reviewed CUDA 13.4.1 `float3` and `uint3` are three-field records with
 size 12, alignment 4, field offsets 0/4/8, and array stride 12. Native DPP
 types with the same spellings on the reviewed CANN 9.1 target are extended

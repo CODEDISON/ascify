@@ -97,6 +97,22 @@ def main():
         ["-nocudainc", "-nocudalib", "-I", str(no_sdk), "-I", str(Path(args.cuda_path) / "include")])
     cases["packed_sdk_layout"] = ('#pragma pack(push,1)\n#include <vector_types.h>\nstatic_assert(alignof(float3)==1, "packed CUDA record");\nvoid observer(){float3 v={1,2,3};}\n#pragma pack(pop)', False,
         ["-nocudainc", "-nocudalib", "-I", str(no_sdk), "-I", str(Path(args.cuda_path) / "include")])
+    cccl = Path(args.cuda_path) / "include/cccl"
+    cub_extra = ["-I", str(cccl)]
+    cases["real_cub_scalar"] = ('#include <cub/cub.cuh>\n__global__ void observer(float* p){p[0]=1;}', True, cub_extra)
+    cases["real_cub_block_reduce"] = ('#include <cub/cub.cuh>\n__global__ void observer(float* p){'
+        'using Reduce=cub::BlockReduce<float,32>; __shared__ Reduce::TempStorage storage;'
+        'float result=Reduce(storage).Sum(p[threadIdx.x]); if(threadIdx.x==0)p[0]=result;}', True, cub_extra)
+    cases["real_cub_caller_sdk_vec3"] = ('#include <cub/cub.cuh>\nvoid observer(){uint3 v={1,2,3};}', False, cub_extra)
+    cases["real_cub_caller_export_vec3"] = ('#include <cub/cub.cuh>\nusing Future=cub::CubVector<float,3>;', False, cub_extra)
+    cases["direct_util_type_kept"] = ('#include <cub/util_type.cuh>\n__global__ void observer(float* p){p[0]=1;}', False, cub_extra)
+    cases["direct_tuple_interface_kept"] = ('#include <cuda/std/tuple>\n__global__ void observer(float* p){p[0]=1;}', False, cub_extra)
+    copied_entry = headers / "copied_cub/cub"
+    copied_entry.mkdir(parents=True)
+    # Exact entry bytes at a different physical origin do not gain authority.
+    shutil.copyfile(cccl / "cub/cub.cuh", copied_entry / "cub.cuh")
+    cases["copied_cub_entry_scalar"] = ('#include <cub/cub.cuh>\n__global__ void observer(float* p){p[0]=1;}', False,
+        ["-I", str(copied_entry.parent), *cub_extra])
     alternate_resource = root / "alternate_resource"
     shutil.copytree(Path(args.resource_dir) / "include", alternate_resource / "include")
     alternate_wrapper = alternate_resource / "include/__clang_cuda_runtime_wrapper.h"

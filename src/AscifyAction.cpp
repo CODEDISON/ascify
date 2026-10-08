@@ -4130,8 +4130,12 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
     // The raw identifier pass also sees tokens inside include spellings (for
     // example both `cub` tokens in <cub/cub.cuh>).  Make the preprocessor's
     // include rewrite the sole owner of that span.
-    insertSemanticReplacement(
+    const bool inserted = insertSemanticReplacement(
         Rep, clang::FullSourceLoc{sl, SM}, sl, replacementEnd);
+    if (inserted && file_name == "cub/cub.cuh" &&
+        name == "acl_cub/aclcub.hpp" && directRange && directSpelling)
+      mappedCubIncludes.push_back(
+          {hash_loc, filenameEnd, resolved_file_name.str()});
     return;
   }
 
@@ -7475,7 +7479,8 @@ void AscifyAction::ExecuteAction() {
   std::string vec3AbiError;
   clang::SourceLocation vec3AbiLocation;
   if (!ascify::ValidateCudaVec3AbiBoundary(
-          getCompilerInstance().getASTContext(), vec3AbiError, vec3AbiLocation)) {
+          getCompilerInstance().getASTContext(), CudaPath.getValue(),
+          mappedCubIncludes, vec3AbiError, vec3AbiLocation)) {
     const auto diagnostic =
         getCompilerInstance().getDiagnostics().getCustomDiagID(
             clang::DiagnosticsEngine::Error, "CUDA vec3 ABI boundary: %0");

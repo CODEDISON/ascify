@@ -35,6 +35,7 @@ THE SOFTWARE.
 #include "clang/Frontend/FrontendAction.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "DavC310TargetRecipe.h"
+#include "CudaVec3AbiBoundary.h"
 #include "ReplacementsFrontendActionFactory.h"
 #include "Statistics.h"
 
@@ -160,6 +161,7 @@ private:
   bool hasDavC310TargetHeader = false;
   bool hasDavC310SimdTargetHeader = false;
   bool hasCubCompatHeader = false;
+  std::vector<ascify::CudaVec3MappedCubInclude> mappedCubIncludes;
   bool pragmaOnce = false;
   clang::SourceLocation firstHeaderLoc;
   clang::SourceLocation firstCubCompatHeaderLoc;
