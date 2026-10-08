@@ -220,6 +220,17 @@ def main():
         cccl_macros.write_bytes(cccl_macros.read_bytes() + b"\n")
         cases["sdk_cccl_modified_dependency"] = (
             DIRECT.read_text(), False, "physical SDK dependency contents")
+        retained_provider = sdk_mirror / "include/cccl/caller_scope_provider.h"
+        retained_provider.write_text('#include <caller_scope_leaf.h>\n')
+        (sdk_mirror / "include/caller_scope_leaf.h").write_text(
+            'constexpr int scope_observed() { return 42; }\n')
+        (sdk_mirror / "include/cccl/caller_scope_leaf.h").write_text(
+            '#if defined(__CUDACC__)\nconstexpr int scope_observed() { return 1; }\n'
+            '#else\nconstexpr int scope_observed() { return 0; }\n#endif\n')
+        cases["sdk_retained_dependency_observer"] = (
+            INCLUDE + '#include "' + str(retained_provider) + '"\n'
+            'static_assert(scope_observed() == 1, "retained compiler observation");\n',
+            False, "CUDA compiler condition")
         dependency = Path(args.cuda_path).resolve() / "include/vector_types.h"
         dependency_shadow = work / "overridden_vector_types.h"
         dependency_shadow.write_bytes(dependency.read_bytes() + b"\n")
@@ -239,6 +250,8 @@ def main():
             before = hashlib.sha256(source.read_bytes()).hexdigest()
             resource = copied_resources if label.startswith("resource_") or label == "copied_resources_positive" else args.resource_dir
             sdk = sdk_mirror if label.startswith("sdk_root_") or label == "sdk_mirror_positive" else args.cuda_path
+            if label == "sdk_retained_dependency_observer":
+                sdk = sdk_mirror
             if label == "sdk_cccl_modified_dependency":
                 sdk = cccl_shadow
             argv = [args.binary, str(source), "--default-preprocessor",
@@ -247,7 +260,8 @@ def main():
                     "--clang-resource-directory=" + str(resource),
                     "-o", str(output), "--", "-x", "cuda", "-std=c++17",
                     "-I" + str(work)]
-            if label in ("sdk_cccl_search_positive", "sdk_cccl_modified_dependency"):
+            if label in ("sdk_cccl_search_positive", "sdk_cccl_modified_dependency",
+                         "sdk_retained_dependency_observer"):
                 argv.remove("--default-preprocessor")
                 argv.extend(["-fgpu-rdc", "-I" + str(Path(sdk) / "include/cccl"),
                              "-I" + str(Path(sdk) / "nvvm/include")])

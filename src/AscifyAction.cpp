@@ -3927,12 +3927,18 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
       localHeaderContext->inputEvidence->quotedIncludeParents.insert(parent);
   }
 
-  // A selected SDK header may not silently obtain a same-named dependency
-  // from a caller include directory. Account for quoted relative lookup
+  // A removed SDK or owned compiler header may not silently obtain a
+  // same-named dependency from a caller directory. Retained SDK parents keep
+  // their normal lookup and remain subject to the retained observation audit.
+  // Account for quoted relative lookup
   // first, then the configured include root; native-library dependencies
   // without a corresponding SDK file remain subject to the retained audit.
   const auto includeParent = SM.getFilename(SM.getExpansionLoc(hash_loc));
-  if (pathIsWithinConfiguredCudaInclude(includeParent)) {
+  const auto includeParentFile = SM.getFileID(SM.getExpansionLoc(hash_loc));
+  const bool removedSdkParent = includeParentFile.isValid() &&
+      (cudaRuntimeApiSdkFileIds.count(includeParentFile.getHashValue()) ||
+       isOwnedCudaCompilerInput(includeParentFile, getCompilerInstance()));
+  if (removedSdkParent) {
     llvm::SmallString<256> expected;
     if (!is_angled) {
       expected = llvm::sys::path::parent_path(includeParent);
