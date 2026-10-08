@@ -149,6 +149,11 @@ def main():
         "retained_record_collision": (INCLUDE + 'namespace own { struct cudaDeviceProp { int value; }; }\nown::cudaDeviceProp value;\n', False, "conflicting retained runtime type identity"),
         "retained_alias_collision": (INCLUDE + 'namespace own { using cudaFuncAttributes = int; }\nown::cudaFuncAttributes value;\n', False, "conflicting retained runtime type identity"),
         "native_standard_templates": (INCLUDE + '#include <type_traits>\nstatic_assert(std::is_integral<int>::value, "integral");\nstatic_assert(std::is_floating_point<float>::value, "floating");\nstruct PlainRecord { int value; };\nstatic_assert(std::is_standard_layout<PlainRecord>::value, "layout");\n', True, ""),
+        "native_cstdio": (INCLUDE + '#include <cstdio>\nint output() { return std::printf("native stdio\\n"); }\n', True, ""),
+        "native_cstdio_mvs_define": (INCLUDE + '#define __MVS__ 1\n#undef __MVS__\n#include <cstdio>\n', False, "native stdarg control"),
+        "native_cstdio_mvs_undef": (INCLUDE + '#undef __MVS__\n#include <cstdio>\n', False, "native stdarg control"),
+        "native_cstdio_mvs_rebind": (INCLUDE + '#define __MVS__ 0\n#undef __MVS__\n#define __MVS__ 0\n#undef __MVS__\n#include <cstdio>\n', False, "native stdarg control"),
+        "native_cstdio_mvs_commandline": (INCLUDE + '#include <cstdio>\n', False, "native stdarg control"),
         "unsupported_managed": (INCLUDE + 'cudaError_t managed(float** value) { return cudaMallocManaged(value, sizeof(float)); }\n', True, ""),
     }
     fixture_hash = hashlib.sha256(DIRECT.read_bytes()).hexdigest()
@@ -197,6 +202,12 @@ def main():
         cases["resource_observer"] = (resource_source, False, "removed SDK macro")
         cases["resource_preinclude_observer"] = (INCLUDE + 'static_assert(resource_observed() == 1, "SDK branch");\n', False, "removed SDK macro")
         cases["copied_resources_positive"] = (DIRECT.read_text(), True, "")
+        stdarg_shadow_resources = work / "stdarg_shadow_resources"
+        shutil.copytree(args.resource_dir, stdarg_shadow_resources)
+        stdarg_shadow = stdarg_shadow_resources / "include/stdarg.h"
+        stdarg_shadow.write_bytes(stdarg_shadow.read_bytes() + b"\n")
+        cases["resource_stdarg_shadow"] = (INCLUDE + '#include <cstdio>\n',
+                                            False, "unproved retained compiler inquiry")
         sdk_mirror = work / "sdk_mirror"
         sdk_mirror.mkdir()
         shutil.copytree(Path(args.cuda_path) / "include", sdk_mirror / "include")
@@ -249,6 +260,8 @@ def main():
             source.write_text(text)
             before = hashlib.sha256(source.read_bytes()).hexdigest()
             resource = copied_resources if label.startswith("resource_") or label == "copied_resources_positive" else args.resource_dir
+            if label == "resource_stdarg_shadow":
+                resource = stdarg_shadow_resources
             sdk = sdk_mirror if label.startswith("sdk_root_") or label == "sdk_mirror_positive" else args.cuda_path
             if label == "sdk_retained_dependency_observer":
                 sdk = sdk_mirror
@@ -261,7 +274,7 @@ def main():
                     "-o", str(output), "--", "-x", "cuda", "-std=c++17",
                     "-I" + str(work)]
             if label in ("sdk_cccl_search_positive", "sdk_cccl_modified_dependency",
-                         "sdk_retained_dependency_observer"):
+                         "sdk_retained_dependency_observer", "resource_stdarg_shadow") or label.startswith("native_cstdio"):
                 argv.remove("--default-preprocessor")
                 argv.extend(["-fgpu-rdc", "-I" + str(Path(sdk) / "include/cccl"),
                              "-I" + str(Path(sdk) / "nvvm/include")])
@@ -281,6 +294,8 @@ def main():
                 argv.append("-I" + str(shadow_bootstrap))
             if label == "gnu_language_mode":
                 argv.append("-std=gnu++17")
+            if label == "native_cstdio_mvs_commandline":
+                argv.append("-U__MVS__")
             if label in ("isystem_observer", "isystem_false_native_guard", "isystem_dependent_function"):
                 argv.extend(["-isystem", str(system_observer)])
             result = subprocess.run(argv, capture_output=True, text=True, timeout=60)

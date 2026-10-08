@@ -146,6 +146,7 @@ private:
   bool cudaRuntimeApiHeaderAdmitted = false;
   bool cudaRuntimeApiBoundaryFailed = false;
   bool cudaRuntimeApiStrictControlModified = false;
+  bool cudaRuntimeApiMvsControlModified = false;
   clang::SourceLocation cudaRuntimeApiSdkIdentityFailure;
   std::set<unsigned> cudaRuntimeApiSdkFileIds;
   std::set<std::string> cudaRuntimeApiSdkMacros;

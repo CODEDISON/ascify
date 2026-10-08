@@ -35,7 +35,15 @@ conditions such as `__CUDACC__` are also rejected. One physical native-library
 condition is admitted by a boolean proof: in strict C++17 or later, the initial
 `!defined(__STRICT_ANSI__)` conjunct is false in both source and target builds,
 independently of CUDA or float128 macro values. Modifying that compiler control
-or using GNU language mode invalidates the proof. This does not promise that
+or using GNU language mode invalidates the proof.
+
+On the verified Linux source and target builds, the product's physical
+`stdarg.h` entered from native `/usr/include/stdio.h` also admits its exact
+`defined(__MVS__) && __has_include_next(<stdarg.h>)` condition: `__MVS__` is
+absent, so the inquiry cannot change that branch. Caller or command-line
+definitions and undefinitions of `__MVS__` invalidate this proof. A modified
+resource copy and other inquiries remain rejected.
+This does not promise that
 the entire CUDA and target C++ compilation modes are equivalent. Existing supported qualifier
 and API macro rewrites are admitted only in ordinary code. A source that uses
 an unadapted SDK record (including CUDA vector structs with a different target

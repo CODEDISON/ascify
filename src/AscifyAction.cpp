@@ -1617,6 +1617,48 @@ static bool isConfiguredCudaRuntimeApiPath(llvm::StringRef path,
 #endif
 }
 
+// The Linux stdio entry may use the product's stdarg header even though it is
+// outside the forced CUDA wrapper ancestry. This proves only that exact file,
+// not ownership of its resource directory or any other inquiry in the file.
+static bool productStdargFromNativeStdio(clang::FileID file,
+                                        clang::CompilerInstance &compiler) {
+  auto &source = compiler.getSourceManager();
+  const auto begin = source.getLocForStartOfFile(file);
+  const auto path = source.getFilename(begin);
+  const auto &resources = compiler.getHeaderSearchOpts().ResourceDir;
+  const auto owned = ownedClangResourceDirectory();
+  llvm::SmallString<256> selected(resources), reference(owned), physicalSelected,
+      physicalPath;
+  llvm::sys::path::append(selected, "include", "stdarg.h");
+  llvm::sys::path::append(reference, "include", "stdarg.h");
+  const auto *entry = source.getFileEntryForID(file);
+  if (owned.empty() || entry == nullptr ||
+      llvm::sys::fs::real_path(selected, physicalSelected) ||
+      llvm::sys::fs::real_path(path, physicalPath) ||
+      physicalSelected != physicalPath ||
+      !physicalSourceFileMatches(path, *entry, source))
+    return false;
+  bool invalid = false;
+  const auto expected = llvm::MemoryBuffer::getFile(reference);
+  const auto contents = source.getBufferData(file, &invalid);
+  if (!expected || invalid || contents != (*expected)->getBuffer())
+    return false;
+  const auto include = source.getSpellingLoc(source.getIncludeLoc(file));
+  if (include.isInvalid())
+    return false;
+  const auto parentFile = source.getFileID(include);
+  if (parentFile.isInvalid())
+    return false;
+  const auto parentBegin = source.getLocForStartOfFile(parentFile);
+  const auto parentPath = source.getFilename(parentBegin);
+  const auto *parentEntry = source.getFileEntryForID(parentFile);
+  llvm::SmallString<256> physicalParent;
+  return parentEntry != nullptr && source.isInSystemHeader(parentBegin) &&
+      !llvm::sys::fs::real_path(parentPath, physicalParent) &&
+      physicalParent == "/usr/include/stdio.h" &&
+      physicalSourceFileMatches(parentPath, *parentEntry, source);
+}
+
 // Member-pointer class access changed with the value NestedNameSpecifier API.
 // Select the available primary API rather than guessing a version boundary.
 template <class Member>
@@ -5344,6 +5386,9 @@ void AscifyAction::MacroUndefined(
   if (MacroNameTok.getIdentifierInfo() != nullptr &&
       MacroNameTok.getIdentifierInfo()->getName() == "__STRICT_ANSI__")
     cudaRuntimeApiStrictControlModified = true;
+  if (MacroNameTok.getIdentifierInfo() != nullptr &&
+      MacroNameTok.getIdentifierInfo()->getName() == "__MVS__")
+    cudaRuntimeApiMvsControlModified = true;
   auditExternalNvidiaSampleHelperPreprocessorUse(
       MacroNameTok.getLocation(), MacroNameTok, "#undef");
   auditFrozenNvidiaSampleHelperMacroDependency(
@@ -5355,6 +5400,8 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
     return;
   const llvm::StringRef name =
       MacroNameTok.getIdentifierInfo()->getName();
+  if (name == "__MVS__")
+    cudaRuntimeApiMvsControlModified = true;
   // Rewritten builtin tokens are preprocessed again by the target compiler.
   // Refuse a translation unit that gives that output name macro semantics.
   if (name == "__builtin_fmaxf" || name == "__builtin_elementwise_min")
@@ -5611,12 +5658,23 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
       source.isWrittenInBuiltinFile(strict->getDefinitionLoc()) &&
       clang::Lexer::getSpelling(strict->getReplacementToken(0), source,
                                compiler.getLangOpts()) == "1";
+  bool nativeMvsAbsent = !cudaRuntimeApiMvsControlModified &&
+      compiler.getTarget().getTriple().isOSLinux() &&
+      preprocessor.getMacroInfo(preprocessor.getIdentifierInfo("__MVS__")) == nullptr;
+  bool nativeMvsControlPolluted = cudaRuntimeApiMvsControlModified;
   for (const auto &macro : compiler.getPreprocessorOpts().Macros) {
     const llvm::StringRef definition(macro.first);
     if (definition.split('=').first == "__STRICT_ANSI__" ||
         definition.contains('\n') || definition.contains('\r'))
       strictModeInvariant = false;
+    if (definition.split('=').first == "__MVS__" ||
+        definition.contains('\n') || definition.contains('\r'))
+      nativeMvsAbsent = false;
+    if (definition.split('=').first == "__MVS__")
+      nativeMvsControlPolluted = true;
   }
+  if (nativeMvsControlPolluted)
+    return reject({}, "observes native stdarg control", "__MVS__");
   // This is a boolean proof of one native-library condition, not a blanket
   // exemption for __CUDACC__. Both the CUDA parser and the documented strict
   // C++17 target compile define __STRICT_ANSI__, so the first conjunct is
@@ -5634,6 +5692,20 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
       if (character != ' ' && character != '\t' && character != '\r')
         compact += character;
     return compact == "#if!defined(__STRICT_ANSI__)&&defined(_GLIBCXX_USE_FLOAT128)&&!defined(__CUDACC__)";
+  };
+  const auto isFalseNativeStdargCondition = [&](llvm::StringRef data,
+                                                unsigned offset) {
+    if (!nativeMvsAbsent || offset >= data.size())
+      return false;
+    const auto begin = data.rfind('\n', offset);
+    const auto end = data.find('\n', offset);
+    const auto line = data.slice(begin == llvm::StringRef::npos ? 0 : begin + 1,
+                                end == llvm::StringRef::npos ? data.size() : end);
+    std::string compact;
+    for (const char character : line)
+      if (character != ' ' && character != '\t' && character != '\r')
+        compact += character;
+    return compact == "#ifdefined(__MVS__)&&__has_include_next(<stdarg.h>)";
   };
   std::set<unsigned> auditedFiles;
   std::set<unsigned> nativeFiles;
@@ -5657,6 +5729,7 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
          pathIsWithinPhysicalDirectory(source.getFilename(begin), "/usr/lib/gcc"));
     if (physicalNativeSystemHeader)
       nativeFiles.insert(file.getHashValue());
+    const bool productNativeStdarg = productStdargFromNativeStdio(file, compiler);
     bool invalid = false;
     const auto data = source.getBufferData(file, &invalid);
     if (invalid)
@@ -5682,7 +5755,10 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
           pragmaOperand = true;
         if (directive && name == "pragma")
           pragmaDirective = true;
-        if (!physicalNativeSystemHeader &&
+        const bool provedFalseStdargInquiry = productNativeStdarg && directive &&
+            name == "__has_include_next" &&
+            isFalseNativeStdargCondition(data, source.getFileOffset(token.getLocation()));
+        if (!physicalNativeSystemHeader && !provedFalseStdargInquiry &&
             (name == "__has_include" || name == "__has_include_next" ||
              name == "__has_feature" || name == "__has_extension" ||
              name == "__has_builtin" || name == "__has_attribute" ||
