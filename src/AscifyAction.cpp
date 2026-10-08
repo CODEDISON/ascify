@@ -5974,12 +5974,31 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
             if ((comparison->getOpcode() == clang::BO_EQ ||
                  comparison->getOpcode() == clang::BO_NE) &&
                 sdkEnumeration(comparison->getLHS()->IgnoreParenImpCasts()->getType()) == enumeration &&
-                sdkEnumeration(comparison->getRHS()->IgnoreParenImpCasts()->getType()) == enumeration)
+                sdkEnumeration(comparison->getRHS()->IgnoreParenImpCasts()->getType()) == enumeration &&
+                provedSdkEnumEquality(comparison, enumeration))
               return true;
       }
       badLocation = location;
       badName = enumeration->getNameAsString();
       badReason = "unproved SDK enum numeric observation";
+      return false;
+    }
+    bool VisitBinaryOperator(clang::BinaryOperator *expression) {
+      const auto location = source.getExpansionLoc(expression->getExprLoc());
+      if (location.isInvalid() ||
+          !audited.count(source.getFileID(location).getHashValue()) ||
+          (expression->getOpcode() != clang::BO_EQ &&
+           expression->getOpcode() != clang::BO_NE))
+        return true;
+      const auto *enumeration = sdkEnumeration(
+          expression->getLHS()->IgnoreParenImpCasts()->getType());
+      if (enumeration == nullptr ||
+          sdkEnumeration(expression->getRHS()->IgnoreParenImpCasts()->getType()) != enumeration ||
+          provedSdkEnumEquality(expression, enumeration))
+        return true;
+      badLocation = location;
+      badName = enumeration->getNameAsString();
+      badReason = "unproved SDK enum symbolic comparison";
       return false;
     }
     bool VisitCallExpr(clang::CallExpr *expression) {
@@ -6009,6 +6028,25 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
     std::string badName;
     std::string badReason = "unproved SDK record ABI";
   private:
+    bool provedSdkEnumEquality(const clang::BinaryOperator *comparison,
+                              const clang::EnumDecl *enumeration) const {
+      // The supported error symbols and memcpy directions have distinct target
+      // values. Device attributes do not: two CUDA attributes share one adapter.
+      if (enumeration->getName() == "cudaError" ||
+          enumeration->getName() == "cudaMemcpyKind")
+        return true;
+      const auto *left = llvm::dyn_cast<clang::DeclRefExpr>(
+          comparison->getLHS()->IgnoreParenImpCasts());
+      const auto *right = llvm::dyn_cast<clang::DeclRefExpr>(
+          comparison->getRHS()->IgnoreParenImpCasts());
+      if (left == nullptr || right == nullptr ||
+          left->getDecl() != right->getDecl() ||
+          !llvm::isa<clang::EnumConstantDecl>(left->getDecl()))
+        return false;
+      const auto mapped = CUDA_RUNTIME_TYPE_NAME_MAP.find(left->getDecl()->getName());
+      return mapped != CUDA_RUNTIME_TYPE_NAME_MAP.end() &&
+          !Statistics::isUnsupported(mapped->second);
+    }
     bool inspectEnumNumericOperand(const clang::Expr *operand,
                                    clang::SourceLocation location) {
       location = source.getExpansionLoc(location);

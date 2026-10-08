@@ -74,8 +74,12 @@ Runtime calls, error comparisons and non-template status returns retain the
 explicit adapter contract, including ordinary member-function status returns.
 Numeric SDK enum casts and constructions, arithmetic, ordering, switch conditions,
 array bounds, alignment values, bit-field widths, enumerator initializers and
-assignments to native integers are rejected. Symbolic equality/inequality
-within the same SDK enum and error-code truth preserve the adapter contract;
+assignments to native integers are rejected. Symbolic equality/inequality is
+admitted only within the supported error-code or memory-copy-direction domains,
+whose mapped symbols have distinct target values, or between two references to
+the same mapped enum constant. Other SDK enum comparisons are rejected because
+distinct source attributes can share a target adapter value. Ordinary device
+attribute API calls and error-code truth retain their adapter contracts;
 the target's native error ordinals are not CUDA ordinals.
 The audit also visits instantiated function templates and generic lambdas.
 Caller dependent types are rejected even before instantiation; a future caller
