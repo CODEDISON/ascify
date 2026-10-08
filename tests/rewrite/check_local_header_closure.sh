@@ -32,7 +32,14 @@ require_text "localHeaderContext" "$factory"
 require_text "StringRef resolved_file_name" "$action"
 require_text "file ? file->getName() : StringRef()" "$action"
 require_text "const std::string resolvedPath = resolved_file_name.str()" "$action"
-require_absent "file->getFileEntry()" "$action"
+# This guards resolved include-path handling in PPCallbackProxy. Other code
+# legitimately accesses FileEntryRef's underlying entry for physical identity.
+inclusion_callback=$(sed -n '/^  void InclusionDirective(/,/^  void PragmaDirective(/p' "$action")
+if [ -z "$inclusion_callback" ] ||
+   printf '%s\n' "$inclusion_callback" | grep -F -- 'file->getFileEntry()' >/dev/null; then
+  echo "local-header callback lost FileEntryRef include-path handling" >&2
+  exit 1
+fi
 require_text "localHeaderContext->observe" "$action"
 require_text "if (isAngled)" "$closure"
 require_text "ascifySourceWithLocalHeaderClosure" "$main"
