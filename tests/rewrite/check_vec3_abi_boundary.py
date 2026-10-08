@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -96,6 +97,19 @@ def main():
         ["-nocudainc", "-nocudalib", "-I", str(no_sdk), "-I", str(Path(args.cuda_path) / "include")])
     cases["packed_sdk_layout"] = ('#pragma pack(push,1)\n#include <vector_types.h>\nstatic_assert(alignof(float3)==1, "packed CUDA record");\nvoid observer(){float3 v={1,2,3};}\n#pragma pack(pop)', False,
         ["-nocudainc", "-nocudalib", "-I", str(no_sdk), "-I", str(Path(args.cuda_path) / "include")])
+    alternate_resource = root / "alternate_resource"
+    shutil.copytree(Path(args.resource_dir) / "include", alternate_resource / "include")
+    alternate_wrapper = alternate_resource / "include/__clang_cuda_runtime_wrapper.h"
+    with alternate_wrapper.open("ab") as stream:
+        stream.write(b"\n// Alternate genuine Clang provider bytes: semantic no-op.\n")
+    cases["unreviewed_provider_scalar"] = ("__global__ void observer(float* p){p[0]=1;}", True, [])
+    cases["unreviewed_provider_vec3"] = ("__global__ void observer(){float3 v={1,2,3};}", True, [])
+    alternate_builtin_resource = root / "alternate_builtin_resource"
+    shutil.copytree(Path(args.resource_dir) / "include", alternate_builtin_resource / "include")
+    with (alternate_builtin_resource / "include/__clang_cuda_builtin_vars.h").open("ab") as stream:
+        stream.write(b"\n// Alternate genuine builtin-variable bytes: semantic no-op.\n")
+    cases["unreviewed_provider_builtin_scalar"] = ("__global__ void observer(float* p){p[0]=1;}", True, [])
+    cases["unreviewed_provider_builtin_vec3"] = ("__global__ void observer(){float3 v={1,2,3};}", True, [])
 
     def run(command, dest):
         dest.mkdir(parents=True)
@@ -128,12 +142,18 @@ def main():
                        "--", "-x", "cuda", "-std=c++17", *extra]
             if name == "local_header_closure":
                 command.insert(command.index("--"), "--local-headers-recursive")
+            unreviewed_provider = name.startswith("unreviewed_provider_")
+            if unreviewed_provider:
+                chosen_resource = alternate_builtin_resource if name.startswith("unreviewed_provider_builtin_") else alternate_resource
+                command[command.index("--clang-resource-directory=" + args.resource_dir)] = "--clang-resource-directory=" + str(chosen_resource)
             result = run(command, dest / "candidate")
             row = {"name": name, "expected_accept": accepted, "candidate_returncode": result.returncode,
                    "candidate_output_exists": output.is_file(), "source_sha256": sha(source)}
             if accepted:
                 require(result.returncode == 0 and output.is_file(), name + ": positive failed\n" + result.stderr)
-                if args.ccec and name != "own_global_without_sdk":
+                if unreviewed_provider:
+                    row["profile_scope"] = "outside reviewed provider tuple; generation preserves old behavior and proves no native vec3 ABI"
+                if args.ccec and name != "own_global_without_sdk" and not unreviewed_provider:
                     obj = dest / "output.o"
                     target = [args.ccec, "-x", "dpp", "--cce-aicore-arch=dav-c310-vec",
                               "-std=c++17", "-O2", "-c", *["-I" + inc for inc in args.target_include],
@@ -143,7 +163,8 @@ def main():
                     require(target_result.returncode == 0 and obj.is_file() and
                             obj.read_bytes().startswith(b"\x7fELF"), name + ": target failed\n" + target_result.stderr)
                 elif args.ccec:
-                    row["target_scope"] = "not compiled: native global name collision is an independent target boundary"
+                    row["target_scope"] = ("not compiled: unreviewed provider ABI is outside this matrix" if unreviewed_provider else
+                                           "not compiled: native global name collision is an independent target boundary")
             else:
                 require(result.returncode != 0 and not output.exists() and receipt.is_file() and
                         json.loads(receipt.read_text()).get("status") == "failed" and marker in result.stderr,

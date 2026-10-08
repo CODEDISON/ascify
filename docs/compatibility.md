@@ -93,6 +93,13 @@ and Clang 23 provider
 buffers are exempt from use auditing so implicit SDK declarations alone do
 not reject scalar programs. Other system headers, `-isystem`, `#pragma
 system_header`, and presumed `#line` filenames do not grant exemptions.
+The actual include ancestry of the SDK definition must also use the reviewed
+Clang CUDA runtime wrapper, when one is present. The parsed builtin-variable
+provider declarations must likewise use their reviewed bytes. An unknown
+wrapper or builtin-variable provider disables this bounded rejection profile
+and preserves existing conversion behavior;
+it does not certify vec3 ABI compatibility. Direct frozen SDK record includes
+without a runtime wrapper remain within the observed-use boundary.
 The hash check requires LLVM 13 or newer. Unknown or modified SDK headers
 remain outside this rule and receive no vec3 rewrite authority; successful
 generation on those headers does not prove their target ABI.

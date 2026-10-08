@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <utility>
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
@@ -12,6 +13,7 @@
 #include "clang/AST/TypeLoc.h"
 #include "clang/Basic/SourceManager.h"
 #include "llvm/Config/llvm-config.h"
+#include "llvm/Support/Path.h"
 #if LLVM_VERSION_MAJOR >= 13
 #include "llvm/Support/SHA256.h"
 #endif
@@ -24,6 +26,10 @@ namespace {
 // bytes identify rejection candidates; they never authenticate a replacement.
 constexpr const char* kVectorTypesSha =
     "ded087a2c3ca89fd3a5150589175aca0aa4714357016209ea3e7a51f94845e75";
+constexpr const char* kClangCudaRuntimeWrapperSha =
+    "6caeb75ad8b888bc93141b700608cf3581f334fc5cc0971e96e3f699e86ceb45";
+constexpr const char* kClangCudaBuiltinVarsSha =
+    "32d445ec643c5802efbd54d41e4e8bff952436586d992fc0f91258238cb6e115";
 
 std::string bufferSha(llvm::StringRef contents) {
 #if LLVM_VERSION_MAJOR >= 13
@@ -77,8 +83,8 @@ class FrozenProviders {
         hash == "1f5fc20bebef01a4b6eb2b385ec4c590c813c544dc8808dd8ecc238b3922b2f4" ||
         hash == "0db6fe73f95ae49dbd3f74d174d3f1a1bd1f1908805a2f335cd5a372a178b947" ||
         // Matching Clang 23 builtin variables and their conversion bodies.
-        hash == "32d445ec643c5802efbd54d41e4e8bff952436586d992fc0f91258238cb6e115" ||
-        hash == "6caeb75ad8b888bc93141b700608cf3581f334fc5cc0971e96e3f699e86ceb45";
+        hash == kClangCudaBuiltinVarsSha ||
+        hash == kClangCudaRuntimeWrapperSha;
   }
 
  private:
@@ -94,12 +100,44 @@ class FindRecords : public clang::RecursiveASTVisitor<FindRecords> {
               Records& records)
       : context(context), providers(providers), records(records) {}
 
+  bool VisitDecl(clang::Decl* declaration) {
+    const auto location = context.getSourceManager().getExpansionLoc(
+        declaration->getLocation());
+    if (location.isInvalid())
+      return true;
+    const auto filename = llvm::sys::path::filename(
+        context.getSourceManager().getFilename(location));
+    if ((filename == "__clang_cuda_runtime_wrapper.h" &&
+         providers.hashAt(location) != kClangCudaRuntimeWrapperSha) ||
+        (filename == "__clang_cuda_builtin_vars.h" &&
+         providers.hashAt(location) != kClangCudaBuiltinVarsSha))
+      unknownClangRuntimeProvider = true;
+    return true;
+  }
+
   bool VisitRecordDecl(clang::RecordDecl* declaration) {
     if (!declaration->isCompleteDefinition() ||
         !declaration->getDeclContext()->isTranslationUnit() ||
         (declaration->getName() != "float3" && declaration->getName() != "uint3") ||
         providers.hashAt(declaration->getLocation()) != kVectorTypesSha)
       return true;
+    auto& sourceManager = context.getSourceManager();
+    auto file = sourceManager.getFileID(sourceManager.getExpansionLoc(
+        declaration->getLocation()));
+    std::set<unsigned> ancestors;
+    while (file.isValid() && ancestors.insert(file.getHashValue()).second) {
+      const auto start = sourceManager.getLocForStartOfFile(file);
+      if (llvm::sys::path::filename(sourceManager.getFilename(start)) ==
+              "__clang_cuda_runtime_wrapper.h" &&
+          providers.hashAt(start) != kClangCudaRuntimeWrapperSha) {
+        unknownClangRuntimeProvider = true;
+        return true;
+      }
+      const auto include = sourceManager.getIncludeLoc(file);
+      if (include.isInvalid())
+        break;
+      file = sourceManager.getFileID(sourceManager.getExpansionLoc(include));
+    }
     const auto& layout = context.getASTRecordLayout(declaration);
     // Exact parsed definition bytes and canonical identity are sufficient for
     // a rejection. Do not silently skip a pragma/macro-altered source layout;
@@ -109,10 +147,15 @@ class FindRecords : public clang::RecursiveASTVisitor<FindRecords> {
     return true;
   }
 
+  bool hasUnknownClangRuntimeProvider() const {
+    return unknownClangRuntimeProvider;
+  }
+
  private:
   clang::ASTContext& context;
   FrozenProviders& providers;
   Records& records;
+  bool unknownClangRuntimeProvider = false;
 };
 
 class AuditUses : public clang::RecursiveASTVisitor<AuditUses> {
@@ -218,7 +261,10 @@ bool ValidateCudaVec3AbiBoundary(clang::ASTContext& context, std::string& error,
   Records records;
   FindRecords find(context, providers, records);
   find.TraverseDecl(context.getTranslationUnitDecl());
-  if (records.empty())
+  // Provider exemptions are version-specific. An unreviewed genuine Clang
+  // runtime wrapper must not turn its own internal uint3 declarations into a
+  // rejection of every scalar program. Such a tuple receives no safety claim.
+  if (records.empty() || find.hasUnknownClangRuntimeProvider())
     return true;
   AuditUses audit(providers, records, error, location);
   return audit.TraverseDecl(context.getTranslationUnitDecl());
