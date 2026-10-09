@@ -162,6 +162,13 @@ private:
   bool hasDavC310SimdTargetHeader = false;
   bool hasCubCompatHeader = false;
   std::vector<ascify::CudaVec3MappedCubInclude> mappedCubIncludes;
+  struct RedundantCubIncludeCandidate {
+    clang::SourceLocation hashLocation;
+    clang::SourceLocation filenameBegin;
+    clang::SourceLocation filenameEnd;
+    std::string resolvedPath;
+  };
+  std::vector<RedundantCubIncludeCandidate> redundantCubIncludeCandidates;
   bool pragmaOnce = false;
   clang::SourceLocation firstHeaderLoc;
   clang::SourceLocation firstCubCompatHeaderLoc;
@@ -252,6 +259,9 @@ public:
   void FileChanged(clang::SourceLocation location,
                    clang::PPCallbacks::FileChangeReason reason,
                    clang::SrcMgr::CharacteristicKind fileType);
+  void FileSkipped(const clang::FileEntry& skippedFile,
+                   const clang::Token& filenameToken,
+                   StringRef resolvedPath);
 
   // Called by the preprocessor for each include directive during the non-raw lexing pass.
   void InclusionDirective(clang::SourceLocation hash_loc,

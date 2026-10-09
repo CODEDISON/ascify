@@ -3934,12 +3934,12 @@ void AscifyAction::FileChanged(
 }
 
 void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
-                                      const clang::Token&,
+                                      const clang::Token& includeToken,
                                       StringRef file_name,
                                       bool is_angled,
                                       clang::CharSourceRange filename_range,
                                       StringRef resolved_file_name, StringRef,
-                                      StringRef, const clang::Module*) {
+                                      StringRef, const clang::Module* module) {
   std::string frontendCompatibilityError;
   if (!ascify::ValidateFrontendCompatibilityInclude(
           frontendCompatibility, file_name.str(), resolved_file_name.str(),
@@ -4039,6 +4039,16 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
       SM.isWrittenInMainFile(endFile) &&
       SM.getFileID(hashFile) == SM.getFileID(beginFile) &&
       SM.getFileID(beginFile) == SM.getFileID(endFile);
+  // FileSkipped, not a header spelling or a pre-existing guard macro, will
+  // prove that this directive contributes no source tokens. Keep the exact
+  // directive and selected path to bind that later callback to this include.
+  if (file_name == "cub/util_type.cuh" && directRange && directSpelling &&
+      preprocessorConditionalDepth == 0 && module == nullptr &&
+      !getCompilerInstance().getLangOpts().Modules &&
+      includeToken.getIdentifierInfo() != nullptr &&
+      includeToken.getIdentifierInfo()->getName() == "include")
+    redundantCubIncludeCandidates.push_back(
+        {hash_loc, filenameBegin, filenameEnd, resolved_file_name.str()});
   if (file_name == "cuda_runtime_api.h") {
     if (!directRange || !directSpelling || preprocessorConditionalDepth != 0 ||
         !isConfiguredCudaRuntimeApiPath(resolved_file_name, SM)) {
@@ -4135,7 +4145,8 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
     if (inserted && file_name == "cub/cub.cuh" &&
         name == "acl_cub/aclcub.hpp" && directRange && directSpelling)
       mappedCubIncludes.push_back(
-          {hash_loc, filenameEnd, resolved_file_name.str()});
+          {hash_loc, filenameEnd, resolved_file_name.str(),
+           preprocessorConditionalDepth == 0});
     return;
   }
 
@@ -4171,6 +4182,67 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
       sl.getLocWithOffset(static_cast<int>(E - B));
   insertSemanticReplacement(
       Rep, clang::FullSourceLoc{sl, SM}, sl, replacementEnd);
+}
+
+void AscifyAction::FileSkipped(const clang::FileEntry& skippedFile,
+                               const clang::Token& filenameToken,
+                               StringRef resolvedPath) {
+  const auto location = filenameToken.getLocation();
+  if (!location.isFileID())
+    return;
+  auto& source = getCompilerInstance().getSourceManager();
+  for (const auto& candidate : redundantCubIncludeCandidates) {
+    if (candidate.filenameBegin != location ||
+        candidate.resolvedPath != resolvedPath ||
+        !ascify::IsRedundantFrozenCubUtilInclude(
+            source, CudaPath.getValue(), mappedCubIncludes, skippedFile,
+            candidate.hashLocation))
+      continue;
+    // Removing just a filename must not turn ignored directive-tail tokens
+    // into live C++. Admit one physical line with a whitespace/comment tail;
+    // retain continuations, multiline block comments, and extra tokens.
+    bool invalid = false;
+    const auto bytes = source.getBufferData(
+        source.getFileID(candidate.hashLocation), &invalid);
+    const unsigned begin = source.getFileOffset(candidate.hashLocation);
+    const unsigned end = source.getFileOffset(candidate.filenameEnd);
+    if (invalid || end < begin || end > bytes.size())
+      return;
+    const auto prefix = bytes.slice(begin, end);
+    if (prefix.find_first_of("\r\n\\") != StringRef::npos ||
+        prefix.contains("?" "?/"))
+      return;
+    size_t cursor = end;
+    while (cursor < bytes.size() && bytes[cursor] != '\n' &&
+           bytes[cursor] != '\r') {
+      if (bytes[cursor] == ' ' || bytes[cursor] == '\t' ||
+          bytes[cursor] == '\v' || bytes[cursor] == '\f') {
+        ++cursor;
+        continue;
+      }
+      if (bytes.substr(cursor, 2) == "//")
+        break;
+      if (bytes.substr(cursor, 2) == "/*") {
+        const size_t close = bytes.find("*/", cursor + 2);
+        const size_t newline = bytes.find_first_of("\r\n", cursor + 2);
+        if (close == StringRef::npos ||
+            (newline != StringRef::npos && newline < close))
+          return;
+        cursor = close + 2;
+        continue;
+      }
+      return;
+    }
+    const unsigned length = source.getFileOffset(candidate.filenameEnd) -
+                            source.getFileOffset(candidate.hashLocation);
+    ct::Replacement replacement(source, candidate.hashLocation, length, "");
+    if (insertSemanticReplacement(
+            replacement, clang::FullSourceLoc(candidate.hashLocation, source),
+            candidate.hashLocation, candidate.filenameEnd))
+      llvm::errs() << "Ascify CUB redundant include: removed frozen "
+                      "cub/util_type.cuh after mapped umbrella\n";
+    return;
+  }
 }
 
 void AscifyAction::PragmaDirective(
@@ -7223,6 +7295,14 @@ public:
       clang::FileID) override {
     ascifyAction.FileChanged(location, reason, fileType);
   }
+
+#if LLVM_VERSION_MAJOR >= 13
+  void FileSkipped(const clang::FileEntryRef& file,
+                   const clang::Token& filenameToken,
+                   clang::SrcMgr::CharacteristicKind) override {
+    ascifyAction.FileSkipped(file.getFileEntry(), filenameToken, file.getName());
+  }
+#endif
 
   void InclusionDirective(clang::SourceLocation hash_loc, const clang::Token &include_token,
                           StringRef file_name, bool is_angled, clang::CharSourceRange filename_range,

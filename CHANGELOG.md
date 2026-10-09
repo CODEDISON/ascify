@@ -35,6 +35,9 @@ for supported domains and experimental paths.
 
 ### Fixed
 
+- Remove proven redundant, skipped CUDA 13.4.1 `cub/util_type.cuh` includes
+  after an authenticated mapped CUB umbrella, preserving caller vec3 ABI
+  rejection and unsupported standalone subheader boundaries.
 - Preserve include replacement text until Clang consumes the edit.
 - Reject unknown command-line options beginning with the short help spelling.
 - Order owned runtime cleanup after initialization and device binding.

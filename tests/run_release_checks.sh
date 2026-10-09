@@ -141,6 +141,12 @@ run_check "frozen CUDA vec3 ABI rejection and publication boundary" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
 
+run_check "frozen CUB redundant-include removal and boundaries" \
+  "$python" -B "$rewrite_dir/check_cub_redundant_include.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+
 run_check "real Ascify NVIDIA sample-helper frontend closure" \
   sh "$rewrite_dir/check_sample_helper_compat.sh" \
     --binary "$ASCIFY_BINARY" \

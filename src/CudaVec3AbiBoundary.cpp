@@ -141,6 +141,14 @@ class FrozenProviders {
         isRemovedCubProvider(location);
   }
 
+  bool isRemovedUtilProvider(const clang::FileEntry& entry) {
+    const auto file = sourceManager.translateFile(&entry);
+    if (file.isInvalid())
+      return false;
+    const auto start = sourceManager.getLocForStartOfFile(file);
+    return hashAt(start) == kCubUtilTypeSha && isRemovedCubProvider(start);
+  }
+
  private:
   bool physicalBufferMatches(clang::FileID file, llvm::StringRef expectedPath,
                              llvm::StringRef expectedSha) {
@@ -453,6 +461,29 @@ class AuditUses : public clang::RecursiveASTVisitor<AuditUses> {
 };
 
 }  // namespace
+
+bool IsRedundantFrozenCubUtilInclude(
+    clang::SourceManager& sourceManager,
+    const std::string& configuredCudaRoot,
+    const std::vector<CudaVec3MappedCubInclude>& mappedCubIncludes,
+    const clang::FileEntry& skippedFile,
+    clang::SourceLocation includeLocation) {
+  if (!includeLocation.isFileID() ||
+      !sourceManager.isWrittenInMainFile(includeLocation))
+    return false;
+  std::vector<CudaVec3MappedCubInclude> priorUnconditionalIncludes;
+  for (const auto& mapped : mappedCubIncludes) {
+    if (mapped.unconditional && mapped.hashLocation.isFileID() &&
+        sourceManager.getFileID(mapped.hashLocation) ==
+            sourceManager.getFileID(includeLocation) &&
+        sourceManager.getFileOffset(mapped.filenameEnd) <
+            sourceManager.getFileOffset(includeLocation))
+      priorUnconditionalIncludes.push_back(mapped);
+  }
+  FrozenProviders providers(sourceManager, configuredCudaRoot,
+                            priorUnconditionalIncludes);
+  return providers.isRemovedUtilProvider(skippedFile);
+}
 
 bool ValidateCudaVec3AbiBoundary(clang::ASTContext& context,
                                 const std::string& configuredCudaRoot,

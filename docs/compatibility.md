@@ -84,13 +84,23 @@ CUB entry, arbitrary system-header status, or a CUB path/name grants no
 exemption. Caller uses of
 the SDK records, including their inherited `CubVector<...,3>` ABI, remain
 subject to the boundary.
-This proof follows the declarations' actual parsed include ancestry. It does
-not prove that every later guarded include of the same physical header is
-removed. In the reviewed mixed case, a mapped CUB umbrella followed by a
-direct `cub/util_type.cuh` include passes generation, but the existing token
-rewrite emits unsupported `aclcub/util_type.cuh`; real CCEC compilation fails
-with that missing header and produces no object. Generation alone grants no
-target support for this mixed include pattern.
+After an unconditional mapped umbrella, Ascify can remove a redundant direct
+literal `cub/util_type.cuh` include when Clang reports that exact directive as
+skipped. The previously parsed subheader must match the reviewed physical SDK
+file and bytes, and its actual include ancestry must reach that earlier
+unconditionally mapped umbrella. Removal is limited to an unconditional
+main-file directive on one physical line, with only whitespace or comments
+after the filename; multiline block comments and extra directive tokens are
+retained. This preserves the source no-op without inventing an
+`aclcub/util_type.cuh` target header.
+Independent or earlier subheader includes, copied providers, conditional,
+macro, transitive, continued, and other unproved include forms receive no
+removal authority. They retain the existing conversion boundaries, including
+target missing-header failures where applicable. This does not add CUB
+device algorithms or permit caller vec3 types. The
+[redundant-include matrix](../tests/rewrite/check_cub_redundant_include.py)
+checks the admitted directives, retained forms, and ABI rejection with output
+preservation; target compilation and device execution remain separate checks.
 The frozen `cub/block/radix_rank_sort_operations.cuh`,
 `thrust/detail/functional/actor.h`, `cuda/std/__memory/compressed_pair.h`,
 `cub/device/dispatch/dispatch_transform.cuh`, `cuda/__iterator/zip_iterator.h`,
