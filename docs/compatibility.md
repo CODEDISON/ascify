@@ -101,6 +101,14 @@ device algorithms or permit caller vec3 types. The
 [redundant-include matrix](../tests/rewrite/check_cub_redundant_include.py)
 checks the admitted directives, retained forms, and ABI rejection with output
 preservation; target compilation and device execution remain separate checks.
+This removal proves only that the skipped directive contributes no source
+tokens. CUB/CCCL preprocessor observations, including `__has_include` queries
+and version-macro conditions such as `defined(CUB_VERSION)`, are outside the
+supported domain. Umbrella replacement can change their results with or
+without a redundant subheader include. Ascify does not currently translate or
+fully diagnose these observations; successful target compilation does not
+establish their equivalence.
+
 The frozen `cub/block/radix_rank_sort_operations.cuh`,
 `thrust/detail/functional/actor.h`, `cuda/std/__memory/compressed_pair.h`,
 `cub/device/dispatch/dispatch_transform.cuh`, `cuda/__iterator/zip_iterator.h`,
