@@ -35,6 +35,8 @@ for supported domains and experimental paths.
 
 ### Fixed
 
+- Recognize proven adjacent local Runtime status assignments in NVIDIA
+  Samples error checks, retaining unsupported control-flow and alias cases.
 - Recognize proven NVIDIA Samples device selection in automatic local-variable
   initializers, preserving helper source, scope, and transaction checks.
 - Support nonblocking stream creation on the reviewed legacy SIMT / ACL 1.17.0

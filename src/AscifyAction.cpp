@@ -3167,6 +3167,122 @@ static bool proveNvidiaFindCudaDeviceCall(
   return true;
 }
 
+// The original sortingNetworks host stores each Runtime result immediately
+// before checking it. Prove that one definition-to-use edge; the variable's
+// spelling or enum type alone does not establish an ACL return domain.
+static bool isAdmittedNvidiaLocalStatusUse(
+    const clang::CallExpr *check, clang::ASTContext &context,
+    clang::SourceManager &sourceManager,
+    const std::set<unsigned> &trustedSystemFileIds) {
+  if (check == nullptr || check->getNumArgs() == 0)
+    return false;
+  const auto *reference = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
+      stripParenAndImplicitCasts(check->getArg(0)));
+  const auto *variable = reference == nullptr ? nullptr :
+      llvm::dyn_cast<clang::VarDecl>(reference->getDecl());
+  if (variable == nullptr || !variable->isLocalVarDecl() ||
+      !variable->hasLocalStorage() || variable->hasAttrs() ||
+      variable->getTLSKind() != clang::VarDecl::TLS_None ||
+      variable->getType().hasQualifiers())
+    return false;
+  const auto *enumeration = variable->getType()->getAs<clang::EnumType>();
+  if (enumeration == nullptr || enumeration->getDecl()->getName() != "cudaError" ||
+      !locationComesFromInitiallyTrustedSystemFile(
+          sourceManager, enumeration->getDecl()->getLocation(),
+          trustedSystemFileIds))
+    return false;
+  const auto *owner = enclosingNvidiaFindDeviceFunction(check, context);
+  if (owner == nullptr || !owner->hasBody() ||
+      owner->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      owner->hasAttr<clang::CUDADeviceAttr>() ||
+      owner->hasAttr<clang::CUDAGlobalAttr>() ||
+      variable->getDeclContext()->getRedeclContext() !=
+          owner->getRedeclContext() ||
+      !sourceManager.isWrittenInMainFile(variable->getLocation()))
+    return false;
+  const auto parents = context.getParents(*check);
+  if (parents.size() != 1)
+    return false;
+  const auto *block = parents[0].get<clang::CompoundStmt>();
+  if (block == nullptr)
+    return false;
+  const clang::Stmt *previous = nullptr;
+  bool found = false;
+  for (const clang::Stmt *statement : block->body()) {
+    if (statement == check) {
+      found = true;
+      break;
+    }
+    previous = statement;
+  }
+  const auto *assignment =
+      llvm::dyn_cast_or_null<clang::BinaryOperator>(previous);
+  if (!found || assignment == nullptr ||
+      assignment->getOpcode() != clang::BO_Assign ||
+      assignment->getBeginLoc().isMacroID() ||
+      assignment->getEndLoc().isMacroID() ||
+      assignment->getOperatorLoc().isMacroID() ||
+      !sourceManager.isWrittenInMainFile(assignment->getBeginLoc()) ||
+      !referencesCanonicalValue(assignment->getLHS(), variable) ||
+      !context.hasSameType(variable->getType(), assignment->getRHS()->getType()) ||
+      !isAdmittedCudaRuntimeStatusCall(
+          sourceManager, assignment->getRHS(), trustedSystemFileIds))
+    return false;
+
+  // Audit the entire owning body, including later statements: an address or
+  // reference established on another iteration could otherwise bypass the
+  // apparently adjacent assignment. Only scalar value reads and direct
+  // assignments are permitted; captures and other lvalue uses fail closed.
+  class Uses : public clang::RecursiveASTVisitor<Uses> {
+  public:
+    Uses(const clang::VarDecl *variable, clang::ASTContext &context)
+        : variable(variable->getCanonicalDecl()), context(context) {}
+
+    bool VisitLambdaExpr(clang::LambdaExpr *lambda) {
+      for (const auto &capture : lambda->captures()) {
+        if (capture.capturesVariable() &&
+            capture.getCapturedVar()->getCanonicalDecl() == variable)
+          return false;
+      }
+      return true;
+    }
+
+    bool VisitDeclRefExpr(clang::DeclRefExpr *use) {
+      if (use->getDecl()->getCanonicalDecl() != variable)
+        return true;
+      const clang::Expr *current = use;
+      while (true) {
+        const auto parents = context.getParents(*current);
+        if (parents.size() != 1)
+          return false;
+        if (const auto *parent = parents[0].get<clang::ParenExpr>()) {
+          current = parent;
+          continue;
+        }
+        if (const auto *cast = parents[0].get<clang::ImplicitCastExpr>())
+          return cast->getCastKind() == clang::CK_LValueToRValue;
+        if (const auto *binary = parents[0].get<clang::BinaryOperator>()) {
+          if (binary->getOpcode() != clang::BO_Assign ||
+              binary->getLHS() != current)
+            return false;
+          // Assignment itself yields an lvalue: accepting its LHS alone
+          // would miss aliases such as `auto &alias = (error = success)`.
+          // All admitted writes discard that result as a block statement.
+          const auto assignmentParents = context.getParents(*binary);
+          return assignmentParents.size() == 1 &&
+                 assignmentParents[0].get<clang::CompoundStmt>() != nullptr;
+        }
+        return false;
+      }
+    }
+
+  private:
+    const clang::VarDecl *variable;
+    clang::ASTContext &context;
+  } uses(variable, context);
+  return uses.TraverseStmt(owner->getBody());
+}
+
 // This is deliberately a provenance proof, not a pointer-type guess.  Only a
 // direct parameter of the current CUDA global function establishes global
 // memory.  Local aliases, globals, fields, shared variables, helper parameters,
@@ -3411,7 +3527,9 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
       if (candidate == nullptr || expression->getNumArgs() == 0)
         return true;
       candidate->statusDomainProven = isAdmittedCudaRuntimeStatusCall(
-          sourceManager, expression->getArg(0), trustedSystemFileIds);
+          sourceManager, expression->getArg(0), trustedSystemFileIds) ||
+          isAdmittedNvidiaLocalStatusUse(
+              expression, astContext, sourceManager, trustedSystemFileIds);
       // A dependent check/cudaMemcpy/cudaFree lookup cannot be proved by its
       // spelling. Remember the pattern and audit its instantiated ASTs below;
       // any accepted template receives an explicit output type-domain guard.

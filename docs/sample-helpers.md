@@ -13,12 +13,23 @@ that an entire sample compiles for Ascend, runs correctly, or meets a performanc
 | `getLastCudaError(message)` | Call Ascify's consuming `cudaGetLastError()` once, clearing a pending lifecycle error or querying ACL's consuming thread error; report failure and exit. |
 | Direct host `findCudaDevice(argc, argv)` | Query the visible logical-device count, require exactly one, bind logical device zero and return zero. |
 
-An ordinary status argument must resolve to a direct call from trusted system declarations, appear in
+An ordinary direct-call status argument must resolve to trusted system declarations, appear in
 the explicit Runtime-status allowlist, and map to an `ascify::` Runtime implementation returning
 `aclError`. Driver, library, occupancy, arbitrary integer-returning functions and project overloads are
 rejected. Admission of a status domain does not establish support for every argument or runtime state;
 for example, a symbol-transfer error remains an error. The current allowlist is in
 `isAdmittedCudaRuntimeStatusCall` in [AscifyAction.cpp](../src/AscifyAction.cpp).
+
+A standalone `checkCudaErrors(error)` also admits a proven adjacent local
+assignment, as used by `sortingNetworks`. The immediately preceding statement
+in the same block must assign that exact variable from an admitted Runtime
+call with the same enum result type. The variable must be an ordinary,
+unqualified automatic local in a non-template host function. A whole-function
+use audit permits scalar reads and direct assignments, rejecting address or
+reference escape, lambda capture and other lvalue uses. Static, thread-local,
+volatile, macro assignments, intervening statements and control-flow joins
+remain outside this rule. An unproved check retains the entire helper
+transaction; the variable's declared type alone never establishes its domain.
 
 Device selection admits no selector or one exact `--device=0`. Other recognized selector spellings or
 values, duplicates, invalid argument storage, null arguments after `argv[0]`, zero/multiple visible
