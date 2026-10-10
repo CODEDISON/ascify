@@ -732,11 +732,20 @@ inline aclError cudaStreamCreateWithFlags(
   if (stream == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
   *stream = nullptr;
   if (flags == cudaStreamNonBlocking) {
-    // CUDA's bit 0 suppresses implicit synchronization with the legacy
-    // default stream. ACL's public bit 0 instead requests FAST_LAUNCH, so
-    // forwarding the numeric value would silently change semantics. The
-    // coherent public ACL surface exposes no proven equivalent.
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3) && \
+    defined(ACL_MAJOR_VERSION) && defined(ACL_MINOR_VERSION) && \
+    defined(ACL_PATCH_VERSION) && ACL_MAJOR_VERSION == 1 && \
+    ACL_MINOR_VERSION == 17 && ACL_PATCH_VERSION == 0
+    // CANN 9.1's Stream Concept specifies that all Runtime streams are
+    // nonblocking: default and explicit streams do not implicitly synchronize.
+    // Ordinary creation therefore implements this CUDA flag on the reviewed
+    // legacy SIMT / ACL 1.17.0 surface. Do not pass its numeric value to ACL:
+    // ACL bit 0 means FAST_LAUNCH, not CUDA's default-stream synchronization.
+    return cudaStreamCreate(stream);
+#else
+    // Other SDK/header combinations have not been admitted for this contract.
     return ACL_ERROR_FEATURE_UNSUPPORTED;
+#endif
   }
   if (flags != cudaStreamDefault) { return ACL_ERROR_RT_PARAM_INVALID; }
   return cudaStreamCreate(stream);

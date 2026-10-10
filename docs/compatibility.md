@@ -47,10 +47,18 @@ ownership, rebinding, callback ordering, rollback, and normal process exit.
 | Vector constructors | Use the target's vector types and constructors; the reviewed CUDA `float3`/`uint3` record ABI is rejected before publication as described below |
 | Default `dim3` | Only proven, direct, host-local declarations of CUDA's uninitialized type gain explicit `(1,1,1)` initialization; global, device, array, macro, and user-defined cases remain unchanged |
 | Event recording | Explicit streams are preserved; the omitted-stream form queries the current default stream only on the admitted legacy/ACL 1.17+ surface, otherwise returns unsupported |
-| Stream flags | Default creation uses the runtime adapter; nonblocking creation returns unsupported, and unknown bits return invalid-parameter status |
+| Stream flags | Default creation uses the runtime adapter; nonblocking creation is admitted on the reviewed legacy SIMT / ACL 1.17.0 surface and remains unsupported elsewhere; unknown bits return invalid-parameter status |
 | Device properties | Report the actual SoC name and vector-core count without changing the current binding; publish output only after successful queries; do not invent CUDA compute capability or SM counts |
 | Host math profile | Admit exact `max(float, float)` with `fmaxf` semantics and `min(int, int)`; mixed-type and double max are outside this admission |
 | Half2 | Proven device-local construction and arithmetic use target constructors/intrinsics, preserving separate half multiplication and addition rounding; unsupported macros, effects, and template contexts do not receive a broad rewrite |
+
+On CANN 9.1, an ordinary ACL stream has no implicit synchronization with the
+default stream, matching `cudaStreamNonBlocking`. Ascify calls `aclrtCreateStream`
+through its existing lifecycle adapter; it does not forward CUDA bit 0 to ACL's
+unrelated fast-launch option. This does not emulate CUDA legacy-default-stream
+implicit ordering for blocking streams. Programs requiring that ordering remain
+outside the supported contract. See the [CANN 9.1 stream
+contract](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/910/others/acldevg/runtime_doc_dev_0011.html).
 
 Parsing-only declarations in test support are not device arithmetic
 implementations. The legacy RMSNorm block-affine route additionally preserves

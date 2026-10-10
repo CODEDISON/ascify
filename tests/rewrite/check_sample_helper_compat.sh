@@ -111,7 +111,7 @@ require_fixed 'auditRawPublishedCompatTokensInFile' "$action_cpp"
 require_fixed 'isAscifyCudaCompatReservedMacro' "$action_cpp"
 require_fixed 'isAscifyCudaCompatPublishedMacro' "$action_cpp"
 require_fixed 'RuntimeLock' "$compat_identifiers"
-require_fixed '3166a87acccad627c072f08620b56d6bdfec579c7e2ef85846a9db093cabf0dd' \
+require_fixed '33065267b57999e2b98336ba36f05975746f548c85f6696613b1fb48a283a516' \
   "$action_cpp"
 require_fixed '#include <helper_string.h>' "$action_cpp"
 require_fixed 'surface retained' "$action_cpp"
@@ -126,14 +126,14 @@ require_fixed 'const aclError status = cudaGetLastError();' "$compat_header"
 require_fixed '#expression, __FILE__, __LINE__' "$compat_header"
 forbid_fixed 'gpuGetMaxGflopsDeviceId' "$compat_header"
 
-[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 48450 ]
+[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 48920 ]
 if command -v sha256sum >/dev/null 2>&1; then
   compat_header_sha=$(sha256sum "$compat_header" | awk '{print $1}')
 else
   compat_header_sha=$(shasum -a 256 "$compat_header" | awk '{print $1}')
 fi
 [ "$compat_header_sha" = \
-  3166a87acccad627c072f08620b56d6bdfec579c7e2ef85846a9db093cabf0dd ]
+  33065267b57999e2b98336ba36f05975746f548c85f6696613b1fb48a283a516 ]
 
 official_helper_functions="$fixtures/nvidia_samples/Common/helper_functions.h"
 [ "$(wc -c <"$official_helper_functions" | tr -d ' ')" -eq 2358 ]
@@ -1358,6 +1358,21 @@ translate_expect_failure \
 [ ! -e "$test_tmp/generic-active-macro-collision.cpp" ]
 require_fixed "active input macro 'RuntimeLock'" \
   "$test_tmp/generic-active-macro-collision.stderr"
+
+# Runtime's reviewed SDK profile also observes the patch version. A project
+# definition must not silently control that newly published header branch.
+printf '%s\n' 'preserve existing compatibility output' \
+  >"$test_tmp/patch-version-sentinel.cpp"
+cp "$test_tmp/patch-version-sentinel.cpp" \
+  "$test_tmp/patch-version-collision.cpp"
+translate_expect_failure "$fixtures/sample_helper_supported.cu" \
+  "$fixtures/nvidia_samples/Common" \
+  "$test_tmp/patch-version-collision.cpp" \
+  "$test_tmp/patch-version-collision" -DACL_PATCH_VERSION=0
+cmp "$test_tmp/patch-version-sentinel.cpp" \
+  "$test_tmp/patch-version-collision.cpp"
+require_fixed "active input macro 'ACL_PATCH_VERSION'" \
+  "$test_tmp/patch-version-collision.stderr"
 
 translate_expect_failure "$fixtures/sample_helper_user_header_output_macro.cu" \
   "$fixtures/nvidia_samples/Common" \

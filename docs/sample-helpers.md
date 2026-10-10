@@ -43,6 +43,10 @@ aliases and symbol redirection are rejected. The call must use an unqualified, n
 `findCudaDevice` token in a main-file host function. Qualified calls, function pointers, indirect calls,
 using aliases, device calls and external-header uses outside the proven leaf context retain the
 dependency. Only the callee token changes, preserving both arguments and return-value use.
+Ordinary automatic local-variable initializers are supported, including the
+`int devID = findCudaDevice(argc, argv)` form used by the original `template`
+sample. Global, static-local and thread-local initializers, lambda call operators and captures,
+and CUDA device or kernel functions do not receive this admission.
 
 Reviewed profiles include CUDA Samples commits `b7c5481c556c3fe98db060207ecaa41a4b9a9abc`
 and `5443602d89ed99aede2e4b7bf329daddeadb320e` (v13.4). The latter adds SM `0xa7`

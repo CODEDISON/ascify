@@ -1,8 +1,28 @@
 #define __aicore__
 #define ASCIFY_TEST_ACL_CONTROLLABLE_RUNTIME_LIFECYCLE
 #define ASCIFY_TEST_ACL_CONTROLLABLE_RUNTIME_MEMORY
+#define ASCIFY_TEST_ACL_CONTROLLABLE_STREAM_CREATE
 #define ASCIFY_TEST_CONTROLLABLE_EXIT_REGISTRATION
 #define ASCIFY_TEST_ACL_LIFECYCLE_EXIT_ORDER
+
+// Exercise version admission without changing the shared stub's default SDK.
+#if defined(ASCIFY_TEST_STREAM_ACL_VERSION) || \
+    defined(ASCIFY_TEST_STREAM_MISSING_PATCH)
+#include <acl/acl.h>
+#if defined(ASCIFY_TEST_STREAM_ACL_VERSION)
+#undef ACL_MAJOR_VERSION
+#undef ACL_MINOR_VERSION
+#undef ACL_PATCH_VERSION
+#if ASCIFY_TEST_STREAM_ACL_VERSION != 0
+#define ACL_MAJOR_VERSION (ASCIFY_TEST_STREAM_ACL_VERSION / 10000)
+#define ACL_MINOR_VERSION ((ASCIFY_TEST_STREAM_ACL_VERSION / 100) % 100)
+#define ACL_PATCH_VERSION (ASCIFY_TEST_STREAM_ACL_VERSION % 100)
+#endif
+#endif
+#if defined(ASCIFY_TEST_STREAM_MISSING_PATCH)
+#undef ACL_PATCH_VERSION
+#endif
+#endif
 
 #include <ascify/ascify_cuda_compat.hpp>
 
@@ -28,6 +48,7 @@ int ascify_test_get_device_count_calls = 0;
 int ascify_test_synchronize_device_calls = 0;
 int ascify_test_get_default_stream_calls = 0;
 int ascify_test_create_stream_calls = 0;
+aclError ascify_test_create_stream_status = ACL_SUCCESS;
 int ascify_test_record_event_calls = 0;
 aclrtStream ascify_test_default_stream = reinterpret_cast<aclrtStream>(0x55);
 aclrtStream ascify_test_recorded_event_stream = nullptr;
@@ -180,17 +201,16 @@ void testOwnedLifecycle() {
              &flagged_stream, ascify::cudaStreamDefault) == ACL_SUCCESS);
   assert(flagged_stream != nullptr);
   assert(ascify_test_create_stream_calls == 2);
-  aclrtStream rejected_stream = reinterpret_cast<aclrtStream>(0x99);
+  aclrtStream nonblocking_stream = nullptr;
   assert(ascify::cudaStreamCreateWithFlags(
-             &rejected_stream, ascify::cudaStreamNonBlocking) ==
-         ACL_ERROR_FEATURE_UNSUPPORTED);
-  assert(rejected_stream == nullptr);
-  assert(ascify_test_create_stream_calls == 2);
-  rejected_stream = reinterpret_cast<aclrtStream>(0x99);
+             &nonblocking_stream, ascify::cudaStreamNonBlocking) == ACL_SUCCESS);
+  assert(nonblocking_stream != nullptr);
+  assert(ascify_test_create_stream_calls == 3);
+  aclrtStream rejected_stream = reinterpret_cast<aclrtStream>(0x99);
   assert(ascify::cudaStreamCreateWithFlags(&rejected_stream, 0x80U) ==
          ACL_ERROR_RT_PARAM_INVALID);
   assert(rejected_stream == nullptr);
-  assert(ascify_test_create_stream_calls == 2);
+  assert(ascify_test_create_stream_calls == 3);
   assert(ascify::cudaEventCreate(&start) == ACL_SUCCESS);
   assert(ascify::cudaEventCreate(&end) == ACL_SUCCESS);
   assert(ascify::cudaEventRecord(start, stream) == ACL_SUCCESS);
@@ -210,6 +230,7 @@ void testOwnedLifecycle() {
   assert(ascify::cudaStreamSynchronize(stream) == ACL_SUCCESS);
   assert(ascify::cudaStreamDestroy(stream) == ACL_SUCCESS);
   assert(ascify::cudaStreamDestroy(flagged_stream) == ACL_SUCCESS);
+  assert(ascify::cudaStreamDestroy(nonblocking_stream) == ACL_SUCCESS);
   assert(ascify::cudaFree(first) == ACL_SUCCESS);
   assert(ascify::cudaFree(second) == ACL_SUCCESS);
 
@@ -257,6 +278,11 @@ void testInitializationFailure() {
   assert(ascify_test_exit_registration_calls == 0);
   assert(ascify_test_set_device_calls == 0);
   assert(ascify_test_malloc_calls == 0);
+  aclrtStream stream = reinterpret_cast<aclrtStream>(0x99);
+  assert(ascify::cudaStreamCreateWithFlags(
+             &stream, ascify::cudaStreamNonBlocking) == ACL_ERROR_RT_PARAM_INVALID);
+  assert(stream == nullptr);
+  assert(ascify_test_create_stream_calls == 0);
 
   // Lifecycle errors participate in CUDA's peek/get-last-error shape even
   // though ACL initialization failed before an ACL thread error existed.
@@ -268,6 +294,47 @@ void testInitializationFailure() {
   ascify::detail::runtime_manager.shutdown();
   assert(ascify_test_reset_device_calls == 0);
   assert(ascify_test_finalize_calls == 0);
+}
+
+void testNonblockingStream(bool supported) {
+  for (unsigned int flags : {0U, 1U, 2U, 3U, 0x80U, ~0U}) {
+    assert(ascify::cudaStreamCreateWithFlags(nullptr, flags) ==
+           ACL_ERROR_RT_PARAM_INVALID);
+  }
+  for (unsigned int flags : {2U, 3U, 0x80U, ~0U}) {
+    aclrtStream stream = reinterpret_cast<aclrtStream>(0x99);
+    assert(ascify::cudaStreamCreateWithFlags(&stream, flags) ==
+           ACL_ERROR_RT_PARAM_INVALID);
+    assert(stream == nullptr);
+  }
+  assert(ascify_test_init_calls == 0);
+  assert(ascify_test_create_stream_calls == 0);
+
+  aclrtStream stream = reinterpret_cast<aclrtStream>(0x99);
+  const aclError status = ascify::cudaStreamCreateWithFlags(
+      &stream, ascify::cudaStreamNonBlocking);
+  if (!supported) {
+    assert(status == ACL_ERROR_FEATURE_UNSUPPORTED);
+    assert(stream == nullptr);
+    assert(ascify_test_init_calls == 0);
+    assert(ascify_test_create_stream_calls == 0);
+    return;
+  }
+  assert(status == ACL_SUCCESS);
+  assert(stream != nullptr);
+  assert(ascify_test_init_calls == 1);
+  assert(ascify_test_create_stream_calls == 1);
+  assert(ascify::cudaStreamDestroy(stream) == ACL_SUCCESS);
+
+  ascify_test_create_stream_status = ACL_ERROR_RT_NO_DEVICE;
+  stream = reinterpret_cast<aclrtStream>(0x99);
+  assert(ascify::cudaStreamCreateWithFlags(
+             &stream, ascify::cudaStreamNonBlocking) == ACL_ERROR_RT_NO_DEVICE);
+  assert(stream == nullptr);
+  assert(ascify_test_init_calls == 1);
+  assert(ascify_test_create_stream_calls == 2);
+  ascify_test_create_stream_status = ACL_SUCCESS;
+  ascify_test_exit_cleanup();
 }
 
 void testFixedRegistryCapacity() {
@@ -452,6 +519,10 @@ int main(int argc, char** argv) {
     testBorrowedInitialization();
   } else if (std::strcmp(argv[1], "failure") == 0) {
     testInitializationFailure();
+  } else if (std::strcmp(argv[1], "stream-supported") == 0) {
+    testNonblockingStream(true);
+  } else if (std::strcmp(argv[1], "stream-unsupported") == 0) {
+    testNonblockingStream(false);
   } else if (std::strcmp(argv[1], "capacity") == 0) {
     testFixedRegistryCapacity();
   } else if (std::strcmp(argv[1], "reset-cleanup") == 0) {

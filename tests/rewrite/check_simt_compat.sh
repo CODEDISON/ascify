@@ -334,6 +334,7 @@ if command -v "$cxx" >/dev/null 2>&1; then
   "$test_tmp/runtime-lifecycle" owned
   "$test_tmp/runtime-lifecycle" borrowed
   "$test_tmp/runtime-lifecycle" failure
+  "$test_tmp/runtime-lifecycle" stream-supported
   "$test_tmp/runtime-lifecycle" capacity
   "$test_tmp/runtime-lifecycle" reset-cleanup
   "$test_tmp/runtime-lifecycle" registration-failure-owned
@@ -346,6 +347,27 @@ if command -v "$cxx" >/dev/null 2>&1; then
     exit-order-owned exit-order-borrowed exit-order-init-only \
     exit-order-failed-bind exit-order-retry exit-order-late-failure; do
     "$test_tmp/runtime-lifecycle" "$lifecycle_case"
+  done
+
+  # Admission is exact: unknown versions, adjacent revisions, and public 8.5
+  # must not acquire CUDA's nonblocking contract from a numeric ACL flag.
+  for stream_version in 0 11600 11800 21700 11701; do
+    "$cxx" -std=c++17 -DASCIFY_TEST_STREAM_ACL_VERSION="$stream_version" \
+      -I"$repo_root/tests/rewrite/stubs" -I"$repo_root/include" \
+      "$runtime_lifecycle_test" -o "$test_tmp/stream-version-$stream_version"
+    "$test_tmp/stream-version-$stream_version" stream-unsupported
+  done
+  "$cxx" -std=c++17 -DASCIFY_TEST_STREAM_MISSING_PATCH \
+    -I"$repo_root/tests/rewrite/stubs" -I"$repo_root/include" \
+    "$runtime_lifecycle_test" -o "$test_tmp/stream-missing-patch"
+  "$test_tmp/stream-missing-patch" stream-unsupported
+  for stream_version in 11600 11700; do
+    "$cxx" -std=c++17 -DASCIFY_TEST_PUBLIC_85_ACL \
+      -DASCIFY_TEST_STREAM_ACL_VERSION="$stream_version" \
+      -I"$repo_root/tests/rewrite/stubs_public85" \
+      -I"$repo_root/tests/rewrite/stubs" -I"$repo_root/include" \
+      "$runtime_lifecycle_test" -o "$test_tmp/stream-public85-$stream_version"
+    "$test_tmp/stream-public85-$stream_version" stream-unsupported
   done
 
   "$cxx" -std=c++17 \

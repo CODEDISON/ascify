@@ -35,6 +35,10 @@ for supported domains and experimental paths.
 
 ### Fixed
 
+- Recognize proven NVIDIA Samples device selection in automatic local-variable
+  initializers, preserving helper source, scope, and transaction checks.
+- Support nonblocking stream creation on the reviewed legacy SIMT / ACL 1.17.0
+  surface without forwarding CUDA flag bits to unrelated ACL stream options.
 - Remove proven redundant, skipped CUDA 13.4.1 `cub/util_type.cuh` includes
   after an authenticated mapped CUB umbrella, preserving caller vec3 ABI
   rejection and unsupported standalone subheader boundaries. CUB/CCCL

@@ -726,12 +726,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 48450)
+  if (contents.size() != 48920)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "3166a87acccad627c072f08620b56d6bdfec579c7e2ef85846a9db093cabf0dd");
+      "33065267b57999e2b98336ba36f05975746f548c85f6696613b1fb48a283a516");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -758,12 +758,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 48450)
+  if (invalidBuffer || contents.size() != 48920)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "3166a87acccad627c072f08620b56d6bdfec579c7e2ef85846a9db093cabf0dd");
+      "33065267b57999e2b98336ba36f05975746f548c85f6696613b1fb48a283a516");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -2324,6 +2324,45 @@ static const clang::FunctionDecl *enclosingNonLambdaFunction(
   return nullptr;
 }
 
+// findCudaDevice is also used to initialize ordinary automatic locals in
+// NVIDIA's complete Samples (for example, template's devID). The shared
+// statement-only walker intentionally does not cross declarations: retain
+// that policy for its other semantic callers and prove this narrow path here.
+static const clang::FunctionDecl *enclosingNvidiaFindDeviceFunction(
+    const clang::Stmt *statement,
+    clang::ASTContext &context) {
+  const clang::Stmt *current = statement;
+  std::set<const clang::Stmt *> active;
+  while (current != nullptr && active.insert(current).second) {
+    const auto parents = context.getParents(*current);
+    if (parents.size() != 1)
+      return nullptr;
+    const clang::DynTypedNode &parent = parents[0];
+    if (parent.get<clang::LambdaExpr>() != nullptr)
+      return nullptr;
+    if (const auto *function = parent.get<clang::FunctionDecl>()) {
+      const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(function);
+      if (method != nullptr && method->getParent()->isLambda())
+        return nullptr;
+      return function;
+    }
+    if (const auto *variable = parent.get<clang::VarDecl>()) {
+      // Namespace/global, static-local, thread-local, parameters and lambda
+      // captures must not acquire an ordinary host-call execution context.
+      if (!variable->isLocalVarDecl() || !variable->hasLocalStorage() ||
+          variable->getTLSKind() != clang::VarDecl::TLS_None)
+        return nullptr;
+      const auto declarationParents = context.getParents(*variable);
+      if (declarationParents.size() != 1)
+        return nullptr;
+      current = declarationParents[0].get<clang::DeclStmt>();
+    } else {
+      current = parent.get<clang::Stmt>();
+    }
+  }
+  return nullptr;
+}
+
 static bool referencesCanonicalValue(const clang::Expr *expression,
                                      const clang::ValueDecl *expected) {
   expression = stripParenAndImplicitCasts(expression);
@@ -3084,7 +3123,7 @@ static bool proveNvidiaFindCudaDeviceCall(
     return false;
 
   const clang::FunctionDecl *enclosing =
-      enclosingNonLambdaFunction(expression, context);
+      enclosingNvidiaFindDeviceFunction(expression, context);
   if (enclosing == nullptr ||
       enclosing->hasAttr<clang::CUDADeviceAttr>() ||
       enclosing->hasAttr<clang::CUDAGlobalAttr>())

@@ -408,9 +408,18 @@ inline aclError aclrtCtxGetCurrentDefaultStream(aclrtStream* stream) {
 }
 #endif
 
+#if defined(ASCIFY_TEST_ACL_CONTROLLABLE_STREAM_CREATE)
+extern aclError ascify_test_create_stream_status;
+#endif
+
 inline aclError aclrtCreateStream(aclrtStream* stream) {
 #if defined(ASCIFY_TEST_ACL_CONTROLLABLE_RUNTIME_LIFECYCLE)
   ++ascify_test_create_stream_calls;
+#endif
+#if defined(ASCIFY_TEST_ACL_CONTROLLABLE_STREAM_CREATE)
+  if (ascify_test_create_stream_status != ACL_SUCCESS) {
+    return ascify_test_create_stream_status;
+  }
 #endif
   *stream = reinterpret_cast<aclrtStream>(1);
   return ACL_SUCCESS;

@@ -153,6 +153,12 @@ run_check "real Ascify NVIDIA sample-helper frontend closure" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
 
+run_check "sample find-device automatic local initializer and scope boundaries" \
+  "$python" -B "$rewrite_dir/check_sample_find_device_scope.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+
 run_check "real ascify local-header publication negatives" \
   sh "$rewrite_dir/check_local_header_integration.sh"
 run_check "half2 syntax and separate rounding conversion" \
