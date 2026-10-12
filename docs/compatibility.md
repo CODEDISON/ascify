@@ -47,6 +47,8 @@ ownership, rebinding, callback ordering, rollback, and normal process exit.
 | Vector constructors | Use the target's vector types and constructors; the reviewed CUDA `float3`/`uint3` record ABI is rejected before publication as described below |
 | Default `dim3` | Only proven, direct, host-local declarations of CUDA's uninitialized type gain explicit `(1,1,1)` initialization; global, device, array, macro, and user-defined cases remain unchanged |
 | Event recording | Explicit streams are preserved; the omitted-stream form queries the current default stream only on the admitted legacy/ACL 1.17+ surface, otherwise returns unsupported |
+| Event queries and host functions | On the reviewed legacy/ACL 1.17.0 surface, use real Ex-event completion state and ordered callbacks on explicit streams; see the [runtime contract](runtime-profiling-and-host-functions.md) |
+| Profiling | An explicit `ASCIFY_PROFILE_DIR` opts into owned CANN collection; link `msprofiler`; unsupported configurations return an error, as described in the [runtime contract](runtime-profiling-and-host-functions.md) |
 | Stream flags | Default creation uses the runtime adapter; nonblocking creation is admitted on the reviewed legacy SIMT / ACL 1.17.0 surface and remains unsupported elsewhere; unknown bits return invalid-parameter status |
 | Device properties | Report the actual SoC name and vector-core count without changing the current binding; publish output only after successful queries; do not invent CUDA compute capability or SM counts |
 | Host math profile | Admit exact `max(float, float)` with `fmaxf` semantics and `min(int, int)`; mixed-type and double max are outside this admission |
@@ -67,14 +69,29 @@ aligned cached path (`rows <= 256`, `4096 <= columns <= 8192`); warp, tail,
 and streaming paths retain scalar stores. These implementation limits do not
 authorize a type-only half2 transformation in arbitrary source.
 
-Registered-symbol copies retain the original symbol object and use the SDK's
-symbol lookup and transfer APIs, including overflow-safe offset/extent checks.
-They require legacy SIMT headers and SDK declarations of both
-`aclrtGetSymbolSize` and `aclrtMemcpyToSymbol`; an ACL version number alone is
-insufficient. Without these APIs, including the compatibility headers remains
-valid, but calling a symbol copy is rejected at compile time. This transfer
-path remains experimental; validate generated code with the target toolchain.
-Host-memory substitutes and fabricated registrations are not supported fallbacks.
+Symbol copies retain the original device storage and check offset and extent
+without integer overflow. For an admitted complete file-scope CUDA device or
+constant definition, the converter emits a small address kernel in the same
+translation unit and registers its host resolver. The kernel obtains the
+actual device address; real allocation, launch, synchronization, copy and free
+operations propagate their errors. Device addresses are resolved afresh for
+each transfer, so reset or context changes cannot reuse a cached address.
+
+The definition must have a literal main-file name and complete, nonvolatile,
+trivially copyable storage without const subobjects. Templates, inline
+variables, anonymous namespaces, extern-only declarations, references and
+unproved storage layouts do not receive a generated resolver. Generated names
+and published macros are checked for collisions. Other symbol tokens retain
+the native SDK lookup and its errors; no host-memory substitute is used.
+
+`cudaMemcpyToSymbol` admits host-to-device and device-to-device transfers;
+`cudaMemcpyFromSymbol` admits device-to-host and device-to-device transfers.
+The current contract requires legacy SIMT headers and SDK declarations of
+`aclrtGetSymbolSize` and the corresponding symbol transfer API. An ACL version
+number alone is insufficient. Missing APIs reject a transfer at compile time
+without making inclusion of the compatibility headers invalid. Validate the
+generated module with the target toolchain. See the [source boundaries](../tests/rewrite/check_symbol_conversion.py)
+and [transfer contracts](../tests/rewrite/check_symbol_compat.sh).
 
 ### CUDA float3 and uint3
 
@@ -255,8 +272,16 @@ matching signed or unsigned 32-bit integer types; increment/decrement require
 unsigned values. Local aliases, helper parameters, device-global variables,
 shared/private storage, macros, float, and 64-bit operands do not receive a
 global wrapper. Unsupported target header families reject wrapper instantiation.
-Shared atomic lowering remains unadmitted; a global-memory cast or non-atomic
-read/modify/write cannot substitute for it.
+A separate generic `atomicAdd` path accepts matching signed or unsigned 32-bit
+operands rooted at the current pure-device, non-template helper's pointer
+parameter. It uses the target's public generic atomic operation for the actual
+GM or UB address space, without a global-memory cast. Direct shared-variable
+expressions, local aliases, other atomic families, host/device helpers,
+qualified or macro calls, floating-point and 64-bit operands remain outside
+this proof. The reviewed legacy pure-SIMT header surface is required; other
+header families fail wrapper instantiation. See the
+[conversion boundaries](../tests/rewrite/check_generic_atomic_conversion.py)
+and [target rejection contract](../tests/rewrite/generic_atomic_fail_closed_test.cpp).
 
 Private object copying is experimental and requires target/device validation.
 It accepts only a trusted `memcpy` declaration or verified forwarding
@@ -299,3 +324,44 @@ float narrowing remains an unfixed limitation for those host contexts; passing
 a boundary test does not establish semantic correctness or target support for
 them. Regression:
 [`check_host_standard_math.py`](../tests/rewrite/check_host_standard_math.py).
+
+### Real memory and restricted kernel thread limits
+
+On the `dav-c310-vec` legacy SIMT family, `cudaGetDeviceProperties` exposes
+`totalGlobalMem` from CANN's actual total-global-memory device query. Query
+errors propagate; invalid values and failed queries leave the caller's output
+unchanged. This does not add CUDA SM version metadata.
+
+A restricted `cudaFuncGetAttributes` conversion can publish
+`maxThreadsPerBlock` when the CUDA SDK call names a concrete, defined,
+non-template global kernel at translation-unit scope in the input or owned
+local-header closure; namespace kernels are retained. The
+compiler bound is 1024 without a launch attribute, or a literal single-argument
+`__launch_bounds__(N)` in 1..2048. The runtime result is the smaller of that
+per-kernel bound and the active device's real thread limit. CCEC's pure-SIMT
+contract defines register allocation from this bound; a device-wide limit alone
+is not kernel metadata.
+
+The kernel reference must retain its physical source token through any macro
+argument expansion and spell the canonical qualified kernel name (optionally
+with `&` or parentheses); macro bodies and namespace aliases cannot select the
+kernel. The kernel must have a single definition with no forward declarations,
+in a physical file without
+conditional preprocessing, and its signature may use only the actual SDK
+`__global__` and `__launch_bounds__` macros. This conservative boundary also
+retains kernels declared in guarded headers. Kernel definition and include
+selection must remain identical under source and target preprocessing;
+conditional selection in parent include files is outside this support boundary
+and is not fully audited automatically. The attribute output
+must be one automatic local object declared using the direct SDK record name,
+with no written initializer or an empty `{}` initializer, used only by that
+query and by value reads of
+`maxThreadsPerBlock`, including parenthesized and lvalue conditional selections
+whose result is read by value (such as a `MIN` macro). The complete declaration statement and query call must be
+outside conditional preprocessing and contain no macro invocations or
+preprocessor directives. Nonempty or copy initialization, copies, aliases, captures,
+escapes, layout observations through `offsetof`, other field observations and
+unproved maximum-field uses refuse publication.
+Only this field is written after all runtime queries succeed. This is not full
+`cudaFuncAttributes` support and does not supply static shared-memory metadata.
+The legacy shared-size adapter is unchanged.

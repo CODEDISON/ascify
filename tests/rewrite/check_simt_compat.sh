@@ -121,7 +121,7 @@ check_static_contract() {
   require_fixed 'sProvenGlobalAtomicCall' "$action_cpp"
   require_fixed 'lowerCudaGlobalScalarDoubleParam' "$action_cpp"
   require_fixed 'rewriteProvenGlobalAtomicCall' "$action_cpp"
-  require_fixed 'isAddressRootedAtCurrentGlobalParameter' "$action_cpp"
+  require_fixed 'isAddressRootedAtCurrentFunctionParameter' "$action_cpp"
   require_fixed 'clang::ParmVarDecl' "$action_cpp"
   require_fixed 'enclosingNonLambdaFunction' "$action_cpp"
   require_fixed 'ASCIFY_GLOBAL' "$device_map"
@@ -462,6 +462,23 @@ if command -v "$cxx" >/dev/null 2>&1; then
     fi
     require_fixed 'no admitted global atomic API in this SIMT' "$atomic_fail_log"
     atomic_fail_case=$((atomic_fail_case + 1))
+  done
+
+  for generic_family in legacy public85; do
+    if [ "$generic_family" = public85 ]; then
+      generic_flags="-DASCIFY_TEST_PUBLIC_85_ACL -I$repo_root/tests/rewrite/stubs_public85"
+    else
+      generic_flags=""
+    fi
+    # shellcheck disable=SC2086
+    if "$cxx" -std=c++17 -fsyntax-only $generic_flags \
+      -I"$repo_root/tests/rewrite/stubs" -I"$repo_root/include" \
+      "$repo_root/tests/rewrite/generic_atomic_fail_closed_test.cpp" \
+      >"$test_tmp/generic-fail.out" 2>"$test_tmp/generic-fail.log"; then
+      echo "unsupported generic atomic family $generic_family compiled unexpectedly" >&2
+      exit 1
+    fi
+    require_fixed 'generic atomic add requires the admitted pure-SIMT API' "$test_tmp/generic-fail.log"
   done
 
   cleanup_compat_tests

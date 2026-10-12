@@ -347,6 +347,12 @@ extern int64_t ascify_test_vector_core_count;
 extern int64_t ascify_test_max_threads_per_core;
 extern int ascify_test_get_device_calls;
 extern int ascify_test_get_device_info_calls;
+#if defined(ASCIFY_TEST_ACL_CONTROLLABLE_MEMORY_PROPERTY)
+extern aclError ascify_test_memory_info_status;
+extern int64_t ascify_test_total_global_memory;
+extern aclError ascify_test_block_limit_status;
+extern int64_t ascify_test_block_limit;
+#endif
 
 inline aclError aclrtGetDevice(int32_t* device) {
   ++ascify_test_get_device_calls;
@@ -360,6 +366,17 @@ inline aclError aclrtGetDeviceInfo(
     uint32_t device, aclrtDevAttr attribute, int64_t* value) {
   (void)device;
   ++ascify_test_get_device_info_calls;
+#if defined(ASCIFY_TEST_ACL_CONTROLLABLE_MEMORY_PROPERTY)
+  if (static_cast<unsigned int>(attribute) == 209U) {
+    if (ascify_test_block_limit_status == ACL_SUCCESS) *value = ascify_test_block_limit;
+    return ascify_test_block_limit_status;
+  }
+  if (static_cast<unsigned int>(attribute) == 301U) {
+    if (ascify_test_memory_info_status == ACL_SUCCESS)
+      *value = ascify_test_total_global_memory;
+    return ascify_test_memory_info_status;
+  }
+#endif
   if (attribute == ACL_DEV_ATTR_VECTOR_CORE_NUM) {
     if (ascify_test_vector_core_info_status == ACL_SUCCESS) {
       *value = ascify_test_vector_core_count;

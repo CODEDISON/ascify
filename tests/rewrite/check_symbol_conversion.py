@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Real CUDA parser and generated same-TU symbol resolver boundaries (no NPU)."""
-import argparse,hashlib,json,re,subprocess,tempfile
+import argparse,hashlib,json,re,shutil,subprocess,tempfile
 from pathlib import Path
 
 CASES = [
@@ -44,7 +44,14 @@ CASES.append(('generated_macro_collision', body, None))
 
 def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
 def main():
- p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--cuda-path',required=True,type=Path);p.add_argument('--resource-dir',required=True,type=Path);p.add_argument('--clang',required=True,type=Path);p.add_argument('--evidence-dir',required=True,type=Path);a=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--cuda-path',required=True,type=Path);p.add_argument('--resource-dir',required=True,type=Path);p.add_argument('--clang',type=Path);p.add_argument('--evidence-dir',required=True,type=Path);a=p.parse_args()
+ a.binary=a.binary.resolve();a.cuda_path=a.cuda_path.resolve();a.resource_dir=a.resource_dir.resolve()
+ choices=[a.clang] if a.clang else [a.binary.parent/'clang++',a.resource_dir.parents[2]/'bin/clang++',Path(shutil.which('clang++') or '/missing')]
+ a.clang=next((x.resolve() for x in choices if x.is_file()),None)
+ if a.clang is None or not a.binary.is_file():p.error('supply a real binary and matching --clang')
+ version=subprocess.check_output([str(a.clang),'--version'],text=True)
+ major=re.search(r'\bclang version (\d+)(?:\.|\s)',version)
+ if major is None or major.group(1)!=a.resource_dir.name.split('.')[0]:p.error('clang version must match resource directory')
  out=a.evidence_dir.resolve();out.mkdir(parents=True,exist_ok=False)
  summary={'passed':False,'binary_sha256':sha(a.binary),'clang_sha256':sha(a.clang),'cases':[],'scope':'Real CUDA source validation and converter output; no target execution'}
  def save(): (out/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
@@ -59,7 +66,7 @@ def main():
   z=run(d,'syntax',[a.clang,src,'-x','cuda','-std=c++17','-fsyntax-only','--cuda-host-only','-nocudalib','--cuda-path='+str(a.cuda_path),'-resource-dir='+str(a.resource_dir),'-Wno-unknown-cuda-version']);row['syntax_returncode']=z.returncode;save();assert z.returncode==0,(name,z.stderr)
   z=run(d,'convert',[a.binary,src,'--target-policy=dav-c310-vec','--simt-math=fast','--target-recipe=none','--default-preprocessor','--cuda-path='+str(a.cuda_path),'--clang-resource-directory='+str(a.resource_dir),'--migration-receipt='+str(receipt),'-o',dst,'--','-x','cuda','-std=c++17']);row['conversion_returncode']=z.returncode;save()
   if expected is None:
-   assert z.returncode!=0 and not dst.exists() and 'Ascify cannot publish CUDA compatibility output' in z.stderr,(name,z.stderr)
+   assert z.returncode>0 and not dst.exists() and 'Ascify cannot publish CUDA compatibility output' in z.stderr,(name,z.stderr)
   else:
    assert z.returncode==0 and json.loads(receipt.read_text())['status']=='succeeded',(name,z.stderr)
    text=dst.read_text();actual=re.findall(r'^ASCIFY_REGISTER_DEVICE_SYMBOL\(::([\w:]+), ascify_generated_symbol_\d+\);$',text,re.M)

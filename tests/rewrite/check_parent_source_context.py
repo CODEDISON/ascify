@@ -104,12 +104,12 @@ def main():
             root.write_text(parent_text)
             child.write_text(child_text)
             result = convert(standard=standard)
-            assert result.returncode != 0, label + ': unsafe context accepted'
+            assert result.returncode > 0, label + ': unsafe context accepted'
             assert reason in result.stderr, label + ': ' + result.stderr
             assert identity([output, marker]) == published, label + ': prior output changed'
             fresh = work / (label + '.cce')
             result = convert(fresh, standard=standard)
-            assert result.returncode != 0 and not fresh.exists(), label
+            assert result.returncode > 0 and not fresh.exists(), label
             assert not Path(str(fresh) + '.headers').exists(), label
             print(label + ': rejected atomically on fresh output and retry')
 

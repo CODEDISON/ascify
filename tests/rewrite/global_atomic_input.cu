@@ -20,7 +20,7 @@ __global__ void GlobalAtomicCoverage(
   old_values[10] = atomicDec(&unsigned_values[index], 10U);
 }
 
-__device__ int RejectedHelperAtomic(int* unknown_address) {
+__device__ int GenericHelperAtomic(int* unknown_address) {
   return atomicAdd(unknown_address, 1);
 }
 

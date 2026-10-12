@@ -197,7 +197,7 @@ def main():
                     row['conversion_returncode'] = conversion.returncode
                     save()
                     if item.refused:
-                        if conversion.returncode == 0 or output.exists():
+                        if conversion.returncode <= 0 or output.exists():
                             raise AssertionError(item.name + ': unsafe output was published')
                         if 'Ascify cannot publish CUDA compatibility output' not in conversion.stderr:
                             raise AssertionError(item.name + ': unexpected rejection: ' + conversion.stderr)

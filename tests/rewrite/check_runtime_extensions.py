@@ -79,7 +79,7 @@ try:
   if not a.source_only:
    r=run(d,'conversion',[a.binary,cu,'--target-policy=dav-c310-vec','--simt-math=fast','--target-recipe=none','--default-preprocessor','--cuda-path='+str(cuda),'--clang-resource-directory='+str(resource),'--migration-receipt='+str(receipt),'-o',out,'--',*common]);row['conversion_rc']=r.returncode
    if refused:
-    assert r.returncode!=0 and not out.exists(),(name,r.stderr)
+    assert r.returncode>0 and not out.exists(),(name,r.stderr)
     assert 'profiler header boundary' in r.stderr or 'Ascify cannot publish CUDA compatibility output' in r.stderr,(name,r.stderr)
    else:
     assert r.returncode==0,(name,r.stderr)

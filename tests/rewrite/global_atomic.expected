@@ -13,7 +13,7 @@
 +old_values[8] = ascify::atomic_xor_global(&signed_values[index], 9)
 +old_values[9] = ascify::atomic_inc_global(unsigned_values + index, 10U)
 +old_values[10] = ascify::atomic_dec_global(&unsigned_values[index], 10U)
-+return atomicAdd(unknown_address, 1)
++return ::ascify::atomic_add_generic(unknown_address, 1)
 +atomicAdd(&shared_value, 1)
 +atomicAdd(&local_value, 1)
 +atomicAdd(local_alias + index, 1)

@@ -206,6 +206,28 @@ __aicore__ ASCIFY_FORCEINLINE uint32_t warp_reduce_min(uint32_t value) {
 #endif
 }
 
+// The public pure-SIMT overload preserves generic GM/UB pointer semantics.
+// This target is selected only for exact SDK int/uint atomicAdd calls rooted
+// at a pure device helper parameter. It performs no address-space cast.
+#if defined(ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS) && \
+    defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
+__aicore__ ASCIFY_FORCEINLINE int32_t atomic_add_generic(
+    int32_t *address, int32_t value) {
+  return asc_atomic_add(address, value);
+}
+__aicore__ ASCIFY_FORCEINLINE uint32_t atomic_add_generic(
+    uint32_t *address, uint32_t value) {
+  return asc_atomic_add(address, value);
+}
+#else
+template<typename T, typename V>
+__aicore__ ASCIFY_FORCEINLINE T atomic_add_generic(T *, V) {
+  static_assert(detail::dependentFalse<T>::value,
+                "Ascify: generic atomic add requires the admitted pure-SIMT API");
+  return T{};
+}
+#endif
+
 // These wrappers are internal targets for AST-proven global atomic calls.
 // The frontend admits only addresses rooted at a parameter of the current
 // CUDA global kernel. The explicit cast supplies the address-space type that
@@ -292,6 +314,8 @@ ASCIFY_DEFINE_UNAVAILABLE_GLOBAL_ATOMIC_BINARY(atomic_xor_global)
 
 struct cudaFuncAttributes {
   size_t sharedSizeBytes = 0;
+  // Published only by the converter's proven max-only query path below.
+  int maxThreadsPerBlock = 0;
 };
 
 enum cudaFuncAttribute {
@@ -1233,6 +1257,7 @@ inline aclError cudaDeviceGetAttribute(int* value, aclrtDevAttr attribute, int d
 struct cudaDeviceProp {
   char name[256];
   int multiProcessorCount;
+  size_t totalGlobalMem;
 };
 
 inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) {
@@ -1254,6 +1279,17 @@ inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) 
                             ACL_DEV_ATTR_VECTOR_CORE_NUM, &cores);
   if (status != ACL_SUCCESS) { return status; }
   if (cores <= 0 || cores > INT_MAX) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  // CANN's total available global memory is measured in bytes. Keep the
+  // runtime's full result width until it has been checked against size_t.
+  // Attribute 301 is a frozen RTS ABI value; older headers may omit its name.
+  int64_t memory = 0;
+  status = aclrtGetDeviceInfo(static_cast<uint32_t>(device),
+                            static_cast<aclrtDevAttr>(301U), &memory);
+  if (status != ACL_SUCCESS) { return status; }
+  if (memory <= 0 || static_cast<uint64_t>(memory) >
+                         static_cast<uint64_t>(SIZE_MAX)) {
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  }
   const char* const soc_name = aclrtGetSocName();
   if (soc_name == nullptr || soc_name[0] == '\0') {
     return ACL_ERROR_FEATURE_UNSUPPORTED;
@@ -1265,6 +1301,7 @@ inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) 
     ++index;
   }
   result.multiProcessorCount = static_cast<int>(cores);
+  result.totalGlobalMem = static_cast<size_t>(memory);
   *properties = result;
   return ACL_SUCCESS;
 }
@@ -1328,6 +1365,42 @@ inline aclError cudaFuncGetAttributes(cudaFuncAttributes* attributes, Kernel) {
   if (attributes == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
   attributes->sharedSizeBytes = 0;
   return ACL_SUCCESS;
+}
+
+// This restricted query supplies only maxThreadsPerBlock. The converter proves
+// a concrete kernel definition, its literal/default pure-SIMT launch bound,
+// and that the local output object has no other observations or escapes.
+// CCEC allocates per-thread registers from that bound (default 1024), while
+// the live device supplies its independent limit. Do not infer static UB size.
+template<unsigned MaxThreads, typename Kernel>
+inline aclError cudaFuncGetAttributesMaxThreads(
+    cudaFuncAttributes* attributes, Kernel kernel) {
+  static_assert(MaxThreads >= 1 && MaxThreads <= 2048,
+                "Ascify: unproved pure-SIMT kernel launch bound");
+  static_assert(std::is_pointer<Kernel>::value &&
+                    std::is_function<typename std::remove_pointer<Kernel>::type>::value,
+                "Ascify: a concrete kernel function pointer is required");
+  if (attributes == nullptr || kernel == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3)
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) return ready;
+  int32_t device = -1;
+  aclError status = aclrtGetDevice(&device);
+  if (status != ACL_SUCCESS) return status;
+  if (device < 0) return ACL_ERROR_FEATURE_UNSUPPORTED;
+  int64_t device_limit = 0;
+  status = aclrtGetDeviceInfo(static_cast<uint32_t>(device),
+                            cudaDevAttrMaxThreadsPerBlock, &device_limit);
+  if (status != ACL_SUCCESS) return status;
+  if (device_limit <= 0 || device_limit > INT_MAX)
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  const int maximum = device_limit < MaxThreads ? static_cast<int>(device_limit)
+                                               : static_cast<int>(MaxThreads);
+  attributes->maxThreadsPerBlock = maximum;
+  return ACL_SUCCESS;
+#else
+  return ACL_ERROR_FEATURE_UNSUPPORTED;
+#endif
 }
 
 template<typename Kernel>

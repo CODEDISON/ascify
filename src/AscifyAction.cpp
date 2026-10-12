@@ -732,12 +732,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 59059)
+  if (contents.size() != 62552)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "79faa9df45555bde645f0e0b29bfe679f570b04974d0e7c2f8d4c1051fab43af");
+      "aac34d02a6b50b08cb6a75a1300a381b898aa3db7098220fe880ac33a5c7019b");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -764,12 +764,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 59059)
+  if (invalidBuffer || contents.size() != 62552)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "79faa9df45555bde645f0e0b29bfe679f570b04974d0e7c2f8d4c1051fab43af");
+      "aac34d02a6b50b08cb6a75a1300a381b898aa3db7098220fe880ac33a5c7019b");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -3305,11 +3305,12 @@ static bool isAdmittedNvidiaLocalStatusUse(
   return uses.TraverseStmt(owner->getBody());
 }
 
-// This is deliberately a provenance proof, not a pointer-type guess.  Only a
-// direct parameter of the current CUDA global function establishes global
-// memory.  Local aliases, globals, fields, shared variables, helper parameters,
-// and conditional pointer selection all fail closed.
-static bool isAddressRootedAtCurrentGlobalParameter(
+// Prove a direct parameter root, independent of the enclosing function kind.
+// The global-atomic caller separately requires a CUDA kernel, which establishes
+// GM. The generic-add caller requires a pure device helper and preserves its
+// actual address space. Local aliases, globals, fields, shared variables and
+// conditional pointer selection fail this expression proof.
+static bool isAddressRootedAtCurrentFunctionParameter(
     const clang::Expr *expression,
     const clang::FunctionDecl *kernel,
     clang::ASTContext &context) {
@@ -3342,13 +3343,13 @@ static bool isAddressRootedAtCurrentGlobalParameter(
         classifyGlobalAtomicPointer(cast->getSubExpr()->getType(), context) ==
             GlobalAtomicScalarKind::Unsupported)
       return false;
-    return isAddressRootedAtCurrentGlobalParameter(
+    return isAddressRootedAtCurrentFunctionParameter(
         cast->getSubExpr(), kernel, context);
   }
 
   if (const auto *subscript =
           llvm::dyn_cast_or_null<clang::ArraySubscriptExpr>(expression))
-    return isAddressRootedAtCurrentGlobalParameter(
+    return isAddressRootedAtCurrentFunctionParameter(
         subscript->getBase(), kernel, context);
 
   if (const auto *unary =
@@ -3356,7 +3357,7 @@ static bool isAddressRootedAtCurrentGlobalParameter(
     if (unary->getOpcode() != clang::UO_AddrOf &&
         unary->getOpcode() != clang::UO_Deref)
       return false;
-    return isAddressRootedAtCurrentGlobalParameter(
+    return isAddressRootedAtCurrentFunctionParameter(
         unary->getSubExpr(), kernel, context);
   }
 
@@ -3375,7 +3376,7 @@ static bool isAddressRootedAtCurrentGlobalParameter(
   if (binary->getOpcode() == clang::BO_Sub) {
     return lhsPointer && !rhsPointer &&
            binary->getRHS()->getType()->isIntegerType() &&
-           isAddressRootedAtCurrentGlobalParameter(
+           isAddressRootedAtCurrentFunctionParameter(
                binary->getLHS(), kernel, context);
   }
   if (lhsPointer == rhsPointer)
@@ -3385,7 +3386,7 @@ static bool isAddressRootedAtCurrentGlobalParameter(
   const clang::Expr *offset =
       lhsPointer ? binary->getRHS() : binary->getLHS();
   return offset->getType()->isIntegerType() &&
-         isAddressRootedAtCurrentGlobalParameter(
+         isAddressRootedAtCurrentFunctionParameter(
              pointer, kernel, context);
 }
 
@@ -5917,6 +5918,448 @@ bool AscifyAction::rewriteUnsupportedCudaSmAttribute(
   return true;
 }
 
+// A launch-bound proof describes one concrete kernel and one nonescaping
+// output object. It does not turn the partial adapter into full CUDA metadata.
+bool AscifyAction::rewriteProvenKernelAttributeCall(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
+  if (call == nullptr || Result.Context == nullptr || Result.SourceManager == nullptr ||
+      call->getNumArgs() != 2 || call->isTypeDependent() || call->isValueDependent() ||
+      getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks ||
+      TargetPolicy != "dav-c310-vec") return false;
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  const auto *callee = call->getDirectCallee();
+  if (callee == nullptr || callee->getQualifiedNameAsString() != "cudaFuncGetAttributes" ||
+      callee->isVariadic() || callee->getNumParams() != 2 ||
+      !isAdmittedCudaRuntimeStatusCall(source, call, trustedSystemFileIds)) return false;
+  for (const auto *decl : callee->redecls()) {
+    const auto loc = source.getSpellingLoc(decl->getLocation());
+    if (loc.isInvalid() || !cudaRuntimeApiSdkFileIds.count(source.getFileID(loc).getHashValue()))
+      return false;
+  }
+  const auto *owner = enclosingNvidiaFindDeviceFunction(call, context);
+  if (owner == nullptr || !owner->hasBody() ||
+      owner->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      owner->hasAttr<clang::CUDADeviceAttr>() || owner->hasAttr<clang::CUDAGlobalAttr>())
+    return false;
+  // Prove the complete physical spelling at its original preprocessing point.
+  // This also sees empty-expanding tokens omitted from AST child ranges.
+  auto stablePhysicalRange = [&](clang::SourceLocation begin,
+                                 clang::SourceLocation end,
+                                 bool sdkQualifiers, unsigned boundary) {
+    if (begin.isInvalid() || end.isInvalid() || begin.isMacroID() || end.isMacroID() ||
+        source.getFileID(begin) != source.getFileID(end)) return false;
+    const auto file = source.getFileID(begin);
+    bool invalid = false;
+    const auto buffer = source.getBufferData(file, &invalid);
+    if (invalid) return false;
+    const auto finish = clang::Lexer::getLocForEndOfToken(
+        end, 0, source, getCompilerInstance().getLangOpts());
+    if (finish.isInvalid()) return false;
+    const unsigned first = source.getFileOffset(begin), last = source.getFileOffset(finish);
+    clang::Lexer lexer(source.getLocForStartOfFile(file),
+        getCompilerInstance().getLangOpts(), buffer.data(), buffer.data(),
+        buffer.data() + buffer.size());
+    auto &preprocessor = getCompilerInstance().getPreprocessor();
+    clang::Token token;
+    unsigned conditionalDepth = 0;
+    bool directiveLine = false, entered = false, hasPrevious = false;
+    clang::tok::TokenKind previous = clang::tok::unknown;
+    while (true) {
+      lexer.LexFromRawLexer(token);
+      if (token.is(clang::tok::eof)) break;
+      const unsigned position = source.getFileOffset(token.getLocation());
+      if (position >= last) break;
+      if (token.isAtStartOfLine()) directiveLine = false;
+      if (token.is(clang::tok::hash) && token.isAtStartOfLine()) {
+        if (position >= first) return false;
+        directiveLine = true;
+        lexer.LexFromRawLexer(token);
+        if (token.is(clang::tok::eof)) break;
+        if (token.is(clang::tok::raw_identifier)) {
+          const auto name = token.getRawIdentifier();
+          if (name == "if" || name == "ifdef" || name == "ifndef") ++conditionalDepth;
+          else if (name == "endif") {
+            if (conditionalDepth == 0) return false;
+            --conditionalDepth;
+          }
+        }
+        continue;
+      }
+      if (directiveLine) continue;
+      if (position < first) {
+        previous = token.getKind(); hasPrevious = true; continue;
+      }
+      if (conditionalDepth != 0) return false;
+      if (!entered) {
+        if (boundary != 0 && hasPrevious && previous != clang::tok::semi &&
+            previous != clang::tok::r_brace &&
+            !(boundary == 1 && previous == clang::tok::l_brace)) return false;
+        entered = true;
+      }
+      if (!token.is(clang::tok::raw_identifier)) continue;
+      const auto name = token.getRawIdentifier();
+      const auto macro = preprocessor.getMacroDefinitionAtLoc(
+          preprocessor.getIdentifierInfo(name), token.getLocation());
+      if (!macro) continue;
+      if (!sdkQualifiers || (name != "__global__" && name != "__launch_bounds__"))
+        return false;
+      const auto *info = macro.getMacroInfo();
+      if (info == nullptr) return false;
+      const auto location = source.getSpellingLoc(info->getDefinitionLoc());
+      if (location.isInvalid() ||
+          !cudaRuntimeApiSdkFileIds.count(source.getFileID(location).getHashValue()))
+        return false;
+    }
+    return entered;
+  };
+  const auto *address = llvm::dyn_cast<clang::UnaryOperator>(call->getArg(0)->IgnoreParenImpCasts());
+  if (address == nullptr || address->getOpcode() != clang::UO_AddrOf) return false;
+  const auto *output = llvm::dyn_cast<clang::DeclRefExpr>(address->getSubExpr()->IgnoreParenImpCasts());
+  const auto *object = output == nullptr ? nullptr : llvm::dyn_cast<clang::VarDecl>(output->getDecl());
+  if (object == nullptr || !object->isLocalVarDecl() || !object->hasLocalStorage() ||
+      object->getType().hasQualifiers() || object->getType()->isReferenceType() ||
+      object->getDeclContext()->getRedeclContext() != owner->getRedeclContext()) return false;
+  const auto *record = object->getType()->getAs<clang::RecordType>();
+  if (record == nullptr || record->getDecl()->getQualifiedNameAsString() != "cudaFuncAttributes")
+    return false;
+  const auto recordLoc = source.getSpellingLoc(record->getDecl()->getLocation());
+  if (recordLoc.isInvalid() || !cudaRuntimeApiSdkFileIds.count(source.getFileID(recordLoc).getHashValue()))
+    return false;
+  const auto objectParents = context.getParents(*object);
+  const auto *declaration = objectParents.size() == 1
+      ? objectParents[0].get<clang::DeclStmt>() : nullptr;
+  if (declaration == nullptr || !declaration->isSingleDecl() ||
+      !stablePhysicalRange(declaration->getBeginLoc(), declaration->getEndLoc(), false, 1))
+    return false;
+  // A source alias may itself vary under target preprocessing. Keep the direct
+  // SDK record spelling, with an optional elaborated `struct` keyword only.
+  if (object->getTypeSourceInfo() == nullptr) return false;
+  bool invalidTypeText = false;
+  auto typeText = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(
+          object->getTypeSourceInfo()->getTypeLoc().getSourceRange()), source,
+      getCompilerInstance().getLangOpts(), &invalidTypeText).trim();
+  if (typeText.consume_front("struct")) {
+    if (typeText.ltrim().size() == typeText.size()) return false;
+    typeText = typeText.trim();
+  }
+  if (invalidTypeText || typeText != "cudaFuncAttributes") return false;
+  // CUDA and the partial target record have different aggregate layouts.
+  // Only an absent source initializer or syntactically empty braces preserve
+  // the admitted max field if the query fails without modifying the output.
+  if (const auto *initializer = object->getInit()) {
+    if (const auto *list = llvm::dyn_cast<clang::InitListExpr>(initializer)) {
+      if (const auto *syntax = list->getSyntacticForm()) list = syntax;
+      if (list->getNumInits() != 0 || list->getBeginLoc().isMacroID() ||
+          list->getEndLoc().isMacroID()) return false;
+      // Even an empty-expanding macro between physical braces can change under
+      // target preprocessing. Require the actual brace contents to be empty.
+      bool invalid = false;
+      auto spelling = clang::Lexer::getSourceText(
+          clang::CharSourceRange::getTokenRange(list->getSourceRange()), source,
+          getCompilerInstance().getLangOpts(), &invalid).trim();
+      if (invalid || !spelling.consume_front("{") || !spelling.consume_back("}") ||
+          !spelling.trim().empty()) return false;
+    } else {
+      // Clang represents `cudaFuncAttributes a;` with an implicit trivial
+      // default construction at the declarator, despite no written initializer.
+      const auto *construction = llvm::dyn_cast<clang::CXXConstructExpr>(initializer);
+      if (construction == nullptr || construction->getNumArgs() != 0 ||
+          !construction->getConstructor()->isImplicit() ||
+          !construction->getConstructor()->isDefaultConstructor() ||
+          !construction->getConstructor()->isTrivial() ||
+          construction->getParenOrBraceRange().isValid() ||
+          construction->getBeginLoc() != object->getLocation() ||
+          construction->getEndLoc() != object->getLocation()) return false;
+    }
+  }
+  struct Uses : clang::RecursiveASTVisitor<Uses> {
+    clang::ASTContext &context;
+    const clang::VarDecl *object;
+    const clang::DeclRefExpr *output;
+    unsigned reads = 0;
+    Uses(clang::ASTContext &c, const clang::VarDecl *v, const clang::DeclRefExpr *o)
+        : context(c), object(v), output(o) {}
+    bool VisitLambdaExpr(clang::LambdaExpr *lambda) {
+      for (const auto &capture : lambda->captures())
+        if (capture.capturesVariable() &&
+            capture.getCapturedVar()->getCanonicalDecl() == object->getCanonicalDecl())
+          return false;
+      return true;
+    }
+    bool VisitDeclRefExpr(clang::DeclRefExpr *ref) {
+      if (ref->getDecl()->getCanonicalDecl() != object->getCanonicalDecl() || ref == output)
+        return true;
+      const clang::Stmt *node = ref;
+      auto parents = context.getParents(*node);
+      while (parents.size() == 1 && parents[0].get<clang::ParenExpr>() != nullptr) {
+        node = parents[0].get<clang::ParenExpr>(); parents = context.getParents(*node);
+      }
+      const auto *member = parents.size() == 1 ? parents[0].get<clang::MemberExpr>() : nullptr;
+      if (member == nullptr || member->isArrow() ||
+          member->getMemberDecl()->getName() != "maxThreadsPerBlock") return false;
+      // Parentheses and an lvalue conditional's selected operand preserve
+      // the same field location. Admit them only on a path ending in a value
+      // read; reference binding, writes and taking the result's address fail.
+      node = member;
+      parents = context.getParents(*node);
+      while (parents.size() == 1) {
+        if (const auto *paren = parents[0].get<clang::ParenExpr>()) {
+          node = paren;
+        } else if (const auto *conditional = parents[0].get<clang::ConditionalOperator>()) {
+          if (!conditional->isLValue() ||
+              (conditional->getTrueExpr() != node && conditional->getFalseExpr() != node))
+            return false;
+          node = conditional;
+        } else break;
+        parents = context.getParents(*node);
+      }
+      const auto *read = parents.size() == 1 ? parents[0].get<clang::ImplicitCastExpr>() : nullptr;
+      if (read == nullptr || read->getCastKind() != clang::CK_LValueToRValue) return false;
+      ++reads;
+      return true;
+    }
+  } uses(context, object, output);
+  if (!uses.TraverseStmt(owner->getBody()) || uses.reads == 0) return false;
+
+  const clang::Expr *kernelExpr = call->getArg(1)->IgnoreParenImpCasts();
+  if (const auto *unary = llvm::dyn_cast<clang::UnaryOperator>(kernelExpr)) {
+    if (unary->getOpcode() != clang::UO_AddrOf) return false;
+    kernelExpr = unary->getSubExpr()->IgnoreParenImpCasts();
+  }
+  const auto *kernelRef = llvm::dyn_cast<clang::DeclRefExpr>(kernelExpr);
+  const auto *kernel = kernelRef == nullptr ? nullptr : llvm::dyn_cast<clang::FunctionDecl>(kernelRef->getDecl());
+  // A macro body can select a different kernel under target preprocessing.
+  // Keep only the original physical argument token through argument expansion.
+  if (kernelRef == nullptr) return false;
+  auto physicalArgumentLocation = [&](clang::SourceLocation location) {
+    while (location.isMacroID()) {
+      if (!source.isMacroArgExpansion(location)) return clang::SourceLocation();
+      location = source.getImmediateSpellingLoc(location);
+    }
+    return location;
+  };
+  // Scan the whole physical call as well: an empty-expanding macro before or
+  // after the kernel argument does not appear in that argument's AST range.
+  const auto callBegin = physicalArgumentLocation(call->getBeginLoc());
+  const auto callEnd = physicalArgumentLocation(call->getEndLoc());
+  if (callBegin.isInvalid() || callEnd.isInvalid() ||
+      source.getFileID(callBegin) != source.getFileID(callEnd)) return false;
+  if (!stablePhysicalRange(callBegin, callEnd, false, 0)) return false;
+  auto &preprocessor = getCompilerInstance().getPreprocessor();
+  const auto kernelBegin = physicalArgumentLocation(call->getArg(1)->getBeginLoc());
+  const auto kernelEnd = physicalArgumentLocation(call->getArg(1)->getEndLoc());
+  if (kernelBegin.isInvalid() || kernelEnd.isInvalid() ||
+      source.getFileID(kernelBegin) != source.getFileID(kernelEnd)) return false;
+  bool invalidKernelText = false;
+  const auto kernelText = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(kernelBegin, kernelEnd), source,
+      getCompilerInstance().getLangOpts(), &invalidKernelText);
+  if (invalidKernelText || kernelText.empty()) return false;
+  // Namespace qualifier macros and empty-expanding tokens can occur between
+  // physical endpoints. Prove the complete source reference has no such macro.
+  // Unlike a complete SourceManager buffer, this source fragment is followed
+  // by punctuation. Give the raw lexer its required NUL-terminated buffer.
+  const std::string ownedKernelText = kernelText.str();
+  clang::Lexer kernelLexer(clang::SourceLocation(),
+      getCompilerInstance().getLangOpts(), ownedKernelText.data(), ownedKernelText.data(),
+      ownedKernelText.data() + ownedKernelText.size());
+  clang::Token token;
+  std::string kernelSpelling;
+  while (true) {
+    // LexFromRawLexer reports buffer exhaustion even for its final valid token.
+    // Test token kind so a final identifier without whitespace is still proved.
+    kernelLexer.LexFromRawLexer(token);
+    if (token.is(clang::tok::eof)) break;
+    if (token.is(clang::tok::raw_identifier)) {
+      if (preprocessor.getMacroDefinitionAtLoc(
+              preprocessor.getIdentifierInfo(token.getRawIdentifier()), kernelBegin))
+        return false;
+      kernelSpelling += token.getRawIdentifier().str();
+    } else if (token.is(clang::tok::coloncolon)) {
+      kernelSpelling += "::";
+    } else if (!token.isOneOf(clang::tok::l_paren, clang::tok::r_paren,
+                              clang::tok::amp)) {
+      return false;
+    }
+  }
+  llvm::StringRef qualifiedSpelling(kernelSpelling);
+  qualifiedSpelling.consume_front("::");
+  // Aliases or unqualified lookup through another namespace can select a
+  // different function after preprocessing. Keep the actual canonical name.
+  if (kernel == nullptr || qualifiedSpelling != kernel->getQualifiedNameAsString())
+    return false;
+  const clang::FunctionDecl *definition = nullptr;
+  if (kernel == nullptr || !kernel->hasAttr<clang::CUDAGlobalAttr>() ||
+      !kernel->getDeclContext()->getRedeclContext()->isTranslationUnit() ||
+      kernel->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      !kernel->hasBody(definition) || definition == nullptr ||
+      definition->getLocation().isMacroID()) return false;
+  const auto definitionLoc = source.getSpellingLoc(definition->getLocation());
+  if (!source.isWrittenInMainFile(definitionLoc) &&
+      (localHeaderContext == nullptr || localHeaderContext->plan == nullptr ||
+       !localHeaderContext->plan->isSelectedRootHeader(source.getFilename(definitionLoc).str())))
+    return false;
+  // Forward declarations may carry inherited launch bounds from a different
+  // preprocessing context. This bounded path admits the sole definition only.
+  if (kernel->getPreviousDecl() != nullptr ||
+      kernel->getMostRecentDecl() != kernel || kernel != definition) return false;
+  // A retained conditional declaration can select a different launch bound
+  // during target preprocessing. Limit this proof to unconditional physical
+  // declaration files; include guards and conditional bodies are retained too.
+  std::set<unsigned> checkedFiles;
+  for (const auto *declaration : kernel->redecls()) {
+    const auto begin = source.getExpansionLoc(declaration->getBeginLoc());
+    if (begin.isInvalid()) return false;
+    const auto file = source.getFileID(begin);
+    if (checkedFiles.insert(file.getHashValue()).second) {
+      bool invalid = false;
+      const auto buffer = source.getBufferData(file, &invalid);
+      if (invalid) return false;
+      clang::Lexer fileLexer(clang::SourceLocation(),
+          getCompilerInstance().getLangOpts(), buffer.data(), buffer.data(),
+          buffer.data() + buffer.size());
+      clang::Token directive;
+      while (true) {
+        fileLexer.LexFromRawLexer(directive);
+        if (directive.is(clang::tok::eof)) break;
+        if (!directive.is(clang::tok::hash) || !directive.isAtStartOfLine()) continue;
+        fileLexer.LexFromRawLexer(directive);
+        if (directive.is(clang::tok::eof)) break;
+        if (!directive.is(clang::tok::raw_identifier)) continue;
+        const auto name = directive.getRawIdentifier();
+        if (name == "if" || name == "ifdef" || name == "ifndef" ||
+            name == "elif" || name == "elifdef" || name == "elifndef" ||
+            name == "else" || name == "endif") return false;
+      }
+    }
+    // A macro expanding to nothing in the CUDA signature could introduce a
+    // launch attribute on the target. Only the actual SDK qualifier macros are
+    // admitted, and launch-bound arguments are separately proved below.
+    const auto last = declaration->isThisDeclarationADefinition()
+        ? source.getExpansionLoc(declaration->getBody()->getBeginLoc())
+        : source.getExpansionLoc(declaration->getEndLoc());
+    if (last.isInvalid() || source.getFileID(last) != file) return false;
+    if (!stablePhysicalRange(begin, last, true, 2)) return false;
+  }
+  unsigned bound = 1024;  // Official pure-SIMT default, corroborated by CCEC metadata.
+  if (const auto *attribute = definition->getAttr<clang::CUDALaunchBoundsAttr>()) {
+    if (attribute->getMinBlocks() != nullptr || attribute->getMaxBlocks() != nullptr)
+      return false;
+    // Admit literal single-argument spelling only: do not assume a macro or
+    // constexpr expression retains its CUDA value under target preprocessing.
+    bool invalid = false;
+    auto range = source.getExpansionRange(attribute->getRange());
+    auto spelling = clang::Lexer::getSourceText(range, source,
+        getCompilerInstance().getLangOpts(), &invalid).trim();
+    if (invalid || !spelling.consume_front("__launch_bounds__")) return false;
+    spelling = spelling.trim();
+    if (!spelling.consume_front("(") || !spelling.consume_back(")")) return false;
+    spelling = spelling.trim();
+    if (spelling.getAsInteger(10, bound) || bound == 0 || bound > 2048) return false;
+    clang::Expr::EvalResult evaluated;
+    if (!attribute->getMaxThreads()->EvaluateAsInt(evaluated, context) ||
+        evaluated.Val.getInt().isNegative() || evaluated.Val.getInt().getLimitedValue() != bound)
+      return false;
+  }
+  const auto *reference = llvm::dyn_cast<clang::DeclRefExpr>(call->getCallee()->IgnoreParenImpCasts());
+  if (reference == nullptr || reference->hasQualifier() || reference->hasExplicitTemplateArgs())
+    return false;
+  auto name = reference->getLocation();
+  if (name.isMacroID() && !source.isMacroArgExpansion(name)) return false;
+  name = source.getSpellingLoc(name);
+  if (name.isInvalid() || !source.isWrittenInMainFile(name)) return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto end = clang::Lexer::getLocForEndOfToken(name, 0, source, options);
+  const auto spelling = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(name, name), source, options);
+  if (end.isInvalid() || spelling != "cudaFuncGetAttributes") return false;
+  const unsigned offset = source.getFileOffset(name);
+  if (!rewrittenKernelAttributeOffsets.insert(offset).second) return true;
+  const std::string target = "::ascify::cudaFuncGetAttributesMaxThreads<" + std::to_string(bound) + ">";
+  ct::Replacement edit(source, name, spelling.size(), target);
+  if (!insertSemanticReplacement(edit, clang::FullSourceLoc(name, source), name, end)) {
+    rewrittenKernelAttributeOffsets.erase(offset); return false;
+  }
+  provenKernelAttributeObjects.insert(object->getCanonicalDecl());
+  needsCudaCompatHeader = true;
+  static const dppCounter counter = {"CUDA kernel launch bound", CONV_DEVICE, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(counter, "proven per-kernel maximum threads");
+  return true;
+}
+
+bool AscifyAction::auditKernelAttributeObservations() {
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  struct Audit : clang::RecursiveASTVisitor<Audit> {
+    clang::SourceManager &source;
+    const std::set<unsigned> &sdk;
+    const std::set<const clang::VarDecl *> &proven;
+    clang::SourceLocation bad;
+    Audit(clang::SourceManager &s, const std::set<unsigned> &f,
+          const std::set<const clang::VarDecl *> &v) : source(s), sdk(f), proven(v) {}
+    bool shouldVisitTemplateInstantiations() const { return true; }
+    bool VisitDeclRefExpr(clang::DeclRefExpr *reference) {
+      // A pointer-to-member can observe an unproved object without producing
+      // a MemberExpr at its eventual use site. Never publish that escape.
+      const auto *field = llvm::dyn_cast<clang::FieldDecl>(reference->getDecl());
+      if (field == nullptr || field->getName() != "maxThreadsPerBlock" ||
+          field->getParent()->getQualifiedNameAsString() != "cudaFuncAttributes")
+        return true;
+      const auto use = source.getExpansionLoc(reference->getExprLoc());
+      if (use.isValid() && sdk.count(source.getFileID(use).getHashValue())) return true;
+      const auto loc = source.getSpellingLoc(field->getLocation());
+      if (loc.isInvalid() || !sdk.count(source.getFileID(loc).getHashValue())) return true;
+      bad = reference->getExprLoc(); return false;
+    }
+    bool VisitOffsetOfExpr(clang::OffsetOfExpr *offset) {
+      // offsetof stores field components outside the ordinary expression
+      // children, so MemberExpr/DeclRefExpr visitors cannot see this layout use.
+      const auto use = source.getExpansionLoc(offset->getExprLoc());
+      if (use.isValid() && sdk.count(source.getFileID(use).getHashValue())) return true;
+      for (unsigned index = 0; index < offset->getNumComponents(); ++index) {
+        const auto &component = offset->getComponent(index);
+        if (component.getKind() != clang::OffsetOfNode::Field) continue;
+        const auto *field = component.getField();
+        if (field->getName() != "maxThreadsPerBlock" ||
+            field->getParent()->getQualifiedNameAsString() != "cudaFuncAttributes")
+          continue;
+        const auto loc = source.getSpellingLoc(field->getLocation());
+        if (loc.isInvalid() || !sdk.count(source.getFileID(loc).getHashValue())) continue;
+        bad = offset->getExprLoc(); return false;
+      }
+      return true;
+    }
+    bool VisitMemberExpr(clang::MemberExpr *member) {
+      if (member->getMemberDecl()->getName() != "maxThreadsPerBlock") return true;
+      // Audit retained local, forced and -isystem project headers too. Only
+      // physically admitted CUDA SDK implementation files may observe their
+      // own metadata without publishing the project compatibility adapter.
+      const auto use = source.getExpansionLoc(member->getExprLoc());
+      if (use.isValid() && sdk.count(source.getFileID(use).getHashValue())) return true;
+      const auto *field = llvm::dyn_cast<clang::FieldDecl>(member->getMemberDecl());
+      if (field == nullptr || field->getParent()->getQualifiedNameAsString() != "cudaFuncAttributes")
+        return true;
+      const auto loc = source.getSpellingLoc(field->getLocation());
+      if (loc.isInvalid() || !sdk.count(source.getFileID(loc).getHashValue())) return true;
+      const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(member->getBase()->IgnoreParenImpCasts());
+      const auto *variable = ref == nullptr ? nullptr : llvm::dyn_cast<clang::VarDecl>(ref->getDecl());
+      if (variable != nullptr && proven.count(variable->getCanonicalDecl())) return true;
+      bad = member->getExprLoc(); return false;
+    }
+  } audit(source, cudaRuntimeApiSdkFileIds, provenKernelAttributeObjects);
+  if (audit.TraverseDecl(compiler.getASTContext().getTranslationUnitDecl())) return true;
+  const auto diagnostic = compiler.getDiagnostics().getCustomDiagID(
+      clang::DiagnosticsEngine::Error,
+      "Ascify cannot publish unproved per-kernel maxThreadsPerBlock metadata at %0");
+  // EndSourceFileAction runs after the diagnostic consumer releases its
+  // source-language state: use a location-free diagnostic with textual origin.
+  compiler.getDiagnostics().Report(diagnostic) << audit.bad.printToString(source);
+  return false;
+}
+
 bool AscifyAction::preserveCudaIntegerIntrinsicArgumentConversion(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call =
@@ -6018,6 +6461,69 @@ bool AscifyAction::preserveCudaIntegerIntrinsicArgumentConversion(
   return true;
 }
 
+bool AscifyAction::rewriteProvenGenericAtomicAddCall(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
+  if (call == nullptr || Result.Context == nullptr || Result.SourceManager == nullptr ||
+      call->isTypeDependent() || call->isValueDependent() ||
+      getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)
+    return false;
+  const auto *callee = call->getDirectCallee();
+  const auto *spec = findGlobalAtomicSpec("atomicAdd");
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  if (callee == nullptr || callee->getQualifiedNameAsString() != "atomicAdd" ||
+      call->getNumArgs() != 2 || !callee->hasAttr<clang::CUDADeviceAttr>())
+    return false;
+  const auto kind = classifyGlobalAtomicPointer(call->getArg(0)->getType(), context);
+  if (kind == GlobalAtomicScalarKind::Unsupported ||
+      !hasExactGlobalAtomicSignature(callee, *spec, kind, context) ||
+      classifyGlobalAtomicScalar(call->getArg(1)->getType(), context) != kind)
+    return false;
+  for (const auto *declaration : callee->redecls()) {
+    const auto location = source.getSpellingLoc(declaration->getLocation());
+    if (location.isInvalid() || !source.isInSystemHeader(location)) return false;
+    const auto file = source.getFileID(location);
+    if (!cudaRuntimeApiSdkFileIds.count(file.getHashValue()) &&
+        !isOwnedCudaCompilerInput(file, getCompilerInstance())) return false;
+  }
+  const auto *owner = enclosingNonLambdaFunction(call, context);
+  if (owner == nullptr || !owner->hasAttr<clang::CUDADeviceAttr>() ||
+      owner->hasAttr<clang::CUDAHostAttr>() || owner->hasAttr<clang::CUDAGlobalAttr>() ||
+      owner->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      !isAddressRootedAtCurrentFunctionParameter(call->getArg(0), owner, context))
+    return false;
+  // The existing expression verifier proves a direct parameter root only.
+  // Here it does not imply GM: a helper can receive either GM or UB, including
+  // from another TU. The public generic API preserves both actual spaces.
+  const auto *reference = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
+      call->getCallee()->IgnoreParenImpCasts());
+  if (reference == nullptr || reference->hasQualifier() ||
+      reference->getDecl()->getCanonicalDecl() != callee->getCanonicalDecl())
+    return false;
+  const auto name = reference->getLocation();
+  if (name.isInvalid() || name.isMacroID() || !source.isWrittenInMainFile(name))
+    return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto spelling = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(clang::SourceRange(name, name)), source, options);
+  if (spelling != "atomicAdd") return false;
+  const auto end = clang::Lexer::getLocForEndOfToken(name, 0, source, options);
+  if (end.isInvalid()) return false;
+  const auto offset = source.getFileOffset(name);
+  if (!rewrittenGlobalAtomicOffsets.insert(offset).second) return true;
+  if (!insertSemanticReplacement(ct::Replacement(source, name, spelling.size(),
+        "::ascify::atomic_add_generic"), clang::FullSourceLoc(name, source), name, end)) {
+    rewrittenGlobalAtomicOffsets.erase(offset);
+    return false;
+  }
+  needsCudaCompatHeader = true;
+  static const dppCounter counter = {
+      "CUDA generic helper atomic add", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(counter, "SDK int/uint helper atomicAdd");
+  return true;
+}
+
 bool AscifyAction::rewriteProvenGlobalAtomicCall(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call =
@@ -6058,7 +6564,7 @@ bool AscifyAction::rewriteProvenGlobalAtomicCall(
             call->getArg(index)->getType(), context) != kind)
       return false;
   }
-  if (!isAddressRootedAtCurrentGlobalParameter(
+  if (!isAddressRootedAtCurrentFunctionParameter(
           call->getArg(0), kernel, context))
     return false;
 
@@ -8462,6 +8968,7 @@ void AscifyAction::EndSourceFileAction() {
     getCompilerInstance().getDiagnostics().Report(diagnostic);
     return;
   }
+  if (!auditKernelAttributeObservations()) return;
   if (needsCudaCompatHeader &&
       nvidiaSampleHelperOutputMacroEverDefined) {
     const auto diagnostic =
@@ -9122,8 +9629,10 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
     if (!rewriteCudaSmDiagnostic(Result) &&
         !preserveHostStandardMathCall(Result) &&
         !rewriteUnsupportedCudaSmAttribute(Result) &&
+        !rewriteProvenKernelAttributeCall(Result) &&
         !preserveCudaIntegerIntrinsicArgumentConversion(Result) &&
-        !rewriteProvenGlobalAtomicCall(Result))
+        !rewriteProvenGlobalAtomicCall(Result) &&
+        !rewriteProvenGenericAtomicAddCall(Result))
       (void)rewriteProvenDeviceMemoryCall(Result);
     return;
   }

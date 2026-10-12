@@ -8,6 +8,14 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Generic 32-bit integer `atomicAdd` for proven device-helper parameters,
+  preserving the target GM or UB address space.
+- Real device-memory properties and proven per-kernel thread limits for
+  nonescaping max-only attribute queries.
+- Device-symbol address kernels and checked transfers for admitted definitions,
+  including downloads and fresh resolution after device reset.
+- Explicit CANN profiling sessions, ordered host functions, and real event-state
+  queries on the reviewed runtime surface.
 - Bounded host diagnostics that display CUDA SM versions as unavailable on
   Ascend without inventing numeric device capabilities.
 - Exact expression preservation for admitted frozen Samples `MAX` invocations
@@ -42,6 +50,10 @@ for supported domains and experimental paths.
 
 ### Fixed
 
+- Preserve standard host `exp`, `log`, and `sqrt` overloads in proven direct
+  calls so CPU reference calculations keep their original precision.
+- Preserve admitted local-header dependencies on root macros and declarations
+  through checked source-context expansion.
 - Extend proven CUDA integer argument conversion preservation to `__clz(int)`.
 - Preserve proven CUDA `__ffs(int)` integral argument conversions when the
   target provides additional integer-width overloads.

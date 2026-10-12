@@ -111,7 +111,7 @@ require_fixed 'auditRawPublishedCompatTokensInFile' "$action_cpp"
 require_fixed 'isAscifyCudaCompatReservedMacro' "$action_cpp"
 require_fixed 'isAscifyCudaCompatPublishedMacro' "$action_cpp"
 require_fixed 'RuntimeLock' "$compat_identifiers"
-require_fixed '79faa9df45555bde645f0e0b29bfe679f570b04974d0e7c2f8d4c1051fab43af' \
+require_fixed 'aac34d02a6b50b08cb6a75a1300a381b898aa3db7098220fe880ac33a5c7019b' \
   "$action_cpp"
 require_fixed '#include <helper_string.h>' "$action_cpp"
 require_fixed 'surface retained' "$action_cpp"
@@ -126,14 +126,14 @@ require_fixed 'const aclError status = cudaGetLastError();' "$compat_header"
 require_fixed '#expression, __FILE__, __LINE__' "$compat_header"
 forbid_fixed 'gpuGetMaxGflopsDeviceId' "$compat_header"
 
-[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 59059 ]
+[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 62552 ]
 if command -v sha256sum >/dev/null 2>&1; then
   compat_header_sha=$(sha256sum "$compat_header" | awk '{print $1}')
 else
   compat_header_sha=$(shasum -a 256 "$compat_header" | awk '{print $1}')
 fi
 [ "$compat_header_sha" = \
-  79faa9df45555bde645f0e0b29bfe679f570b04974d0e7c2f8d4c1051fab43af ]
+  aac34d02a6b50b08cb6a75a1300a381b898aa3db7098220fe880ac33a5c7019b ]
 
 official_helper_functions="$fixtures/nvidia_samples/Common/helper_functions.h"
 [ "$(wc -c <"$official_helper_functions" | tr -d ' ')" -eq 2358 ]

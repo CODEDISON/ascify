@@ -184,6 +184,19 @@ run_check "CUDA clz argument conversion and overload boundaries" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
 
+run_check "CUDA device-helper generic integer atomicAdd boundaries" \
+  "$python" -B "$rewrite_dir/check_generic_atomic_conversion.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --evidence-dir "$work_dir/generic_atomic"
+
+run_check "CUDA kernel max-only attribute proof boundaries" \
+  "$python" -B "$rewrite_dir/check_kernel_attribute_conversion.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+
 run_check "CUDA lane ID instruction boundaries" \
   "$python" -B "$rewrite_dir/check_lane_id_conversion.py" \
     --binary "$ASCIFY_BINARY" \
@@ -208,6 +221,13 @@ run_check "CUDA profiler, host allocation, callback and unavailable-SM boundarie
     --binary "$ASCIFY_BINARY" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+
+run_check "CUDA same-module device symbol registration boundaries" \
+  "$python" -B "$rewrite_dir/check_symbol_conversion.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --evidence-dir "$work_dir/device_symbols"
 
 run_check "real ascify local-header publication negatives" \
   sh "$rewrite_dir/check_local_header_integration.sh"

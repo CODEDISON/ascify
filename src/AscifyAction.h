@@ -194,6 +194,8 @@ private:
   std::set<unsigned> rewrittenDeviceMemoryOffsets;
   std::set<unsigned> rewrittenIntegerIntrinsicArgumentOffsets;
   std::set<unsigned> rewrittenCudaSmDiagnosticOffsets;
+  std::set<unsigned> rewrittenKernelAttributeOffsets;
+  std::set<const clang::VarDecl *> provenKernelAttributeObjects;
   std::set<unsigned> rewrittenWarpAddReductionOffsets;
   std::set<unsigned> taggedCanonicalReducerOffsets;
   std::set<std::string> rowwiseSimdMacrosEverDefined;
@@ -255,12 +257,17 @@ public:
   bool rewriteCudaHalf2Operator(const mat::MatchFinder::MatchResult &Result);
   bool rewriteFrontendHostMath(const mat::MatchFinder::MatchResult &Result);
   bool preserveHostStandardMathCall(const mat::MatchFinder::MatchResult &Result);
+  bool rewriteProvenGenericAtomicAddCall(
+      const mat::MatchFinder::MatchResult &Result);
   bool rewriteProvenGlobalAtomicCall(
       const mat::MatchFinder::MatchResult &Result);
   bool rewriteProvenDeviceMemoryCall(
       const mat::MatchFinder::MatchResult &Result);
   bool preserveCudaIntegerIntrinsicArgumentConversion(
       const mat::MatchFinder::MatchResult &Result);
+  bool rewriteProvenKernelAttributeCall(
+      const mat::MatchFinder::MatchResult &Result);
+  bool auditKernelAttributeObservations();
   bool rewriteCudaLaneIdAsm(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaSmDiagnostic(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCanonicalWarpAddReduction(

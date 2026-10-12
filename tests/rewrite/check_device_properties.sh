@@ -14,7 +14,7 @@ for family in legacy public85; do
     -o "$work/properties"
   "$work/properties"
 done
-for field in major minor totalGlobalMem; do
+for field in major minor; do
   printf '#define __aicore__\n#include <ascify/ascify_cuda_compat.hpp>\nint main(){ascify::cudaDeviceProp p; return p.%s;}\n' "$field" > "$work/reject.cpp"
   if "${CXX:-c++}" -std=c++17 -I"$repo_root/tests/rewrite/stubs" \
     -I"$repo_root/include" -fsyntax-only "$work/reject.cpp" >"$work/negative.log" 2>&1; then

@@ -58,7 +58,7 @@ def main():
         # The default converter visits excluded conditional blocks, which is
         # unsuitable for proving actual C++ token/counter equivalence.
         result = convert(output, standard=False)
-        assert result.returncode != 0 and "require standard preprocessing" in result.stderr, result.stderr
+        assert result.returncode > 0 and "require standard preprocessing" in result.stderr, result.stderr
         assert not output.exists() and not bundle.exists()
         print("retained conditional mode rejected without publication")
 
@@ -96,19 +96,19 @@ def main():
         successful()
         published = identity([output, marker])
         result = convert(output, standard=False)
-        assert result.returncode != 0 and "require standard preprocessing" in result.stderr, result.stderr
+        assert result.returncode > 0 and "require standard preprocessing" in result.stderr, result.stderr
         assert identity([output, marker]) == published
 
         def rejected(label, child_text, root_text=original_root, reason="contextual"):
             root.write_text(root_text)
             header.write_text(child_text)
             result = convert(output)
-            assert result.returncode != 0, f"{label}: unsafe context accepted"
+            assert result.returncode > 0, f"{label}: unsafe context accepted"
             assert reason in result.stderr, f"{label}: {result.stderr}"
             assert identity([output, marker]) == published, f"{label}: previous bundle changed"
             fresh = work / (label + ".cce")
             result = convert(fresh)
-            assert result.returncode != 0 and not fresh.exists(), label
+            assert result.returncode > 0 and not fresh.exists(), label
             assert not Path(str(fresh) + ".headers").exists(), label
             print(f"{label}: rejected without publication; prior root/bundle unchanged")
 
