@@ -5158,13 +5158,26 @@ bool AscifyAction::rewriteCudaLaneIdAsm(
       statement->getNumClobbers() != 0 ||
       statement->getOutputConstraint(0) != "=r" ||
       !statement->getOutputName(0).empty() ||
-      statement->getAsmString()->getString() != "mov.u32 %0, %%laneid;" ||
       getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)
     return false;
 #if LLVM_VERSION_MAJOR >= 9
   if (statement->isAsmGoto())
     return false;
 #endif
+#if LLVM_VERSION_MAJOR >= 21
+  // Clang 21 added constexpr asm expressions. This proof accepts only
+  // ordinary string literals for both the instruction and its constraint.
+  const auto *asmLiteral = llvm::dyn_cast_or_null<clang::StringLiteral>(
+      statement->getAsmStringExpr());
+  if (!llvm::isa_and_nonnull<clang::StringLiteral>(
+          statement->getOutputConstraintExpr(0)))
+    return false;
+#else
+  const auto *asmLiteral = statement->getAsmString();
+#endif
+  if (asmLiteral == nullptr ||
+      asmLiteral->getString() != "mov.u32 %0, %%laneid;")
+    return false;
   auto &context = *Result.Context;
   auto &source = *Result.SourceManager;
   const auto *owner = enclosingNonLambdaFunction(statement, context);
