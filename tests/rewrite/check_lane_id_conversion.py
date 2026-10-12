@@ -82,6 +82,10 @@ def cases(clang_major):
                                          '(std::string_view("mov.u32 %0, %%laneid;"))'))
         yield case('constexpr_output_constraint', prefix='#include <string_view>',
                    statement=ASM.replace('"=r"', '(std::string_view("=r"))'))
+        yield case('dependent_constexpr_constraint', owner='template<class T> __device__',
+                   statement=ASM.replace('"=r"', '(T::constraint())'))
+        yield case('dependent_constexpr_template', owner='template<class T> __device__',
+                   statement=ASM.replace('"mov.u32 %0, %%laneid;"', '(T::instruction())'))
     yield case('host_function', owner='')
     yield case('host_device_function', owner='__host__ __device__')
     yield case('template_function', owner='template<class T> __device__')
