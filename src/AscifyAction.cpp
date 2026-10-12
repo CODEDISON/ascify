@@ -3974,6 +3974,11 @@ bool AscifyAction::RewriteToken(clang::Lexer &, clang::Token &tok) {
     const clang::Token *previous = previousSignificantToken(rawTokenWindow);
     if (previous != nullptr && previous->is(clang::tok::coloncolon))
       return false;
+    const auto &source = getCompilerInstance().getSourceManager();
+    if (source.isWrittenInMainFile(tok.getLocation()) &&
+        preservedHostMathCalleeOffsets.count(
+            source.getFileOffset(tok.getLocation())))
+      return false;
   }
 
   if (requiresCudaCompatHeader(name))
@@ -5810,6 +5815,55 @@ bool AscifyAction::rewriteCudaSmDiagnostic(
   static const dppCounter counter = {
       "CUDA SM diagnostic", CONV_DEVICE, API_RUNTIME, 0, FULL};
   Statistics::current().incrementCounter(counter, "CUDA SM display unavailable on Ascend");
+  return true;
+}
+
+bool AscifyAction::preserveHostStandardMathCall(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
+  if (call == nullptr || Result.Context == nullptr || Result.SourceManager == nullptr ||
+      call->getNumArgs() != 1 || call->isTypeDependent() || call->isValueDependent() ||
+      getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)
+    return false;
+  const auto *callee = call->getDirectCallee();
+  if (callee == nullptr || callee->getIdentifier() == nullptr)
+    return false;
+  const auto name = callee->getName();
+  // These are standard host overload sets. rsqrt is a CUDA extension and
+  // deliberately keeps its separate device-API mapping.
+  if (name != "exp" && name != "log" && name != "sqrt")
+    return false;
+  const auto qualified = callee->getQualifiedNameAsString();
+  auto &source = *Result.SourceManager;
+  if ((qualified != name && qualified != "std::" + name.str()) ||
+      !allFunctionRedeclarationsComeFromInitiallyTrustedSystemFiles(
+          callee, source, trustedSystemFileIds))
+    return false;
+  // The existing unique-parent proof crosses ordinary automatic initializers,
+  // but rejects lambdas, static/TLS locals, globals and ambiguous parentage.
+  // A host call must not suppress a shared host/device spelling's mapping.
+  const auto *owner = enclosingNvidiaFindDeviceFunction(call, *Result.Context);
+  if (owner == nullptr || owner->hasAttr<clang::CUDADeviceAttr>() ||
+      owner->hasAttr<clang::CUDAGlobalAttr>() || owner->isDependentContext() ||
+      owner->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate)
+    return false;
+  const auto *reference = llvm::dyn_cast<clang::DeclRefExpr>(
+      call->getCallee()->IgnoreParenImpCasts());
+  if (reference == nullptr || reference->hasQualifier() ||
+      reference->getDecl()->getCanonicalDecl() != callee->getCanonicalDecl())
+    return false;
+  const auto location = reference->getLocation();
+  if (location.isInvalid() || location.isMacroID() ||
+      !source.isWrittenInMainFile(location))
+    return false;
+  const auto spelling = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(location, location), source,
+      getCompilerInstance().getLangOpts());
+  if (spelling != name)
+    return false;
+  // No expression is replaced: preserve the exact source spelling, overload
+  // resolution, argument conversions and evaluation count of this host call.
+  preservedHostMathCalleeOffsets.insert(source.getFileOffset(location));
   return true;
 }
 
@@ -9066,6 +9120,7 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
   if (Result.Nodes.getNodeAs<clang::CallExpr>(
           sProvenGlobalAtomicCall) != nullptr) {
     if (!rewriteCudaSmDiagnostic(Result) &&
+        !preserveHostStandardMathCall(Result) &&
         !rewriteUnsupportedCudaSmAttribute(Result) &&
         !preserveCudaIntegerIntrinsicArgumentConversion(Result) &&
         !rewriteProvenGlobalAtomicCall(Result))

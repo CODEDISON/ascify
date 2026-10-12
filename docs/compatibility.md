@@ -280,3 +280,22 @@ Relevant checks: [global atomics](../tests/rewrite/global_atomic_compat_test.cpp
 For source-level NVIDIA helper handling, see [CUDA Samples helpers](sample-helpers.md).
 For proof-gated whole-operator acceleration, see the
 [row-wise Hybrid guide](rowwise-simd-conversion.md).
+
+### Host standard-math calls
+
+The unqualified `exp`, `log`, and `sqrt` spellings of resolved standard-library
+calls remain unchanged inside proven host-only, non-template functions. This
+includes ordinary automatic-local initializers and preserves the selected
+float/double overload, argument conversions, and evaluation count. The proof
+requires trusted system declarations and a direct, non-macro main-file callee
+token. It emits no replacement expression.
+
+This narrow preservation rule does not change CUDA device/global or combined
+host/device math mapping. Explicitly qualified math already retains its source
+spelling. CUDA-only `rsqrt`, macro-generated callees, templates, lambdas,
+static/TLS/global initializers, and project overloads remain outside this rule;
+their pre-existing translation behavior is unchanged. In particular, the old
+float narrowing remains an unfixed limitation for those host contexts; passing
+a boundary test does not establish semantic correctness or target support for
+them. Regression:
+[`check_host_standard_math.py`](../tests/rewrite/check_host_standard_math.py).

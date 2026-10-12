@@ -95,6 +95,7 @@ private:
   LocalHeaderRewriteContext *localHeaderContext = nullptr;
   ascify::FrontendCompatibilityConfig frontendCompatibility;
   std::set<unsigned> rewrittenFrontendHostMathOffsets;
+  std::set<unsigned> preservedHostMathCalleeOffsets;
   bool frontendHostMathBuiltinMacroDefined = false;
   std::map<std::string, clang::SourceLocation> Ifndefs;
   std::vector<clang::SourceRange> SkippedSourceRanges;
@@ -253,6 +254,7 @@ public:
   bool rewriteCudaHalf2DirectInit(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaHalf2Operator(const mat::MatchFinder::MatchResult &Result);
   bool rewriteFrontendHostMath(const mat::MatchFinder::MatchResult &Result);
+  bool preserveHostStandardMathCall(const mat::MatchFinder::MatchResult &Result);
   bool rewriteProvenGlobalAtomicCall(
       const mat::MatchFinder::MatchResult &Result);
   bool rewriteProvenDeviceMemoryCall(
