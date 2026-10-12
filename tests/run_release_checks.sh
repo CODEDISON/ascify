@@ -458,6 +458,7 @@ translate_rowwise_recipe_fixture() {
       "--cuda-path=$ASCIFY_CUDA_PATH" \
       "--clang-resource-directory=$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
       "--include=$repo_root/tests/fixtures/oneflow" \
+      "--include=$repo_root/tests/support/cuda" \
       --compiler-arg=-std=c++17 \
       --require-recipe \
       -- "$@"
@@ -474,6 +475,7 @@ reject_rowwise_recipe_fixture() {
       "--cuda-path=$ASCIFY_CUDA_PATH" \
       "--clang-resource-directory=$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
       "--include=$repo_root/tests/fixtures/oneflow" \
+      "--include=$repo_root/tests/support/cuda" \
       --compiler-arg=-std=c++17 \
       --require-recipe \
       "$@" \
@@ -503,6 +505,7 @@ reject_rowwise_recipe_frontend() {
       "--cuda-path=$ASCIFY_CUDA_PATH" \
       "--clang-resource-directory=$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
       "--include=$repo_root/tests/fixtures/oneflow" \
+      "--include=$repo_root/tests/support/cuda" \
       --compiler-arg=-std=c++17 \
       --require-recipe \
       "$@" \
@@ -1501,6 +1504,7 @@ if "$python" -I -B "$repo_root/tools/generate_rowwise_cce.py" \
     "--cuda-path=$ASCIFY_CUDA_PATH" \
     "--clang-resource-directory=$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
     "--include=$repo_root/tests/fixtures/oneflow" \
+    "--include=$repo_root/tests/support/cuda" \
     --compiler-arg=-std=c++17 \
     --require-recipe \
     >"$macro_poison_output.stdout" 2>"$macro_poison_output.stderr"; then
@@ -1525,6 +1529,7 @@ if "$python" -I -B "$repo_root/tools/generate_rowwise_cce.py" \
     "--cuda-path=$ASCIFY_CUDA_PATH" \
     "--clang-resource-directory=$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
     "--include=$repo_root/tests/fixtures/oneflow" \
+    "--include=$repo_root/tests/support/cuda" \
     --compiler-arg=-std=c++17 \
     --require-recipe \
     >"$semantic_macro_output.stdout" \
@@ -1550,6 +1555,7 @@ if "$python" -I -B "$repo_root/tools/generate_rowwise_cce.py" \
     "--cuda-path=$ASCIFY_CUDA_PATH" \
     "--clang-resource-directory=$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
     "--include=$repo_root/tests/fixtures/oneflow" \
+    "--include=$repo_root/tests/support/cuda" \
     --compiler-arg=-std=c++17 \
     --compiler-arg=-DTrySoftmaxHybrid=ascify_command_poison \
     --require-recipe \
@@ -1576,6 +1582,7 @@ if "$python" -I -B "$repo_root/tools/generate_rowwise_cce.py" \
     "--cuda-path=$ASCIFY_CUDA_PATH" \
     "--clang-resource-directory=$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
     "--include=$repo_root/tests/fixtures/oneflow" \
+    "--include=$repo_root/tests/support/cuda" \
     --compiler-arg=-std=c++17 \
     --compiler-arg=-DHybridTryResult=ascify_result_poison \
     --require-recipe \
@@ -1602,6 +1609,7 @@ if "$python" -I -B "$repo_root/tools/generate_rowwise_cce.py" \
     "--cuda-path=$ASCIFY_CUDA_PATH" \
     "--clang-resource-directory=$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
     "--include=$repo_root/tests/fixtures/oneflow" \
+    "--include=$repo_root/tests/support/cuda" \
     --compiler-arg=-std=c++17 \
     --compiler-arg=-Dtrue=true \
     --require-recipe \
@@ -1628,7 +1636,7 @@ run_check "translate annotated non-status wrappers (legacy control)" \
     "--cuda-path=$ASCIFY_CUDA_PATH" \
     "--clang-resource-directory=$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
     -o "$annotated_status_legacy_output" \
-    -- "-I$repo_root/tests/fixtures/oneflow" -std=c++17
+    -- "-I$repo_root/tests/fixtures/oneflow" "-I$repo_root/tests/support/cuda" -std=c++17
 run_check "translate unannotated non-status wrappers (legacy control)" \
   "$ASCIFY_BINARY" "$unannotated_status_input" \
     --target-policy=dav-c310-vec \
@@ -1636,7 +1644,7 @@ run_check "translate unannotated non-status wrappers (legacy control)" \
     "--cuda-path=$ASCIFY_CUDA_PATH" \
     "--clang-resource-directory=$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
     -o "$unannotated_status_legacy_output" \
-    -- "-I$repo_root/tests/fixtures/oneflow" -std=c++17
+    -- "-I$repo_root/tests/fixtures/oneflow" "-I$repo_root/tests/support/cuda" -std=c++17
 require_fixed_count \
   '::ascify::target::dav_c310::TrySoftmax(' \
   "$annotated_status_legacy_output" 3
@@ -1651,6 +1659,7 @@ if "$python" -I -B "$repo_root/tools/generate_rowwise_cce.py" \
     "--cuda-path=$ASCIFY_CUDA_PATH" \
     "--clang-resource-directory=$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
     "--include=$repo_root/tests/fixtures/oneflow" \
+    "--include=$repo_root/tests/support/cuda" \
     --compiler-arg=-std=c++17 \
     --require-recipe \
     >"$annotated_shortcut_output.stdout" \
@@ -1676,6 +1685,7 @@ if "$python" -I -B "$repo_root/tools/generate_rowwise_cce.py" \
     "--cuda-path=$ASCIFY_CUDA_PATH" \
     "--clang-resource-directory=$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
     "--include=$repo_root/tests/fixtures/oneflow" \
+    "--include=$repo_root/tests/support/cuda" \
     --compiler-arg=-std=c++17 \
     --require-recipe \
     >"$annotated_status_output.stdout" \
