@@ -197,6 +197,12 @@ run_check "frozen Samples MAX expression preservation" \
     --resource "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
     --evidence "$work_dir/helper_max"
 
+run_check "CUDA profiler, host allocation, callback and unavailable-SM boundaries" \
+  "$python" -B "$rewrite_dir/check_runtime_extensions.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+
 run_check "real ascify local-header publication negatives" \
   sh "$rewrite_dir/check_local_header_integration.sh"
 run_check "half2 syntax and separate rounding conversion" \

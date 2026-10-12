@@ -17,6 +17,8 @@
 typedef int aclError;
 typedef void* aclrtStream;
 typedef void* aclrtEvent;
+typedef void (*aclrtHostFunc)(void*);
+aclError aclrtLaunchHostFunc(aclrtStream, aclrtHostFunc, void*);
 
 enum aclrtMemcpyKind {
   ACL_MEMCPY_HOST_TO_HOST,
@@ -54,6 +56,15 @@ static const aclError ACL_ERROR_REPEAT_INITIALIZE = 100002;
 static const aclError ACL_ERROR_REPEAT_FINALIZE = 100037;
 static const aclError ACL_ERROR_RT_CONTEXT_NULL = 107002;
 static const aclError ACL_ERROR_RT_NO_DEVICE = 207004;
+static const aclError ACL_ERROR_RT_EVENT_NOT_COMPLETE = 507006;
+static const unsigned ACL_EVENT_TIME_LINE = 8;
+static const unsigned ACL_EVENT_SYNC = 1;
+static const unsigned ACL_EVENT_CAPTURE_STREAM_PROGRESS = 2;
+enum aclrtEventRecordedStatus {
+  ACL_EVENT_RECORDED_STATUS_NOT_READY = 0,
+  ACL_EVENT_RECORDED_STATUS_COMPLETE = 1
+};
+aclError aclrtQueryEventStatus(aclrtEvent, aclrtEventRecordedStatus*);
 
 #ifdef ASCIFY_TEST_ACL_CONTROLLABLE_RUNTIME_LIFECYCLE
 extern aclError ascify_test_init_status;
@@ -432,6 +443,13 @@ inline aclError aclrtCreateEvent(aclrtEvent* event) {
   *event = reinterpret_cast<aclrtEvent>(1);
   return ACL_SUCCESS;
 }
+#if defined(ASCIFY_TEST_CONTROLLABLE_EVENT_EX)
+aclError aclrtCreateEventExWithFlag(aclrtEvent*, unsigned);
+#else
+inline aclError aclrtCreateEventExWithFlag(aclrtEvent* event, unsigned) {
+  return aclrtCreateEvent(event);
+}
+#endif
 
 inline aclError aclrtDestroyEvent(aclrtEvent) { return ACL_SUCCESS; }
 inline aclError aclrtRecordEvent(aclrtEvent, aclrtStream stream) {

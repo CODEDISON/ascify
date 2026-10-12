@@ -12,6 +12,7 @@
 #include <type_traits>
 
 #include <acl/acl.h>
+#include <acl/acl_prof.h>
 
 #if defined(ASCIFY_TEST_CONTROLLABLE_EXIT_REGISTRATION)
 extern int ascify_test_register_exit_cleanup(void (*callback)());
@@ -550,6 +551,157 @@ inline aclError cudaRuntimeEnsureReady() {
   return detail::ensureCurrentDevice();
 }
 
+namespace detail {
+
+// CUDA controls an attached tool for the current context; ACL's collector is
+// process-wide. Admit an explicit, owned single-context collection session,
+// never silently replace CUDA profiling with successful no-ops. The caller
+// opts in with a writable ASCIFY_PROFILE_DIR and must not use another ACL
+// profiler or another active context in that process.
+class ProfilerManager {
+ public:
+  aclError start() {
+    const char* path = ::getenv("ASCIFY_PROFILE_DIR");
+    if (path == nullptr || *path == '\0') {
+      return ACL_ERROR_FEATURE_UNSUPPORTED;
+    }
+    const aclError ready = ensureCurrentDevice();
+    if (ready != ACL_SUCCESS) { return ready; }
+    aclrtContext context = nullptr;
+    int32_t device = -1;
+    aclError status = aclrtGetCurrentContext(&context);
+    if (status != ACL_SUCCESS) { return status; }
+    if (context == nullptr) { return ACL_ERROR_RT_CONTEXT_NULL; }
+    status = aclrtGetDevice(&device);
+    if (status != ACL_SUCCESS) { return status; }
+    if (device < 0) { return ACL_ERROR_RT_PARAM_INVALID; }
+
+    RuntimeLockGuard guard(lock_);
+    if (initialized_) {
+      if (context != context_ || device != device_) {
+        return ACL_ERROR_FEATURE_UNSUPPORTED;
+      }
+      // A failed stop/destroy/finalize keeps its resource state for Stop to
+      // retry. Do not report that a partially stopped session is active.
+      if (failure_ != ACL_SUCCESS) { return failure_; }
+      return active_ ? ACL_SUCCESS : ACL_ERROR_PROFILING_FAILURE;
+    }
+    size_t length = 0;
+    while (path[length] != '\0') { ++length; }
+    status = aclprofInit(path, length);
+    if (status != ACL_SUCCESS) { return status; }
+    initialized_ = true;
+    context_ = context;
+    device_ = device;
+    uint32_t devices[] = {static_cast<uint32_t>(device)};
+    config_ = aclprofCreateConfig(devices, 1, ACL_AICORE_NONE, nullptr,
+                                 ACL_PROF_ACL_API | ACL_PROF_TASK_TIME);
+    if (config_ == nullptr) {
+      return rollbackStart(ACL_ERROR_PROFILING_FAILURE);
+    }
+    status = aclprofStart(config_);
+    if (status != ACL_SUCCESS) { return rollbackStart(status); }
+    active_ = true;
+    // Register after Start, which may create additional SDK exit state.
+    // This callback runs before the RuntimeManager resets/finalizes ACL.
+    if (!cleanup_registered_) {
+      exit_cleanup_profiler_ = this;
+#if defined(ASCIFY_TEST_CONTROLLABLE_PROFILER_EXIT_REGISTRATION)
+      const int registration = ::ascify_test_register_profiler_exit_cleanup(
+          &ProfilerManager::runExitCleanup);
+#else
+      const int registration = ::atexit(&ProfilerManager::runExitCleanup);
+#endif
+      if (registration != 0) { return rollbackStart(ACL_ERROR_BAD_ALLOC); }
+      cleanup_registered_ = true;
+    }
+    failure_ = ACL_SUCCESS;
+    return ACL_SUCCESS;
+  }
+
+  aclError stop() {
+    RuntimeLockGuard guard(lock_);
+    if (!initialized_) {
+      const char* path = ::getenv("ASCIFY_PROFILE_DIR");
+      return path != nullptr && *path != '\0' ? ACL_SUCCESS :
+                                               ACL_ERROR_FEATURE_UNSUPPORTED;
+    }
+    aclrtContext context = nullptr;
+    int32_t device = -1;
+    aclError status = aclrtGetCurrentContext(&context);
+    if (status != ACL_SUCCESS) { return status; }
+    status = aclrtGetDevice(&device);
+    if (status != ACL_SUCCESS) { return status; }
+    if (context != context_ || device != device_) {
+      return ACL_ERROR_FEATURE_UNSUPPORTED;
+    }
+    return cleanup();
+  }
+
+ private:
+  // On failure retain the last owned resource, never destroy a configuration
+  // still collecting or finalize somebody else's profiler. A later Stop
+  // retries exactly the incomplete stage and returns its ACL error unchanged.
+  aclError cleanup() {
+    if (active_) {
+      const aclError status = aclprofStop(config_);
+      if (status != ACL_SUCCESS) { return failure_ = status; }
+      active_ = false;
+    }
+    if (config_ != nullptr) {
+      const aclError status = aclprofDestroyConfig(config_);
+      if (status != ACL_SUCCESS) { return failure_ = status; }
+      config_ = nullptr;
+    }
+    if (initialized_) {
+      const aclError status = aclprofFinalize();
+      if (status != ACL_SUCCESS) { return failure_ = status; }
+      initialized_ = false;
+    }
+    context_ = nullptr;
+    device_ = -1;
+    return failure_ = ACL_SUCCESS;
+  }
+
+  aclError rollbackStart(aclError original) {
+    // The Start error is primary. If rollback also fails, cleanup's state and
+    // status remain available to the next Stop; neither failure becomes success.
+    (void)cleanup();
+    return original;
+  }
+
+  static void runExitCleanup() noexcept {
+    ProfilerManager* const profiler = exit_cleanup_profiler_;
+    if (profiler == nullptr) { return; }
+    RuntimeLockGuard guard(profiler->lock_);
+    // Process-exit cleanup has no return channel. Explicit Stop is required
+    // when an application needs to observe all collection/flush errors.
+    (void)profiler->cleanup();
+  }
+
+  inline static ProfilerManager* exit_cleanup_profiler_ = nullptr;
+  RuntimeLock lock_;
+  aclprofConfig* config_ = nullptr;
+  aclrtContext context_ = nullptr;
+  int32_t device_ = -1;
+  aclError failure_ = ACL_SUCCESS;
+  bool initialized_ = false;
+  bool active_ = false;
+  bool cleanup_registered_ = false;
+};
+
+inline ProfilerManager profiler_manager;
+
+}  // namespace detail
+
+inline aclError cudaProfilerStart() {
+  return detail::rememberLifecycleError(detail::profiler_manager.start());
+}
+
+inline aclError cudaProfilerStop() {
+  return detail::rememberLifecycleError(detail::profiler_manager.stop());
+}
+
 inline aclError cudaSetDevice(int device) {
   if (device < 0) { return ACL_ERROR_RT_PARAM_INVALID; }
   const aclError status = detail::runtime_manager.bindDevice(device);
@@ -650,6 +802,27 @@ inline aclError cudaMallocHost(T** host_pointer, size_t bytes) {
   *host_pointer = nullptr;
   void* raw_pointer = nullptr;
   const aclError status = cudaMallocHost(&raw_pointer, bytes);
+  if (status == ACL_SUCCESS) { *host_pointer = static_cast<T*>(raw_pointer); }
+  return status;
+}
+
+// CUDA's C++ three-argument overload delegates to cudaHostAlloc. Only the
+// default (zero) flags have the pinned-memory contract of aclrtMallocHost.
+inline aclError cudaMallocHost(void** host_pointer, size_t bytes,
+                               unsigned int flags) {
+  if (host_pointer == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
+  *host_pointer = nullptr;
+  if (flags != 0) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  return cudaMallocHost(host_pointer, bytes);
+}
+
+template<typename T>
+inline aclError cudaMallocHost(T** host_pointer, size_t bytes,
+                               unsigned int flags) {
+  if (host_pointer == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
+  *host_pointer = nullptr;
+  void* raw_pointer = nullptr;
+  const aclError status = cudaMallocHost(&raw_pointer, bytes, flags);
   if (status == ACL_SUCCESS) { *host_pointer = static_cast<T*>(raw_pointer); }
   return status;
 }
@@ -771,12 +944,45 @@ inline aclError cudaStreamSynchronize(aclrtStream stream) {
   return aclrtSynchronizeStream(stream);
 }
 
+using cudaHostFn_t = void (*)(void*);
+
+inline aclError cudaLaunchHostFunc(aclrtStream stream, cudaHostFn_t function,
+                                  void* user_data) {
+  if (function == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
+  // ACL has no CUDA legacy default-stream cross-stream synchronization.
+  // An explicit stream is required for this admitted ordered callback path.
+  if (stream == nullptr) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3) && \
+    defined(ACL_MAJOR_VERSION) && defined(ACL_MINOR_VERSION) && \
+    defined(ACL_PATCH_VERSION) && ACL_MAJOR_VERSION == 1 && \
+    ACL_MINOR_VERSION == 17 && ACL_PATCH_VERSION == 0
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  // Runtime owns the callback thread. This queues the user's function after
+  // prior stream work; subsequent work waits for it to return. As in CUDA,
+  // callbacks must not call runtime APIs or wait on their own stream.
+  return aclrtLaunchHostFunc(stream, function, user_data);
+#else
+  return ACL_ERROR_FEATURE_UNSUPPORTED;
+#endif
+}
+
 inline aclError cudaEventCreate(aclrtEvent* event) {
   if (event == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
   *event = nullptr;
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3) && \
+    defined(ACL_MAJOR_VERSION) && defined(ACL_MINOR_VERSION) && \
+    defined(ACL_PATCH_VERSION) && ACL_MAJOR_VERSION == 1 && \
+    ACL_MINOR_VERSION == 17 && ACL_PATCH_VERSION == 0
+  // Ex events, unlike legacy events, are complete before the first record and
+  // replace the captured task set on rerecord, matching CUDA event semantics.
+  return aclrtCreateEventExWithFlag(event, ACL_EVENT_TIME_LINE | ACL_EVENT_SYNC |
+                                            ACL_EVENT_CAPTURE_STREAM_PROGRESS);
+#else
   return aclrtCreateEvent(event);
+#endif
 }
 
 inline aclError cudaEventDestroy(aclrtEvent event) {
@@ -810,6 +1016,25 @@ inline aclError cudaEventSynchronize(aclrtEvent event) {
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   return aclrtSynchronizeEvent(event);
+}
+
+inline aclError cudaEventQuery(aclrtEvent event) {
+  if (event == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3) && \
+    defined(ACL_MAJOR_VERSION) && defined(ACL_MINOR_VERSION) && \
+    defined(ACL_PATCH_VERSION) && ACL_MAJOR_VERSION == 1 && \
+    ACL_MINOR_VERSION == 17 && ACL_PATCH_VERSION == 0
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  aclrtEventRecordedStatus recorded = ACL_EVENT_RECORDED_STATUS_NOT_READY;
+  const aclError status = aclrtQueryEventStatus(event, &recorded);
+  if (status != ACL_SUCCESS) { return status; }
+  if (recorded == ACL_EVENT_RECORDED_STATUS_COMPLETE) { return ACL_SUCCESS; }
+  if (recorded == ACL_EVENT_RECORDED_STATUS_NOT_READY) {
+    return ACL_ERROR_RT_EVENT_NOT_COMPLETE;
+  }
+#endif
+  return ACL_ERROR_FEATURE_UNSUPPORTED;
 }
 
 inline aclError cudaEventElapsedTime(float* milliseconds, aclrtEvent start,
@@ -975,6 +1200,18 @@ inline int sampleFindCudaDevice(int argc, const char** argv) {
 
 // Keep the CUDA argument order and result width at the translated call site.
 // aclrtGetDeviceInfo instead takes device first and writes an int64_t.
+struct UnsupportedCudaSmAttribute {};
+inline constexpr UnsupportedCudaSmAttribute cudaDevAttrComputeCapabilityMajor{};
+inline constexpr UnsupportedCudaSmAttribute cudaDevAttrComputeCapabilityMinor{};
+
+inline aclError cudaDeviceGetAttribute(int* value, UnsupportedCudaSmAttribute,
+                                      int device) {
+  if (value == nullptr || device < 0) { return ACL_ERROR_RT_PARAM_INVALID; }
+  // CUDA SM versions have no NPU equivalent. Preserve the output and return
+  // an explicit failure; these selector tags carry no fabricated SM number.
+  return ACL_ERROR_FEATURE_UNSUPPORTED;
+}
+
 inline aclError cudaDeviceGetAttribute(int* value, aclrtDevAttr attribute, int device) {
   if (value == nullptr || device < 0) { return ACL_ERROR_RT_PARAM_INVALID; }
 

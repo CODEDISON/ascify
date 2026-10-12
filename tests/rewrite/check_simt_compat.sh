@@ -326,6 +326,29 @@ if command -v "$cxx" >/dev/null 2>&1; then
     -o "$test_tmp/runtime-memory"
   "$test_tmp/runtime-memory"
 
+  "$cxx" -std=c++17 -pthread \
+    -I"$repo_root/tests/rewrite/stubs" -I"$repo_root/include" \
+    "$repo_root/tests/rewrite/runtime_profiler_compat_test.cpp" \
+    -o "$test_tmp/runtime-profiler"
+  for profiler_case in disabled context-error null-context init-error \
+    create-error create-rollback-error start-error registration-error \
+    wrong-context stop-error destroy-error finalize-error exit-cleanup \
+    repeat threads; do
+    "$test_tmp/runtime-profiler" "$profiler_case"
+  done
+
+  "$cxx" -std=c++17 \
+    -I"$repo_root/tests/rewrite/stubs" -I"$repo_root/include" \
+    "$repo_root/tests/rewrite/runtime_host_function_compat_test.cpp" \
+    -o "$test_tmp/runtime-host-function"
+  "$test_tmp/runtime-host-function"
+
+  "$cxx" -std=c++17 \
+    -I"$repo_root/tests/rewrite/stubs" -I"$repo_root/include" \
+    "$repo_root/tests/rewrite/runtime_event_query_compat_test.cpp" \
+    -o "$test_tmp/runtime-event-query"
+  "$test_tmp/runtime-event-query"
+
   "$cxx" -std=c++17 \
     -I"$repo_root/tests/rewrite/stubs" \
     -I"$repo_root/include" \

@@ -58,12 +58,28 @@ void testAllocationContracts() {
   assert(host == reinterpret_cast<int*>(allocation));
   assert(ascify_test_malloc_host_calls == 1);
 
+  host = nullptr;
+  assert(ascify::cudaMallocHost(&host, sizeof(allocation), 0) == ACL_SUCCESS);
+  assert(host == reinterpret_cast<int*>(allocation));
+  void* raw_host = nullptr;
+  assert(ascify::cudaMallocHost(&raw_host, sizeof(allocation), 0) == ACL_SUCCESS);
+  assert(raw_host == allocation);
+  assert(ascify_test_malloc_host_calls == 3);
+  for (unsigned flags : {1u, 2u, 4u, 7u, 0xffffffffu}) {
+    host = reinterpret_cast<int*>(1);
+    assert(ascify::cudaMallocHost(&host, 32, flags) == ACL_ERROR_FEATURE_UNSUPPORTED);
+    assert(host == nullptr);
+  }
+  assert(ascify::cudaMallocHost(static_cast<int**>(nullptr), 1, 0) ==
+         ACL_ERROR_RT_PARAM_INVALID);
+  assert(ascify_test_malloc_host_calls == 3);
+
   assert(ascify::cudaMalloc(static_cast<void**>(nullptr), 1) ==
          ACL_ERROR_RT_PARAM_INVALID);
   assert(ascify::cudaMallocHost(static_cast<void**>(nullptr), 1) ==
          ACL_ERROR_RT_PARAM_INVALID);
   assert(ascify_test_malloc_calls == 1);
-  assert(ascify_test_malloc_host_calls == 1);
+  assert(ascify_test_malloc_host_calls == 3);
 
   ascify_test_runtime_status = ACL_ERROR_RT_MEMORY_ALLOCATION;
   device = reinterpret_cast<int*>(1);
@@ -71,6 +87,9 @@ void testAllocationContracts() {
   assert(ascify::cudaMalloc(&device, 32) == ACL_ERROR_RT_MEMORY_ALLOCATION);
   assert(ascify::cudaMallocHost(&host, 32) == ACL_ERROR_RT_MEMORY_ALLOCATION);
   assert(device == nullptr);
+  assert(host == nullptr);
+  host = reinterpret_cast<int*>(1);
+  assert(ascify::cudaMallocHost(&host, 32, 0) == ACL_ERROR_RT_MEMORY_ALLOCATION);
   assert(host == nullptr);
 
   ascify_test_runtime_status = ACL_SUCCESS;

@@ -154,6 +154,7 @@ private:
   bool firstHeader = false;
   bool needsCudaCompatHeader = false;
   bool cudaRuntimeApiHeaderAdmitted = false;
+  bool cudaProfilerApiHeaderAdmitted = false;
   bool cudaRuntimeApiBoundaryFailed = false;
   bool cudaRuntimeApiStrictControlModified = false;
   bool cudaRuntimeApiMvsControlModified = false;
@@ -212,6 +213,8 @@ private:
   void auditActiveAscifyCudaCompatMacrosAtInsertion();
   void observeCudaRuntimeApiMacroUse(const clang::Token &token);
   bool auditCudaRuntimeApiSurface();
+  bool auditCudaProfilerApiSurface();
+  bool rewriteUnsupportedCudaSmAttribute(const mat::MatchFinder::MatchResult &Result);
   void auditExternalNvidiaSampleHelperPreprocessorUse(
       clang::SourceLocation location,
       const clang::Token &macroNameToken,

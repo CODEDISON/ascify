@@ -16,6 +16,17 @@ int ascify_test_get_device_info_calls = 0;
 const char* ascify_test_soc_name = "Ascend test product";
 
 int main() {
+  int unavailable = 12345;
+  assert(ascify::cudaDeviceGetAttribute(&unavailable,
+      ascify::cudaDevAttrComputeCapabilityMajor, 2) == ACL_ERROR_FEATURE_UNSUPPORTED);
+  assert(ascify::cudaDeviceGetAttribute(&unavailable,
+      ascify::cudaDevAttrComputeCapabilityMinor, 2) == ACL_ERROR_FEATURE_UNSUPPORTED);
+  assert(unavailable == 12345 && ascify_test_get_device_info_calls == 0);
+  assert(ascify::cudaDeviceGetAttribute(nullptr,
+      ascify::cudaDevAttrComputeCapabilityMajor, 2) == ACL_ERROR_RT_PARAM_INVALID);
+  assert(ascify::cudaDeviceGetAttribute(&unavailable,
+      ascify::cudaDevAttrComputeCapabilityMinor, -1) == ACL_ERROR_RT_PARAM_INVALID);
+  assert(unavailable == 12345 && ascify_test_get_device_info_calls == 0);
   ascify::cudaDeviceProp properties = {};
   assert(ascify::cudaGetDeviceProperties(&properties, 2) == ACL_SUCCESS);
   assert(properties.multiProcessorCount == 48);

@@ -43,6 +43,9 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   m["cudaMemset"]                                              = {"ascify::cudaMemset",                                     CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["cudaMemsetAsync"]                                         = {"ascify::cudaMemsetAsync",                                CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["cudaMallocHost"]                                         = {"ascify::cudaMallocHost",                                 CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaProfilerStart"] = {"ascify::cudaProfilerStart", CONV_PROFILER, API_RUNTIME, 0};
+  m["cudaProfilerStop"] = {"ascify::cudaProfilerStop", CONV_PROFILER, API_RUNTIME, 0};
+  m["cudaLaunchHostFunc"] = {"ascify::cudaLaunchHostFunc", CONV_EXECUTION, API_RUNTIME, 0};
   m["cudaFreeHost"]                                            = {"ascify::cudaFreeHost",                                   CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   // Device management
   // CUDA owns lazy runtime/context creation. Route all lifecycle-sensitive
@@ -69,6 +72,7 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   m["cudaEventCreate"]                                         = {"ascify::cudaEventCreate",                                CONV_EVENT, API_RUNTIME, SEC::EVENT};
   m["cudaEventDestroy"]                                        = {"ascify::cudaEventDestroy",                               CONV_EVENT, API_RUNTIME, SEC::EVENT};
   m["cudaEventRecord"]                                         = {"ascify::cudaEventRecord",                                CONV_EVENT, API_RUNTIME, SEC::EVENT};
+  m["cudaEventQuery"]                                          = {"ascify::cudaEventQuery",                                 CONV_EVENT, API_RUNTIME, SEC::EVENT};
   m["cudaEventSynchronize"]                                    = {"ascify::cudaEventSynchronize",                           CONV_EVENT, API_RUNTIME, SEC::EVENT};
   m["cudaEventElapsedTime"]                                    = {"ascify::cudaEventElapsedTime",                           CONV_EVENT, API_RUNTIME, SEC::EVENT};
   // Error handling

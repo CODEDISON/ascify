@@ -729,12 +729,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 49356)
+  if (contents.size() != 59059)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "40f959b7ae5634b631ad7679d7f51b6e2da4143f26c019418cf78c0d2af29fb2");
+      "79faa9df45555bde645f0e0b29bfe679f570b04974d0e7c2f8d4c1051fab43af");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -761,12 +761,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 49356)
+  if (invalidBuffer || contents.size() != 59059)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "40f959b7ae5634b631ad7679d7f51b6e2da4143f26c019418cf78c0d2af29fb2");
+      "79faa9df45555bde645f0e0b29bfe679f570b04974d0e7c2f8d4c1051fab43af");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -831,6 +831,8 @@ bool isAdmittedCudaRuntimeStatusCall(
   static const char *const admittedNames[] = {
       "cudaMalloc", "cudaFree", "cudaMemcpy", "cudaMemcpyAsync",
       "cudaMemset", "cudaMemsetAsync", "cudaMallocHost",
+      "cudaProfilerStart", "cudaProfilerStop",
+      "cudaLaunchHostFunc",
       "cudaFreeHost", "cudaGetDevice", "cudaSetDevice",
       "cudaGetDeviceCount", "cudaDeviceGetAttribute",
       "cudaGetDeviceProperties", "cudaGetDeviceProperties_v2",
@@ -840,7 +842,7 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaStreamCreate", "cudaStreamCreateWithFlags",
       "cudaStreamDestroy", "cudaStreamSynchronize",
       "cudaEventCreate", "cudaEventDestroy", "cudaEventRecord",
-      "cudaEventSynchronize", "cudaEventElapsedTime",
+      "cudaEventSynchronize", "cudaEventElapsedTime", "cudaEventQuery",
       "cudaGetLastError", "cudaPeekAtLastError",
   };
   if (std::find_if(std::begin(admittedNames), std::end(admittedNames),
@@ -1430,6 +1432,7 @@ static bool isConfiguredCudaSdkDependencyRole(llvm::StringRef path) {
   static const std::set<std::string> dependencies = {
       "builtin_types.h", "channel_descriptor.h", "cuda.h",
       "cuda_device_runtime_api.h", "cuda_runtime.h", "cuda_runtime_api.h",
+      "cuda_profiler_api.h",
       "cudart_platform.h", "curand.h", "curand_mtgp32.h", "curand_mtgp32_kernel.h",
       "device_atomic_functions.h", "device_atomic_functions.hpp",
       "device_launch_parameters.h", "device_types.h", "driver_functions.h",
@@ -1540,7 +1543,8 @@ static std::string ownedClangResourceDirectory() {
 }
 
 static bool isOwnedCudaCompilerInput(clang::FileID file,
-                                     clang::CompilerInstance &compiler) {
+                                     clang::CompilerInstance &compiler,
+                                     bool allowFrozenSampleAncestry = false) {
   auto &source = compiler.getSourceManager();
   const auto &resourceRoot = compiler.getHeaderSearchOpts().ResourceDir;
   const auto ownedRoot = ownedClangResourceDirectory();
@@ -1577,6 +1581,13 @@ static bool isOwnedCudaCompilerInput(clang::FileID file,
               compiler.getPreprocessor().getPredefinesFileID())
         return true;
     } else {
+      // Profiler projection also owns byte-frozen Samples helpers. Their
+      // standard-library children may enter product resources independently
+      // of Clang's forced CUDA wrapper (notably cuda_wrappers/new). Keep this
+      // additional root opt-in so runtime-header projection is unchanged.
+      if (allowFrozenSampleAncestry &&
+          frozenNvidiaSampleHelperFileRole(source, begin) != 0)
+        return true;
       // A resource child cannot acquire compiler ownership through a caller
       // header that merely intercepts an include in the forced wrapper.
       const auto *entry = source.getFileEntryForID(file);
@@ -1689,6 +1700,10 @@ static bool requiresCudaCompatHeader(llvm::StringRef name) {
          name == "cudaMemset" ||
          name == "cudaMemsetAsync" ||
          name == "cudaMallocHost" ||
+         name == "cudaProfilerStart" ||
+         name == "cudaProfilerStop" ||
+         name == "cudaLaunchHostFunc" ||
+         name == "cudaHostFn_t" ||
          name == "cudaFreeHost" ||
          name == "cudaGetDevice" ||
          name == "cudaSetDevice" ||
@@ -1712,6 +1727,7 @@ static bool requiresCudaCompatHeader(llvm::StringRef name) {
          name == "cudaEventCreate" ||
          name == "cudaEventDestroy" ||
          name == "cudaEventRecord" ||
+         name == "cudaEventQuery" ||
          name == "cudaEventSynchronize" ||
          name == "cudaEventElapsedTime" ||
          name == "cudaDevAttrWarpSize" ||
@@ -4017,6 +4033,10 @@ void AscifyAction::FileChanged(
   const bool sdkRole = !sourceManager.isWrittenInMainFile(spelling) &&
       isConfiguredCudaSdkDependencyRole(sourceManager.getFilename(spelling)) &&
       (isConfiguredCudaRuntimeApiPath(sourceManager.getFilename(spelling), sourceManager) ||
+       (cudaProfilerApiHeaderAdmitted &&
+        llvm::sys::path::filename(sourceManager.getFilename(spelling)) ==
+            "cuda_profiler_api.h" && include.isValid() &&
+        sourceManager.isWrittenInMainFile(include)) ||
        (parentFile.isValid() &&
         (cudaRuntimeApiSdkFileIds.count(parentFile.getHashValue()) ||
          isOwnedCudaCompilerInput(parentFile, getCompilerInstance()))));
@@ -4221,6 +4241,34 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
       return;
     }
     cudaRuntimeApiHeaderAdmitted = true;
+    needsCudaCompatHeader = true;
+    auditActiveAscifyCudaCompatMacrosAtInsertion();
+  }
+  if (file_name == "cuda_profiler_api.h") {
+    llvm::SmallString<256> expected(CudaPath.getValue()), physicalExpected,
+        physicalActual;
+    llvm::sys::path::append(expected, "include", "cuda_profiler_api.h");
+    const auto buffer = llvm::MemoryBuffer::getFile(resolved_file_name);
+    bool exact = false;
+#if LLVM_VERSION_MAJOR >= 13
+    exact = buffer && (*buffer)->getBufferSize() == 4566 &&
+        sha256Equals((*buffer)->getBuffer(),
+          "bb8e03c217df1309ccfe3249c4fac1bcd577bdcff5c65944217548195204118e");
+#endif
+    if (!directRange || !directSpelling || preprocessorConditionalDepth != 0 ||
+        CudaPath.empty() || !exact ||
+        llvm::sys::fs::real_path(expected, physicalExpected) ||
+        llvm::sys::fs::real_path(resolved_file_name, physicalActual) ||
+        physicalExpected != physicalActual) {
+      cudaRuntimeApiBoundaryFailed = true;
+      const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error,
+          "CUDA profiler header boundary: requires an unconditional direct "
+          "literal include of the verified physical CUDA profiler header");
+      getCompilerInstance().getDiagnostics().Report(hash_loc, diagnostic);
+      return;
+    }
+    cudaProfilerApiHeaderAdmitted = true;
     needsCudaCompatHeader = true;
     auditActiveAscifyCudaCompatMacrosAtInsertion();
   }
@@ -5665,6 +5713,56 @@ bool AscifyAction::rewriteCudaSmDiagnostic(
   return true;
 }
 
+bool AscifyAction::rewriteUnsupportedCudaSmAttribute(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
+  if (call == nullptr || Result.Context == nullptr || Result.SourceManager == nullptr ||
+      call->getNumArgs() != 3 || call->isTypeDependent() || call->isValueDependent() ||
+      getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)
+    return false;
+  auto &source = *Result.SourceManager;
+  const auto *callee = call->getDirectCallee();
+  if (callee == nullptr || callee->getQualifiedNameAsString() != "cudaDeviceGetAttribute" ||
+      !allFunctionRedeclarationsComeFromInitiallyTrustedSystemFiles(
+          callee, source, trustedSystemFileIds))
+    return false;
+  const auto *owner = enclosingNonLambdaFunction(call, *Result.Context);
+  if (owner == nullptr || owner->hasAttr<clang::CUDADeviceAttr>() ||
+      owner->hasAttr<clang::CUDAGlobalAttr>() || owner->isDependentContext() ||
+      owner->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate)
+    return false;
+  const auto *reference = llvm::dyn_cast<clang::DeclRefExpr>(
+      call->getArg(1)->IgnoreParenImpCasts());
+  const auto *selector = reference == nullptr ? nullptr :
+      llvm::dyn_cast<clang::EnumConstantDecl>(reference->getDecl());
+  if (selector == nullptr || reference->hasQualifier())
+    return false;
+  const auto name = selector->getName();
+  if (name != "cudaDevAttrComputeCapabilityMajor" &&
+      name != "cudaDevAttrComputeCapabilityMinor")
+    return false;
+  const auto declaration = source.getSpellingLoc(selector->getLocation());
+  if (declaration.isInvalid() ||
+      !cudaRuntimeApiSdkFileIds.count(source.getFileID(declaration).getHashValue()))
+    return false;
+  const auto begin = reference->getLocation();
+  if (begin.isInvalid() || begin.isMacroID() || !source.isWrittenInMainFile(begin))
+    return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto end = clang::Lexer::getLocForEndOfToken(begin, 0, source, options);
+  const auto spelling = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(begin, begin), source, options);
+  if (end.isInvalid() || spelling != name)
+    return false;
+  // Only this verified API operand becomes a nonnumeric selector. All enum
+  // reflection/arithmetic/assignments elsewhere retain their CUDA spelling.
+  ct::Replacement edit(source, begin, spelling.size(), "::ascify::" + name.str());
+  if (!insertSemanticReplacement(edit, clang::FullSourceLoc(begin, source), begin, end))
+    return false;
+  needsCudaCompatHeader = true;
+  return true;
+}
+
 bool AscifyAction::preserveCudaIntegerIntrinsicArgumentConversion(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call =
@@ -6455,6 +6553,61 @@ void AscifyAction::observeCudaRuntimeApiMacroUse(const clang::Token &token) {
     cudaRuntimeApiExternalMacroUses.insert(token.getIdentifierInfo()->getName().str());
 }
 
+bool AscifyAction::auditCudaProfilerApiSurface() {
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  const auto reject = [&](clang::SourceLocation location) {
+    const auto diagnostic = compiler.getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "CUDA profiler header boundary: observes removed profiler header surface");
+    compiler.getDiagnostics().Report(location, diagnostic);
+    return false;
+  };
+  if (cudaRuntimeApiSdkIdentityFailure.isValid())
+    return reject(cudaRuntimeApiSdkIdentityFailure);
+  if (cudaRuntimeApiExternalMacroUses.count("__CUDA_PROFILER_API_H__"))
+    return reject({});
+  for (auto info = source.fileinfo_begin(); info != source.fileinfo_end(); ++info) {
+    const auto file = source.translateFile(info->first);
+    if (file.isInvalid() || cudaRuntimeApiSdkFileIds.count(file.getHashValue()))
+      continue;
+    const auto begin = source.getLocForStartOfFile(file);
+    if (isOwnedCudaCompilerInput(file, compiler, true) ||
+        productStdargFromNativeStdio(file, compiler) ||
+        frozenNvidiaSampleHelperFileRole(source, begin) != 0)
+      continue;
+    const auto *entry = source.getFileEntryForID(file);
+    if (source.isInSystemHeader(begin) && entry != nullptr &&
+        !source.isFileOverridden(entry) &&
+        physicalSourceFileMatches(source.getFilename(begin), *entry, source) &&
+        (pathIsWithinPhysicalDirectory(source.getFilename(begin), "/usr/include") ||
+         pathIsWithinPhysicalDirectory(source.getFilename(begin), "/usr/lib/gcc")))
+      continue;
+    bool invalid = false;
+    const auto data = source.getBufferData(file, &invalid);
+    if (invalid) { return reject(begin); }
+    clang::Lexer lexer(begin, compiler.getLangOpts(), data.begin(), data.begin(), data.end());
+    clang::Token token;
+    lexer.LexFromRawLexer(token);
+    while (!token.is(clang::tok::eof)) {
+      if (token.is(clang::tok::hashhash)) { return reject(token.getLocation()); }
+      if (token.isAnyIdentifier()) {
+        const auto name = clang::Lexer::getSpelling(token, source, compiler.getLangOpts());
+        if (name == "__CUDA_PROFILER_API_H__" || name == "__has_include" ||
+            name == "__has_include_next" || name == "_Pragma" ||
+            name == "__pragma" || name == "push_macro" || name == "pop_macro")
+          return reject(token.getLocation());
+      } else if (token.is(clang::tok::string_literal)) {
+        const auto literal = clang::Lexer::getSpelling(token, source, compiler.getLangOpts());
+        if (literal.find("__CUDA_PROFILER_API_H__") != std::string::npos)
+          return reject(token.getLocation());
+      }
+      lexer.LexFromRawLexer(token);
+    }
+  }
+  return true;
+}
+
 bool AscifyAction::auditCudaRuntimeApiSurface() {
   auto &compiler = getCompilerInstance();
   auto &source = compiler.getSourceManager();
@@ -7176,6 +7329,35 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
         !sourceManager.isWrittenInMainFile(use))
       localHeaderContext->plan->requireInheritedSourceContext(
           sourceManager.getFilename(use).str());
+  }
+  if (MacroNameTok.getIdentifierInfo()->getName() == "CUDART_CB" &&
+      macroInfo != nullptr && !macroInfo->isFunctionLike() &&
+      macroInfo->getNumTokens() == 0 &&
+      getCompilerInstance().getTarget().getTriple().isOSLinux() &&
+      !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks &&
+      Range.getBegin().isFileID() && Range.getEnd().isFileID() &&
+      MacroNameTok.getLocation().isFileID() &&
+      sourceManager.isWrittenInMainFile(MacroNameTok.getLocation())) {
+    const auto definition = sourceManager.getSpellingLoc(macroInfo->getDefinitionLoc());
+    const auto file = sourceManager.getFileID(definition);
+    const auto *entry = sourceManager.getFileEntryForID(file);
+    const auto path = sourceManager.getFilename(definition);
+    const auto spelling = clang::Lexer::getSourceText(
+        clang::CharSourceRange::getTokenRange(Range), sourceManager,
+        getCompilerInstance().getLangOpts());
+    if (entry != nullptr && !sourceManager.isFileOverridden(entry) &&
+        llvm::sys::path::filename(path) == "driver_types.h" &&
+        isConfiguredCudaSdkDependencyRole(path) &&
+        physicalSourceFileMatches(path, *entry, sourceManager) &&
+        spelling == "CUDART_CB") {
+      const auto end = clang::Lexer::getLocForEndOfToken(
+          Range.getEnd(), 0, sourceManager, getCompilerInstance().getLangOpts());
+      if (end.isValid()) {
+        ct::Replacement edit(sourceManager, Range.getBegin(), spelling.size(), "");
+        (void)insertSemanticReplacement(edit,
+            clang::FullSourceLoc(Range.getBegin(), sourceManager), Range.getBegin(), end);
+      }
+    }
   }
   if (isAscifyCudaCompatPublishedMacro(
           MacroNameTok.getIdentifierInfo()->getName()))
@@ -8503,6 +8685,10 @@ void AscifyAction::ExecuteAction() {
     cudaRuntimeApiBoundaryFailed = true;
     return;
   }
+  if (cudaProfilerApiHeaderAdmitted && !auditCudaProfilerApiSurface()) {
+    cudaRuntimeApiBoundaryFailed = true;
+    return;
+  }
   std::string vec3AbiError;
   clang::SourceLocation vec3AbiLocation;
   if (!ascify::ValidateCudaVec3AbiBoundary(
@@ -8764,6 +8950,7 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
   if (Result.Nodes.getNodeAs<clang::CallExpr>(
           sProvenGlobalAtomicCall) != nullptr) {
     if (!rewriteCudaSmDiagnostic(Result) &&
+        !rewriteUnsupportedCudaSmAttribute(Result) &&
         !preserveCudaIntegerIntrinsicArgumentConversion(Result) &&
         !rewriteProvenGlobalAtomicCall(Result))
       (void)rewriteProvenDeviceMemoryCall(Result);
