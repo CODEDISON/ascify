@@ -203,6 +203,8 @@ run_check "half2 syntax and separate rounding conversion" \
   sh "$rewrite_dir/check_half2_translation.sh"
 run_check "inherited parent helper conversion boundary" \
   "$python" -B "$rewrite_dir/check_inherited_sample_helper_context.py"
+run_check "parent source macro and declaration context boundary" \
+  "$python" -B "$rewrite_dir/check_parent_source_context.py"
 run_check "private device copy AST admission and refusal boundaries" \
   sh "$rewrite_dir/check_device_memory_translation.sh"
 run_check "real sample-helper dependent status domain and atomic publication" \

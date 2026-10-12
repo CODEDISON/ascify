@@ -739,6 +739,11 @@ void LocalHeaderClosurePlan::requireInheritedHelperContext(const std::string &pa
     inheritedHelperHeaders_.insert(canonicalExisting(path));
 }
 
+void LocalHeaderClosurePlan::requireInheritedSourceContext(const std::string &path) {
+  if (mode_ == LocalHeaderClosureMode::Recursive && isSelectedRootHeader(path))
+    inheritedSourceHeaders_.insert(canonicalExisting(path));
+}
+
 void LocalHeaderClosurePlan::retainContextEvidence(
     const LocalHeaderInputEvidence &evidence,
     const std::vector<LocalHeaderContextInline> &inlined) {
@@ -1006,10 +1011,11 @@ bool ascifySourceWithLocalHeaderClosure(
     return false;
   }
 
-  // A selected leaf that uses a recognized parent helper cannot be converted
-  // in a fresh standalone frontend. Prove a same-position virtual expansion
-  // instead; neither the discovery output nor a failed joint edit is published.
-  if (recursive && !plan.inheritedHelperHeaders().empty()) {
+  // Selected leaves can depend on parent macros or declarations as well as a
+  // recognized helper. Preserve the actual include position and prove equal
+  // tokens/macro state; never reconstruct a guessed standalone environment.
+  if (recursive && (!plan.inheritedHelperHeaders().empty() ||
+                    !plan.inheritedSourceHeaders().empty())) {
     auto contextualize = [&]() -> bool {
       if (!discoveryEvidence.standardPreprocessing || AscifyAMAP) {
         plan.fail("contextual local headers require standard preprocessing "
@@ -1049,14 +1055,20 @@ bool ascifySourceWithLocalHeaderClosure(
         plan.fail("contextual root buffer identity or input path binding changed");
         return false;
       }
-      if (originalPlan.inheritedHelperHeaders() != plan.inheritedHelperHeaders()) {
-        plan.fail("inherited-helper include graph changed during discovery");
+      if (originalPlan.inheritedHelperHeaders() != plan.inheritedHelperHeaders() ||
+          originalPlan.inheritedSourceHeaders() != plan.inheritedSourceHeaders()) {
+        plan.fail("inherited-context include graph changed during discovery");
         return false;
       }
+      std::set<std::string> contextualHeaders = originalPlan.inheritedSourceHeaders();
+      contextualHeaders.insert(originalPlan.inheritedHelperHeaders().begin(),
+                               originalPlan.inheritedHelperHeaders().end());
+      const bool requireHelperTransaction =
+          !originalPlan.inheritedHelperHeaders().empty();
       struct InlineEdit { std::size_t begin, end; std::string text; };
       std::vector<InlineEdit> edits;
       std::vector<LocalHeaderContextInline> inlined;
-      for (const auto &path : originalPlan.inheritedHelperHeaders()) {
+      for (const auto &path : contextualHeaders) {
         const LocalHeaderEdge *selected = nullptr;
         unsigned edgeCount = 0;
         for (const auto &edge : originalEvidence.originalEdges)
@@ -1127,12 +1139,14 @@ bool ascifySourceWithLocalHeaderClosure(
       jointContext.artifactPath = jointPlan.rootArtifactPath();
       jointContext.virtualInput = &flattened;
       jointContext.inputEvidence = &jointEvidence;
-      jointContext.requireHelperTransaction = true;
+      jointContext.requireHelperTransaction = requireHelperTransaction;
       if (!ascifySingleSource(mainSourceAbsPath, pathString(stagedRoot), compDB,
                               OptionsParserPtr, ascify_exe, mainSourceAbsPath, false,
                               &jointContext) || jointPlan.failed() ||
-          !jointContext.helperTransactionCommitted) {
-        plan.fail("contextual joint helper transaction could not be proven");
+          (requireHelperTransaction && !jointContext.helperTransactionCommitted)) {
+        plan.fail(requireHelperTransaction
+                      ? "contextual joint helper transaction could not be proven"
+                      : "contextual joint source parse could not be proven");
         return false;
       }
       if (!jointEvidence.standardPreprocessing ||
@@ -1168,7 +1182,10 @@ bool ascifySourceWithLocalHeaderClosure(
       }
       plan = std::move(jointPlan);
       llvm::outs() << sAscify << "Proven contextual local-header expansion: "
-                   << inlined.size() << " leaf header(s), joint helper transaction\n";
+                   << inlined.size() << " leaf header(s), "
+                   << (requireHelperTransaction ? "joint helper transaction"
+                                                : "original parent source context")
+                   << "\n";
       return true;
     };
     if (!contextualize()) {

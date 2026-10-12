@@ -124,6 +124,10 @@ class LocalHeaderClosurePlan {
   const std::set<std::string> &inheritedHelperHeaders() const {
     return inheritedHelperHeaders_;
   }
+  void requireInheritedSourceContext(const std::string &path);
+  const std::set<std::string> &inheritedSourceHeaders() const {
+    return inheritedSourceHeaders_;
+  }
   void retainContextEvidence(const LocalHeaderInputEvidence &evidence,
                              const std::vector<LocalHeaderContextInline> &inlined);
   const LocalHeaderInputEvidence &contextEvidence() const { return contextEvidence_; }
@@ -168,6 +172,7 @@ class LocalHeaderClosurePlan {
   std::vector<LocalHeaderEdge> edges_;
   LocalHeaderClosureStats stats_;
   std::set<std::string> inheritedHelperHeaders_;
+  std::set<std::string> inheritedSourceHeaders_;
   LocalHeaderInputEvidence contextEvidence_;
   std::vector<LocalHeaderContextInline> contextInlines_;
   bool failed_ = false;

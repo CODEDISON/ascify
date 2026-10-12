@@ -34,6 +34,7 @@ THE SOFTWARE.
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/RecursiveASTVisitor.h"
+#include "clang/AST/TypeLoc.h"
 #include "clang/AST/Stmt.h"
 #include "clang/AST/TypeLoc.h"
 #include "clang/Basic/FileManager.h"
@@ -7164,6 +7165,19 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
           sourceManager.getFileOffset(macroEnd)});
   }
   const clang::MacroInfo *macroInfo = MD.getMacroInfo();
+  // A local leaf can only be parsed with the root macro state that was active
+  // at this include. Record the dependency, not an instruction to copy a -D.
+  // LocalHeader.cpp still proves a same-position expansion and exact inputs.
+  if (macroInfo != nullptr && localHeaderContext != nullptr &&
+      localHeaderContext->depth == 0 && localHeaderContext->plan != nullptr) {
+    const auto definition = sourceManager.getSpellingLoc(macroInfo->getDefinitionLoc());
+    const auto use = sourceManager.getExpansionLoc(MacroNameTok.getLocation());
+    if (definition.isValid() && use.isValid() &&
+        sourceManager.isWrittenInMainFile(definition) &&
+        !sourceManager.isWrittenInMainFile(use))
+      localHeaderContext->plan->requireInheritedSourceContext(
+          sourceManager.getFilename(use).str());
+  }
   if (isAscifyCudaCompatPublishedMacro(
           MacroNameTok.getIdentifierInfo()->getName()))
     auditExternalNvidiaSampleHelperPreprocessorUse(
@@ -8053,6 +8067,53 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
 void AscifyAction::EndSourceFileAction() {
   if (cudaRuntimeApiBoundaryFailed)
     return;
+  if (localHeaderContext != nullptr && localHeaderContext->depth == 0 &&
+      localHeaderContext->plan != nullptr) {
+    // References include declarations in signatures and instantiated bodies.
+    // Expansion locations keep a reference introduced by a header macro in
+    // that header; declarations must physically belong to the original root.
+    // No declaration text, initializer or type is synthesized here.
+    class ParentSourceDependencies
+        : public clang::RecursiveASTVisitor<ParentSourceDependencies> {
+      clang::SourceManager &source;
+      LocalHeaderClosurePlan &plan;
+      void observe(clang::SourceLocation use, const clang::Decl *declaration) {
+        if (declaration == nullptr)
+          return;
+        use = source.getExpansionLoc(use);
+        const auto definition = source.getSpellingLoc(declaration->getLocation());
+        if (use.isValid() && definition.isValid() &&
+            !source.isWrittenInMainFile(use) &&
+            source.isWrittenInMainFile(definition))
+          plan.requireInheritedSourceContext(source.getFilename(use).str());
+      }
+     public:
+      ParentSourceDependencies(clang::SourceManager &source,
+                               LocalHeaderClosurePlan &plan)
+          : source(source), plan(plan) {}
+      bool shouldVisitTemplateInstantiations() const { return true; }
+      bool VisitDeclRefExpr(clang::DeclRefExpr *reference) {
+        observe(reference->getExprLoc(), reference->getDecl());
+        return true;
+      }
+      bool VisitTagTypeLoc(clang::TagTypeLoc type) {
+        observe(type.getBeginLoc(), type.getDecl());
+        return true;
+      }
+      bool VisitTypedefTypeLoc(clang::TypedefTypeLoc type) {
+        observe(type.getBeginLoc(), type.getTypePtr()->getDecl());
+        return true;
+      }
+      bool VisitTemplateSpecializationTypeLoc(clang::TemplateSpecializationTypeLoc type) {
+        observe(type.getBeginLoc(),
+                type.getTypePtr()->getTemplateName().getAsTemplateDecl());
+        return true;
+      }
+    } dependencies(getCompilerInstance().getSourceManager(),
+                   *localHeaderContext->plan);
+    dependencies.TraverseDecl(
+        getCompilerInstance().getASTContext().getTranslationUnitDecl());
+  }
   finalizePendingNvidiaSampleHelperPragma();
   if (needsCudaCompatHeader &&
       nvidiaSampleHelperOutputMacroEverDefined) {

@@ -47,6 +47,33 @@ two final renames can still leave an artifact requiring operator inspection.
 Multiple inputs that would collide under `-o-dir` are rejected before any
 conversion starts.
 
+## Parent source context
+
+A local header can use a macro or declaration defined by the root before its
+include. In recursive mode, Ascify detects root-defined macro expansions and
+references to root declarations, records, typedefs and template types in selected
+direct headers. These dependencies can be preserved by converting the header
+at its original include position. Ascify does not manufacture a standalone
+macro environment or copy initializer values.
+
+This path requires standard preprocessing (`--default-preprocessor`), no
+`--amap`, and no target recipe. A candidate must have exactly one direct literal
+include on its own line, one file entry, a final newline, no nested quoted
+include and no pragma. A virtual expansion uses `#line` to retain source
+locations, then a second parse must produce the same expanded token digest and
+final macro-state digest as the original complete translation unit. Builtins
+such as the include level and counter can make that proof fail. Input bytes,
+canonical path bindings and include edges are bound to the proof and rechecked
+before atomic publication. Unsupported contexts leave previous outputs intact.
+
+When a selected header also depends on a recognized sample-helper macro, its
+existing joint helper transaction remains mandatory. Pure parent source
+dependencies do not require a helper include. See the [parent source context
+regression](../tests/rewrite/check_parent_source_context.py) and [helper context
+regression](../tests/rewrite/check_inherited_sample_helper_context.py). This proof
+preserves source context; it does not establish target API support or device
+correctness.
+
 ## Verification boundary
 
 The host model exercises path selection, canonicalization, parent-directory
