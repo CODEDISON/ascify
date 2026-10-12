@@ -36,7 +36,6 @@ THE SOFTWARE.
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/TypeLoc.h"
 #include "clang/AST/Stmt.h"
-#include "clang/AST/TypeLoc.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/SourceManager.h"
