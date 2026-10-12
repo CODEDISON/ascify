@@ -30,7 +30,7 @@ def case(name, statement=ASM, expected=None, owner='__device__',
                 statement if expected is None else expected)
 
 
-def cases():
+def cases(clang_major):
     yield case('device_local', expected=LOWERED)
     yield case('global_local', owner='__global__', expected=LOWERED)
     yield case('parenthesized_output', statement=ASM.replace('(value)', '((value))'),
@@ -74,6 +74,14 @@ def cases():
                suffix='target:;')
     yield case('other_register', statement=ASM.replace('%%laneid', '%%warpid'))
     yield case('another_instruction', statement=ASM.replace('%%laneid;', '%%laneid; add.u32 %0, %0, 1;'))
+    # LLVM 21 added constexpr assembly components. Even identical evaluated
+    # strings remain outside the literal-only rewrite contract.
+    if clang_major >= 21:
+        yield case('constexpr_asm_template', prefix='#include <string_view>',
+                   statement=ASM.replace('"mov.u32 %0, %%laneid;"',
+                                         '(std::string_view("mov.u32 %0, %%laneid;"))'))
+        yield case('constexpr_output_constraint', prefix='#include <string_view>',
+                   statement=ASM.replace('"=r"', '(std::string_view("=r"))'))
     yield case('host_function', owner='')
     yield case('host_device_function', owner='__host__ __device__')
     yield case('template_function', owner='template<class T> __device__')
@@ -152,7 +160,7 @@ def main():
             return result
         save()
         try:
-            for item in cases():
+            for item in cases(int(major.group(1))):
                 directory = work / item.name
                 directory.mkdir()
                 source, output, receipt = (directory / name for name in ('input.cu', 'output.cpp', 'receipt.json'))
