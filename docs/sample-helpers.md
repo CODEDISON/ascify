@@ -90,6 +90,15 @@ retain the complete helper transaction. A main-file `#ifndef MAX` fallback is ad
 retained provider's proven internal use; it must contain just `#define MAX(a,b) (a > b ? a : b)` and `#endif`
 (parameter names may differ). Extra logic, changed definitions or other observations fail.
 
+Materializing an admitted frozen CUDA-helper `MAX` preserves expression evaluation,
+but does not promise to preserve macro spelling. Any enclosing user macro therefore
+retains the complete helper transaction, including identity, forwarding, stringization
+and token-paste wrappers. Every enclosing expansion is checked, not only its nearest
+parent. The sole admitted enclosing macro is the physically authenticated, retained
+image provider's exact `MIN(a,b) ((a < b) ? a : b)` body, which cannot stringify or
+paste its arguments. This permits ordinary `MIN(MAX(...), ...)` expressions without
+allowing an outer user macro to observe changed whitespace or tokens.
+
 Unproved preprocessor observations of the removed include guard, policy macros or error macros
 prevent closure, including indirect names and unresolved skipped branches. Pragmas use a closed
 allowlist; unknown or unresolved forms and macro-stack operations on helper or reserved output names
@@ -105,7 +114,7 @@ Ascify preserves these portable includes, in order: `<stdint.h>`, `<stdio.h>`, `
 `<string.h>`, `<helper_string.h>`. It inserts the authenticated `<ascify/ascify_cuda_compat.hpp>` when
 needed; a later compat include does not establish that its declarations were available earlier.
 
-Every helper macro, device-selection rewrite, template guard and include change is staged together.
+Every helper macro, device-selection rewrite, template/configuration guard and include change is staged together.
 Declaration uses, unresolved template lookup, raw tokens through EOF, retained headers, macro state and
 edit conflicts must all pass before commit. Ordinary proof failure retains the original helper include
 and calls; conversion output may consequently retain an unsupported dependency. Reserved compat macros,
@@ -113,6 +122,28 @@ backing identifiers, namespace collisions or a counterfeit compat header can fai
 when another CUDA mapping requires that header. `ASCIFY_*` is reserved for generated output;
 synthesizing those identifiers by token pasting is outside the accepted source contract. Occupancy,
 Driver/VMM, compression and compressible-allocation helpers remain unsupported.
+
+## Inactive configuration branches
+
+Under `--default-preprocessor`, without `--amap`, a limited inactive branch may
+be retained with an explicit target-configuration restriction. The branch must
+be a physical, top-level main-file `#ifdef` of an undefined custom identifier at
+the time the preprocessor evaluates it. Its actual skipped range must end at a
+plain matching `#endif`. Nested conditionals, alternative branches, any body
+directive, reserved/SDK macro prefixes, block comments, CR lines, trigraphs,
+digraph directive spellings and physical line continuations are outside this
+domain. `#if` and `#ifndef` do not use this rule.
+
+If such a body contains an otherwise residual helper reference, Ascify retains
+its original text and inserts a `#error` immediately inside it. A target build
+that enables the branch must fail with an explicit configuration diagnostic.
+The guard and helper/include changes commit together; an unrelated failed
+helper proof leaves the complete transaction unchanged. This does not provide
+support for executing the inactive CUDA branch.
+
+A separately proved max-only `cudaFuncGetAttributes` callee replacement may
+coexist inside a status-proved `checkCudaErrors` invocation because their
+edited name tokens are disjoint. Other semantic overlap remains rejected.
 
 ## Dependent status calls and local-header context
 
@@ -143,6 +174,7 @@ handling is in [LocalHeader.cpp](../src/LocalHeader.cpp). Updating a frozen prov
 the upstream diff and updating identity checks plus positive and mutation-negative fixtures together.
 The relevant gates are [helper compatibility](../tests/rewrite/check_sample_helper_compat.sh), [template
 domains](../tests/rewrite/check_sample_helper_template_domain.py) and [inherited
-context](../tests/rewrite/check_inherited_sample_helper_context.py). Host tests do not establish target
+context](../tests/rewrite/check_inherited_sample_helper_context.py), plus
+[inactive configuration guards](../tests/rewrite/check_inactive_sample_helper.py). Host tests do not establish target
 compilation, linking, device correctness or successful process exit. See
 [CONTRIBUTING.md](../CONTRIBUTING.md) for validation methods.

@@ -1076,14 +1076,26 @@ require_fixed "residual helper declaration 'findCudaDevice'" \
 require_fixed 'include kept' \
   "$test_tmp/find-mutated-dependency.stderr"
 
+# This historical fixture predates frozen MAX expression support. Its direct
+# int expression has no enclosing macro observer; keep the fixture unchanged
+# and require the exact supported expression and complete include closure.
+# User-macro observation remains negative above and in check_helper_max.py.
 translate "$fixtures/sample_helper_unsupported_macro.cu" \
   "$fixtures/nvidia_samples/Common" \
   "$test_tmp/unsupported-macro.cpp" "$test_tmp/unsupported-macro"
-require_fixed '#include <helper_cuda.h>' "$test_tmp/unsupported-macro.cpp"
-require_fixed 'MAX(value, 1)' \
+forbid_fixed '#include <helper_cuda.h>' "$test_tmp/unsupported-macro.cpp"
+forbid_fixed 'MAX(value, 1)' "$test_tmp/unsupported-macro.cpp"
+require_fixed 'return ( value > 1 ? value : 1 );' \
   "$test_tmp/unsupported-macro.cpp"
-require_fixed 'unsupported_macro=1' \
+require_fixed '#include <helper_string.h>' "$test_tmp/unsupported-macro.cpp"
+require_fixed 'include removed; portable surface retained' \
   "$test_tmp/unsupported-macro.stderr"
+forbid_fixed 'unsupported_macro=1' "$test_tmp/unsupported-macro.stderr"
+if command -v "$cxx" >/dev/null 2>&1; then
+  "$cxx" -std=c++17 -fsyntax-only -D__aicore__= \
+    -I"$repo_root/tests/rewrite/stubs" -I"$repo_root/include" \
+    -I"$fixtures/nvidia_samples/Common" "$test_tmp/unsupported-macro.cpp"
+fi
 
 translate "$fixtures/sample_helper_user_same_names.cu" \
   "$fixtures/user_helpers" \

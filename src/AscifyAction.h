@@ -91,6 +91,14 @@ private:
     std::string text;
   };
 
+  struct NvidiaSampleInactiveBranch {
+    clang::SourceLocation opener;
+    clang::SourceLocation insertionLocation;
+    SemanticRewriteRange bodyRange;
+    bool skipped = false;
+    bool needed = false;
+  };
+
   ct::Replacements *replacements = nullptr;
   LocalHeaderRewriteContext *localHeaderContext = nullptr;
   ascify::FrontendCompatibilityConfig frontendCompatibility;
@@ -108,7 +116,10 @@ private:
   std::vector<NvidiaSampleFindDeviceCandidate>
       nvidiaSampleFindDeviceCandidates;
   std::vector<NvidiaSampleExpandedMacroCandidate> nvidiaSampleExpandedMacros;
+  std::vector<SemanticRewriteRange> nvidiaSampleMacroObservationRanges;
   std::vector<NvidiaSampleTemplateGuard> nvidiaSampleTemplateGuards;
+  std::vector<NvidiaSampleInactiveBranch> nvidiaSampleInactiveBranches;
+  std::vector<SemanticRewriteRange> provenKernelAttributeCalleeRanges;
   std::vector<NvidiaSampleHelperInclude> nvidiaSampleHelperIncludes;
   std::set<std::string> recognizedNvidiaSampleHelperPaths;
   std::set<unsigned> nvidiaSampleHelperNormalMacroOffsets;
@@ -213,6 +224,11 @@ private:
   bool hasUnsupportedNvidiaSampleHelperDeclarationUse();
   void rewriteProvenNvidiaSampleHelperMacros();
   void auditRawNvidiaSampleHelperToken(const clang::Token &token);
+  void recordInactiveNvidiaSampleHelperBranch(
+      clang::SourceLocation loc, const clang::Token &name,
+      const clang::MacroDefinition &definition);
+  void proveSkippedNvidiaSampleHelperBranch(
+      clang::SourceRange range, clang::SourceLocation endifLocation);
   void auditRawPublishedCompatTokensInFile(clang::FileID file);
   void auditActiveAscifyCudaCompatMacrosAtInsertion();
   void observeCudaRuntimeApiMacroUse(const clang::Token &token);
@@ -335,7 +351,8 @@ public:
                     clang::SourceRange Range,
                     const clang::MacroArgs *Args);
   //
-  void AddSkippedSourceRange(clang::SourceRange Range);
+  void AddSkippedSourceRange(clang::SourceRange Range,
+                             clang::SourceLocation EndifLoc);
 
 protected:
   // Add a Replacement for the current file. These will all be applied after executing the FrontendAction.

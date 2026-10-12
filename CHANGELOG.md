@@ -8,6 +8,8 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Transactional configuration guards for proved inactive Samples-helper branches;
+  enabling an unsupported retained branch in the target produces an explicit error.
 - Generic 32-bit integer `atomicAdd` for proven device-helper parameters,
   preserving the target GM or UB address space.
 - Real device-memory properties and proven per-kernel thread limits for
@@ -50,6 +52,8 @@ for supported domains and experimental paths.
 
 ### Fixed
 
+- Retain Samples helper transactions when an unproved enclosing macro can
+  observe a materialized `MAX` spelling, including stringization whitespace.
 - Preserve standard host `exp`, `log`, and `sqrt` overloads in proven direct
   calls so CPU reference calculations keep their original precision.
 - Preserve admitted local-header dependencies on root macros and declarations

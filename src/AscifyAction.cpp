@@ -703,6 +703,27 @@ bool activeFrozenHelperCudaMaxBodyMatches(
   return actual == expected;
 }
 
+bool activeFrozenHelperImageMinBodyMatches(
+    const clang::MacroInfo &macroInfo,
+    clang::Preprocessor &preprocessor) {
+  if (!macroInfo.isFunctionLike() || macroInfo.isVariadic() ||
+      macroInfo.getNumParams() != 2)
+    return false;
+  auto parameter = macroInfo.param_begin();
+  if (parameter == macroInfo.param_end() || *parameter == nullptr)
+    return false;
+  const std::string left = (*parameter++)->getName().str();
+  if (parameter == macroInfo.param_end() || *parameter == nullptr)
+    return false;
+  const std::string right = (*parameter)->getName().str();
+  std::vector<std::string> actual;
+  for (const clang::Token &token : macroInfo.tokens())
+    actual.push_back(preprocessor.getSpelling(token));
+  const std::vector<std::string> expected = {
+      "(", "(", left, "<", right, ")", "?", left, ":", right, ")"};
+  return actual == expected;
+}
+
 bool locationComesFromFrozenNvidiaSampleHelperFile(
     clang::SourceManager &sourceManager,
     clang::SourceLocation location,
@@ -6283,6 +6304,8 @@ bool AscifyAction::rewriteProvenKernelAttributeCall(
   if (!insertSemanticReplacement(edit, clang::FullSourceLoc(name, source), name, end)) {
     rewrittenKernelAttributeOffsets.erase(offset); return false;
   }
+  provenKernelAttributeCalleeRanges.push_back(
+      {source.getFileID(name), offset, source.getFileOffset(end)});
   provenKernelAttributeObjects.insert(object->getCanonicalDecl());
   needsCudaCompatHeader = true;
   static const dppCounter counter = {"CUDA kernel launch bound", CONV_DEVICE, API_RUNTIME, 0, FULL};
@@ -6955,6 +6978,7 @@ void AscifyAction::Ifndef(clang::SourceLocation Loc, const clang::Token &MacroNa
 void AscifyAction::Ifdef(clang::SourceLocation Loc,
                          const clang::Token &MacroNameTok,
                          const clang::MacroDefinition &MD) {
+  recordInactiveNvidiaSampleHelperBranch(Loc, MacroNameTok, MD);
   ConditionalDirectiveEntered();
   auditExternalNvidiaSampleHelperPreprocessorUse(
       Loc, MacroNameTok, "#ifdef");
@@ -7966,6 +7990,7 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
     return;
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
+  const clang::MacroInfo *macroInfo = MD.getMacroInfo();
   const auto macroBegin = sourceManager.getExpansionLoc(Range.getBegin());
   const auto macroLast = sourceManager.getExpansionLoc(Range.getEnd());
   if (macroBegin.isValid() && macroLast.isValid() &&
@@ -7973,12 +7998,30 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
       sourceManager.isWrittenInMainFile(macroLast)) {
     const auto macroEnd = clang::Lexer::getLocForEndOfToken(
         macroLast, 0, sourceManager, getCompilerInstance().getLangOpts());
-    if (macroEnd.isValid())
-      cudaLaneIdMacroRanges.push_back({sourceManager.getFileID(macroBegin),
+    if (macroEnd.isValid()) {
+      const SemanticRewriteRange invocation{
+          sourceManager.getFileID(macroBegin),
           sourceManager.getFileOffset(macroBegin),
-          sourceManager.getFileOffset(macroEnd)});
+          sourceManager.getFileOffset(macroEnd)};
+      cudaLaneIdMacroRanges.push_back(invocation);
+      // Argument prescan can expose physical inner MAX tokens even while an
+      // outer macro observes their spelling (for example by stringization).
+      // Only the retained, authenticated image-provider MIN is known to use
+      // its arguments solely as expression tokens, without # or ##.
+      const bool nonReflectiveImageMin =
+          MacroNameTok.getIdentifierInfo()->getName() == "MIN" &&
+          macroInfo != nullptr && Args != nullptr &&
+          !MacroNameTok.getLocation().isMacroID() &&
+          !Range.getBegin().isMacroID() && !Range.getEnd().isMacroID() &&
+          frozenOfficialNvidiaSampleHelperFunctionsSeen &&
+          isDirectFrozenFunctionsImageProviderInstance(
+              macroInfo->getDefinitionLoc()) &&
+          activeFrozenHelperImageMinBodyMatches(
+              *macroInfo, getCompilerInstance().getPreprocessor());
+      if (!nonReflectiveImageMin)
+        nvidiaSampleMacroObservationRanges.push_back(invocation);
+    }
   }
-  const clang::MacroInfo *macroInfo = MD.getMacroInfo();
   // A local leaf can only be parsed with the root macro state that was active
   // at this include. Record the dependency, not an instruction to copy a -D.
   // LocalHeader.cpp still proves a same-position expansion and exact inputs.
@@ -8276,6 +8319,100 @@ void AscifyAction::rewriteProvenNvidiaSampleHelperMacros() {
   nvidiaSampleHelperReadyToCommit = true;
 }
 
+void AscifyAction::recordInactiveNvidiaSampleHelperBranch(
+    clang::SourceLocation loc, const clang::Token &nameToken,
+    const clang::MacroDefinition &definition) {
+  // Capture the condition at its actual evaluation point. The EOF macro table
+  // cannot establish whether an earlier conditional body was excluded.
+  if (preprocessorConditionalDepth != 0 || definition.getMacroInfo() != nullptr ||
+      AscifyAMAP || nvidiaSampleHelperIncludes.empty() ||
+      getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks ||
+      !loc.isFileID() || !nameToken.getLocation().isFileID() ||
+      nameToken.getIdentifierInfo() == nullptr)
+    return;
+  auto &source = getCompilerInstance().getSourceManager();
+  if (!source.isWrittenInMainFile(loc) ||
+      source.getFileID(nameToken.getLocation()) != source.getFileID(loc)) return;
+  const llvm::StringRef name = nameToken.getIdentifierInfo()->getName();
+  auto letter = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
+  if (name.empty() || !letter(name.front()) || name.contains("__") ||
+      !std::all_of(name.begin(), name.end(), [&](char c) {
+        return letter(c) || (c >= '0' && c <= '9') || c == '_';
+      }) || isNvidiaSampleHelperObservableMacro(name) ||
+      isAscifyCudaCompatPublishedMacro(name)) return;
+  const std::string lower = name.lower();
+  for (llvm::StringRef prefix : {"cuda", "cu_", "cublas", "cufft", "curand",
+                                 "cusolver", "cusparse", "npp", "nvidia",
+                                 "ascify", "ascend", "acl"})
+    if (llvm::StringRef(lower).starts_with(prefix)) return;
+  bool invalid = false;
+  const auto file = source.getFileID(loc);
+  const auto buffer = source.getBufferData(file, &invalid);
+  const unsigned offset = source.getFileOffset(loc);
+  if (invalid || offset >= buffer.size()) return;
+  const auto previousNewline = buffer.rfind('\n', offset);
+  const auto lineBegin = previousNewline == llvm::StringRef::npos ? 0 : previousNewline + 1;
+  const auto lineEnd = buffer.find('\n', offset);
+  if (lineEnd == llvm::StringRef::npos) return;
+  const auto line = buffer.slice(lineBegin, lineEnd);
+  auto text = line.trim(" \t");
+  if (!text.consume_front("#")) return;
+  text = text.ltrim(" \t");
+  if (!text.consume_front("ifdef") || text.empty() ||
+      (text.front() != ' ' && text.front() != '\t') || text.trim(" \t") != name)
+    return;
+  const auto hash = lineBegin + line.find('#');
+  const auto start = source.getLocForStartOfFile(file);
+  nvidiaSampleInactiveBranches.push_back(
+      {start.getLocWithOffset(hash), start.getLocWithOffset(lineEnd + 1),
+       {file, static_cast<unsigned>(lineEnd + 1), static_cast<unsigned>(lineEnd + 1)},
+       false, false});
+}
+
+void AscifyAction::proveSkippedNvidiaSampleHelperBranch(
+    clang::SourceRange range, clang::SourceLocation endifLocation) {
+  if (!range.getBegin().isFileID() || !range.getEnd().isFileID() ||
+      !endifLocation.isFileID()) return;
+  auto &source = getCompilerInstance().getSourceManager();
+  const auto file = source.getFileID(endifLocation);
+  if (!source.isWrittenInMainFile(endifLocation) ||
+      source.getFileID(range.getBegin()) != file || source.getFileID(range.getEnd()) != file)
+    return;
+  bool invalid = false;
+  const auto buffer = source.getBufferData(file, &invalid);
+  const unsigned endifOffset = source.getFileOffset(endifLocation);
+  if (invalid || endifOffset >= buffer.size()) return;
+  const auto previousNewline = buffer.rfind('\n', endifOffset);
+  const auto lineBegin = previousNewline == llvm::StringRef::npos ? 0 : previousNewline + 1;
+  const auto lineEnd = buffer.find('\n', endifOffset);
+  if (lineEnd == llvm::StringRef::npos) return;
+  auto closing = buffer.slice(lineBegin, lineEnd).trim(" \t");
+  if (!closing.consume_front("#") || closing.ltrim(" \t") != "endif") return;
+  for (auto &branch : nvidiaSampleInactiveBranches) {
+    if (branch.bodyRange.file != file || branch.skipped ||
+        source.getFileOffset(range.getBegin()) != source.getFileOffset(branch.opener) ||
+        source.getFileOffset(range.getEnd()) != lineEnd ||
+        branch.bodyRange.beginOffset > lineBegin)
+      continue;
+    const auto body = buffer.slice(branch.bodyRange.beginOffset, lineBegin);
+    // A deliberately small physical grammar: no directives (including digraph
+    // forms), block comments, trigraphs, CR, or escaped physical newlines.
+    // String escapes such as "\\n" remain valid ordinary body text.
+    if (body.contains('#') || body.contains("%:") || body.contains("??") ||
+        body.contains("/*") || body.contains("*/") || body.contains('\r')) continue;
+    bool spliced = false;
+    llvm::StringRef remaining = body;
+    while (!remaining.empty()) {
+      const auto split = remaining.split('\n');
+      if (split.first.rtrim(" \t").ends_with("\\")) { spliced = true; break; }
+      remaining = split.second;
+    }
+    if (spliced) continue;
+    branch.bodyRange.endOffset = lineBegin;
+    branch.skipped = true;
+  }
+}
+
 void AscifyAction::auditRawNvidiaSampleHelperToken(
     const clang::Token &token) {
   if (nvidiaSampleHelperIncludes.empty() || !token.isAnyIdentifier())
@@ -8307,6 +8444,15 @@ void AscifyAction::auditRawNvidiaSampleHelperToken(
   if (nvidiaSampleHelperNormalMacroOffsets.count(offset) != 0 ||
       nvidiaSampleFindDeviceNormalOffsets.count(offset) != 0)
     return;
+  if (!publishedCompatMacro) {
+    for (auto &branch : nvidiaSampleInactiveBranches) {
+      if (branch.skipped && branch.bodyRange.file == sourceManager.getFileID(fileLoc) &&
+          offset >= branch.bodyRange.beginOffset && offset < branch.bodyRange.endOffset) {
+        branch.needed = true;
+        return;  // A mandatory #error is committed with the helper transaction.
+      }
+    }
+  }
   if (!nvidiaSampleHelperUnsupportedMacroUse) {
     llvm::errs()
         << "Ascify NVIDIA sample-helper closure: residual raw PP use of '"
@@ -8664,6 +8810,17 @@ void AscifyAction::auditFrozenNvidiaSampleHelperMacroDependency(
 void AscifyAction::finalizeNvidiaSampleHelperClosure() {
   if (nvidiaSampleHelperIncludes.empty())
     return;
+  // Inspect the completed callback history, not just the current prescan
+  // stack. Every enclosing observer must be proved; the candidate's own
+  // identical range and macro invocations inside its arguments are harmless.
+  for (const auto &candidate : nvidiaSampleExpandedMacros)
+    for (const auto &observer : nvidiaSampleMacroObservationRanges)
+      if (observer.file == candidate.range.file &&
+          observer.beginOffset <= candidate.range.beginOffset &&
+          candidate.range.endOffset <= observer.endOffset &&
+          (observer.beginOffset < candidate.range.beginOffset ||
+           candidate.range.endOffset < observer.endOffset))
+        nvidiaSampleHelperUnsupportedMacroUse = true;
   const bool safeToRemove =
       nvidiaSampleHelperIncludes.size() == 1 &&
       nvidiaSampleHelperReadyToCommit &&
@@ -8709,6 +8866,20 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
        nvidiaSampleHelperMacroCandidates) {
     for (const SemanticRewriteRange &existing : SemanticRewriteRanges) {
       if (overlaps(candidate.invocationRange, existing)) {
+        const bool exactProvenMaxCallee =
+            candidate.kind == NvidiaSampleHelperMacroKind::CheckCudaErrors &&
+            candidate.statusDomainProven &&
+            existing.beginOffset >= candidate.invocationRange.beginOffset + 15U &&
+            existing.endOffset < candidate.invocationRange.endOffset &&
+            std::any_of(provenKernelAttributeCalleeRanges.begin(),
+                        provenKernelAttributeCalleeRanges.end(),
+                        [&](const SemanticRewriteRange &proved) {
+                          return proved.file == existing.file &&
+                                 proved.beginOffset == existing.beginOffset &&
+                                 proved.endOffset == existing.endOffset;
+                        });
+        if (exactProvenMaxCallee)
+          continue;
         stagingError = "overlap with an existing semantic rewrite";
         break;
       }
@@ -8801,6 +8972,22 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
     if (!llcompat::insertReplacement(staged, replacement, &stagingError))
       break;
     stagedSemanticRanges.push_back(guard.anchorRange);
+  }
+
+  for (const auto &branch : nvidiaSampleInactiveBranches) {
+    if (!stagingError.empty()) break;
+    if (!branch.needed) continue;
+    for (const auto &existing : SemanticRewriteRanges)
+      if (overlaps(branch.bodyRange, existing))
+        stagingError = "inactive helper guard overlaps a semantic rewrite";
+    for (const auto &pending : stagedSemanticRanges)
+      if (overlaps(branch.bodyRange, pending))
+        stagingError = "inactive helper guard overlaps helper transaction";
+    if (!stagingError.empty()) break;
+    const ct::Replacement guard(sourceManager, branch.insertionLocation, 0U,
+        "#error \"Ascify: inactive NVIDIA helper branch was enabled in the target configuration\"\n");
+    if (!llcompat::insertReplacement(staged, guard, &stagingError)) break;
+    stagedSemanticRanges.push_back(branch.bodyRange);
   }
 
   bool compatInsertedByClosure =
@@ -9236,7 +9423,7 @@ public:
   }
 
   void SourceRangeSkipped(clang::SourceRange Range, clang::SourceLocation EndifLoc) override {
-    ascifyAction.AddSkippedSourceRange(Range);
+    ascifyAction.AddSkippedSourceRange(Range, EndifLoc);
   }
 };
 }
@@ -9570,8 +9757,10 @@ void AscifyAction::ExecuteAction() {
   nvidiaSampleHelperRawAuditCompleted = true;
 }
 
-void AscifyAction::AddSkippedSourceRange(clang::SourceRange Range) {
+void AscifyAction::AddSkippedSourceRange(clang::SourceRange Range,
+                                        clang::SourceLocation EndifLoc) {
   SkippedSourceRanges.push_back(Range);
+  proveSkippedNvidiaSampleHelperBranch(Range, EndifLoc);
   if (TargetRecipe != ascify::DavC310TargetRecipe::SimdRecipeName)
     return;
   clang::SourceManager &sourceManager =
