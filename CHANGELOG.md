@@ -8,6 +8,9 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Bounded conversion of the nonvolatile CUDA lane-ID instruction, with
+  three-dimensional block indexing and conservative assembly boundaries.
+
 - Optional JSON migration receipts with global and per-input conversion status.
 - Recursive local-header conversion with checked dependency identity and
   transactional publication of generated source and headers.

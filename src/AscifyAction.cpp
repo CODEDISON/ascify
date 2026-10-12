@@ -76,6 +76,7 @@ const StringRef sCudaHalf2DirectInit = "cudaHalf2DirectInit";
 const StringRef sCudaHalf2Operator = "cudaHalf2Operator";
 const StringRef sFrontendHostMath = "frontendHostMath";
 const StringRef sProvenGlobalAtomicCall = "provenGlobalAtomicCall";
+const StringRef sCudaLaneIdAsm = "cudaLaneIdAsm";
 const StringRef sCanonicalWarpAddReduction = "canonicalWarpAddReduction";
 const StringRef sCanonicalBinaryReducer = "canonicalBinaryReducer";
 
@@ -726,12 +727,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 48920)
+  if (contents.size() != 49356)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "33065267b57999e2b98336ba36f05975746f548c85f6696613b1fb48a283a516");
+      "40f959b7ae5634b631ad7679d7f51b6e2da4143f26c019418cf78c0d2af29fb2");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -758,12 +759,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 48920)
+  if (invalidBuffer || contents.size() != 49356)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "33065267b57999e2b98336ba36f05975746f548c85f6696613b1fb48a283a516");
+      "40f959b7ae5634b631ad7679d7f51b6e2da4143f26c019418cf78c0d2af29fb2");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -5147,6 +5148,92 @@ bool AscifyAction::rewriteCudaDefaultDim3(
   return true;
 }
 
+bool AscifyAction::rewriteCudaLaneIdAsm(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *statement = Result.Nodes.getNodeAs<clang::GCCAsmStmt>(sCudaLaneIdAsm);
+  if (statement == nullptr || Result.Context == nullptr ||
+      Result.SourceManager == nullptr || statement->isVolatile() ||
+      statement->isSimple() ||
+      statement->getNumOutputs() != 1 || statement->getNumInputs() != 0 ||
+      statement->getNumClobbers() != 0 ||
+      statement->getOutputConstraint(0) != "=r" ||
+      !statement->getOutputName(0).empty() ||
+      statement->getAsmString()->getString() != "mov.u32 %0, %%laneid;" ||
+      getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)
+    return false;
+#if LLVM_VERSION_MAJOR >= 9
+  if (statement->isAsmGoto())
+    return false;
+#endif
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  const auto *owner = enclosingNonLambdaFunction(statement, context);
+  if (owner == nullptr || owner->hasAttr<clang::CUDAHostAttr>() ||
+      (!owner->hasAttr<clang::CUDADeviceAttr>() &&
+       !owner->hasAttr<clang::CUDAGlobalAttr>()) ||
+      owner->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      owner->isDependentContext())
+    return false;
+  if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(owner))
+    if (method->getParent()->isLambda())
+      return false;
+  const auto *output = statement->getOutputExpr(0);
+  const auto *reference = llvm::dyn_cast<clang::DeclRefExpr>(output->IgnoreParens());
+  const auto *variable = reference == nullptr ? nullptr :
+      llvm::dyn_cast<clang::VarDecl>(reference->getDecl());
+  if (variable == nullptr || !variable->isLocalVarDecl() ||
+      !variable->hasLocalStorage() || variable->getDeclContext() != owner ||
+      variable->getTLSKind() != clang::VarDecl::TLS_None ||
+      variable->hasAttr<clang::CUDASharedAttr>() ||
+      variable->hasAttr<clang::CUDAConstantAttr>() ||
+      variable->hasAttr<clang::CUDADeviceAttr>() ||
+      variable->getType().isVolatileQualified() ||
+      variable->getType().isConstQualified() ||
+      !context.hasSameType(variable->getType(), context.UnsignedIntTy) ||
+      context.getTypeSize(variable->getType()) != 32 ||
+      output->isTypeDependent() || output->isValueDependent())
+    return false;
+  const auto begin = statement->getBeginLoc();
+  const auto last = statement->getEndLoc();
+  if (begin.isInvalid() || last.isInvalid() || begin.isMacroID() ||
+      last.isMacroID() || !source.isWrittenInMainFile(begin) ||
+      !source.isWrittenInMainFile(last))
+    return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto end = clang::Lexer::getLocForEndOfToken(last, 0, source, options);
+  if (end.isInvalid())
+    return false;
+  const unsigned firstOffset = source.getFileOffset(begin);
+  const unsigned endOffset = source.getFileOffset(end);
+  const auto file = source.getFileID(begin);
+  // AST endpoints do not expose macro-expanded punctuation or a concatenated
+  // string token. Retain any statement containing any macro invocation.
+  for (const auto &macro : cudaLaneIdMacroRanges)
+    if (macro.file == file && firstOffset < macro.endOffset &&
+        macro.beginOffset < endOffset)
+      return false;
+  bool invalid = false;
+  const auto spelling = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(output->getSourceRange()),
+      source, options, &invalid);
+  if (invalid || spelling.empty())
+    return false;
+  if (!rewrittenCudaLaneIdOffsets.insert(firstOffset).second)
+    return true;
+  ct::Replacement edit(source, begin, endOffset - firstOffset,
+                       "(" + spelling.str() + ") = ::ascify::cuda_lane_id()");
+  if (!insertSemanticReplacement(edit, clang::FullSourceLoc(begin, source),
+                                 begin, end)) {
+    rewrittenCudaLaneIdOffsets.erase(firstOffset);
+    return false;
+  }
+  needsCudaCompatHeader = true;
+  static const dppCounter counter = {
+      "CUDA lane ID", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(counter, "CUDA lane ID instruction");
+  return true;
+}
+
 bool AscifyAction::preserveCudaIntegerIntrinsicArgumentConversion(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call =
@@ -5642,6 +5729,8 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
                     mat::isExpansionInMainFile())
           .bind(sProvenGlobalAtomicCall),
       this);
+  Finder->addMatcher(
+      mat::asmStmt(mat::isExpansionInMainFile()).bind(sCudaLaneIdAsm), this);
   if (TargetPolicy == "dav-c310-vec" && SimtMathMode == "fast") {
     // Keep the matcher broad and perform the semantic proof in the callback.
     // This prevents source-name coupling and makes every failed proof a
@@ -6626,6 +6715,18 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
     return;
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
+  const auto macroBegin = sourceManager.getExpansionLoc(Range.getBegin());
+  const auto macroLast = sourceManager.getExpansionLoc(Range.getEnd());
+  if (macroBegin.isValid() && macroLast.isValid() &&
+      sourceManager.isWrittenInMainFile(macroBegin) &&
+      sourceManager.isWrittenInMainFile(macroLast)) {
+    const auto macroEnd = clang::Lexer::getLocForEndOfToken(
+        macroLast, 0, sourceManager, getCompilerInstance().getLangOpts());
+    if (macroEnd.isValid())
+      cudaLaneIdMacroRanges.push_back({sourceManager.getFileID(macroBegin),
+          sourceManager.getFileOffset(macroBegin),
+          sourceManager.getFileOffset(macroEnd)});
+  }
   const clang::MacroInfo *macroInfo = MD.getMacroInfo();
   if (isAscifyCudaCompatPublishedMacro(
           MacroNameTok.getIdentifierInfo()->getName()))
@@ -8047,6 +8148,10 @@ void AscifyAction::AddSkippedSourceRange(clang::SourceRange Range) {
 void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
   if (davC310TargetRecipe.collect(Result))
     return;
+  if (Result.Nodes.getNodeAs<clang::GCCAsmStmt>(sCudaLaneIdAsm) != nullptr) {
+    (void)rewriteCudaLaneIdAsm(Result);
+    return;
+  }
   if (Result.Nodes.getNodeAs<clang::ParmVarDecl>(
           sCudaGlobalScalarDoubleParam) != nullptr) {
     (void)lowerCudaGlobalScalarDoubleParam(Result);

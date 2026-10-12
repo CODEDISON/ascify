@@ -88,6 +88,14 @@ extern int ascify_test_register_exit_cleanup(void (*callback)());
 
 namespace ascify {
 
+// Internal target for one proven nonvolatile CUDA lane-ID instruction.
+// CUDA numbers threads with x varying fastest, including 2D and 3D blocks;
+// each block starts its own 32-thread warps. Keep lookup in this protected
+// header so call-site locals cannot shadow the SIMT builtins.
+__aicore__ ASCIFY_FORCEINLINE unsigned int cuda_lane_id() {
+  return (threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)) & 31u;
+}
+
 inline constexpr unsigned int cudaStreamDefault = 0x00U;
 inline constexpr unsigned int cudaStreamNonBlocking = 0x01U;
 

@@ -1,6 +1,13 @@
 #ifndef ASCIFY_TEST_STUB_KERNEL_SIMT_INTF_H
 #define ASCIFY_TEST_STUB_KERNEL_SIMT_INTF_H
 
+#ifndef ASCIFY_TEST_SIMT_BUILTINS
+#define ASCIFY_TEST_SIMT_BUILTINS
+struct ascify_test_simt_dim3 { unsigned int x, y, z; };
+inline ascify_test_simt_dim3 threadIdx{0, 0, 0};
+inline ascify_test_simt_dim3 blockDim{1, 1, 1};
+#endif
+
 #include <stdint.h>
 
 namespace AscendC {

@@ -93,6 +93,8 @@ private:
   std::map<std::string, clang::SourceLocation> Ifndefs;
   std::vector<clang::SourceRange> SkippedSourceRanges;
   std::vector<SemanticRewriteRange> SemanticRewriteRanges;
+  std::vector<SemanticRewriteRange> cudaLaneIdMacroRanges;
+  std::set<unsigned> rewrittenCudaLaneIdOffsets;
   std::vector<SemanticRewriteRange> nvidiaSampleHelperMacroRanges;
   std::vector<NvidiaSampleHelperMacroCandidate>
       nvidiaSampleHelperMacroCandidates;
@@ -243,6 +245,7 @@ public:
       const mat::MatchFinder::MatchResult &Result);
   bool preserveCudaIntegerIntrinsicArgumentConversion(
       const mat::MatchFinder::MatchResult &Result);
+  bool rewriteCudaLaneIdAsm(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCanonicalWarpAddReduction(
       const mat::MatchFinder::MatchResult &Result);
   bool tagCanonicalBinaryReducer(

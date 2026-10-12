@@ -6,6 +6,22 @@ the [English tutorial](user-guide.en.md) or [中文教程](user-guide.zh-CN.md).
 Supported APIs and limitations are described in the
 [compatibility reference](compatibility.md).
 
+## CUDA lane ID instruction
+
+The frontend converts the exact nonvolatile inline PTX instruction
+`asm("mov.u32 %0, %%laneid;" : "=r"(value))` when `value` is an automatic
+`unsigned int` local of the current, non-template CUDA device or global
+function. It writes the output once through an internal compatibility helper.
+The helper uses the block's three-dimensional linear thread index modulo 32;
+it preserves lane numbering across rows, planes, partial warps, and blocks.
+
+This rule requires one unnamed output, the exact `=r` constraint, and no inputs,
+clobbers, `goto`, or macro-expanded tokens in the statement. Other PTX strings,
+volatile assembly, other output types, references, arbitrary output lvalues,
+templates, lambdas, and host or host/device functions remain unchanged. The
+generated helper uses the existing compatibility-header ownership and macro
+collision checks. This rule does not translate general PTX assembly.
+
 ## CUDA runtime-API includes
 
 A direct, unconditional literal `#include <cuda_runtime_api.h>` (or its quoted
