@@ -22,6 +22,7 @@ THE SOFTWARE.
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <string>
 #include <utility>
@@ -41,6 +42,7 @@ THE SOFTWARE.
 #include "clang/Basic/TokenKinds.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Lexer.h"
+#include "clang/Lex/MacroArgs.h"
 #include "clang/Lex/PreprocessorOptions.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/ASTMatchers/ASTMatchers.h"
@@ -5247,6 +5249,422 @@ bool AscifyAction::rewriteCudaLaneIdAsm(
   return true;
 }
 
+bool AscifyAction::rewriteCudaSmDiagnostic(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *call =
+      Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
+  if (call == nullptr || Result.Context == nullptr ||
+      Result.SourceManager == nullptr || call->getNumArgs() < 3 ||
+      call->isTypeDependent() || call->isValueDependent() ||
+      getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)
+    return false;
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  const auto *callee = call->getDirectCallee();
+  if (callee == nullptr || callee->getQualifiedNameAsString() != "printf" ||
+      !callee->isVariadic() || callee->getNumParams() != 1 ||
+      !context.hasSameType(callee->getReturnType(), context.IntTy) ||
+      callee->hasBody())
+    return false;
+  // A caller's -isystem annotation or printf spelling is not libc ownership.
+  // This bounded rule admits the physical Linux libc declaration only.
+  for (const auto *declaration : callee->redecls()) {
+    const auto location = source.getSpellingLoc(declaration->getLocation());
+    if (location.isInvalid() || !source.isInSystemHeader(location))
+      return false;
+    const auto file = source.getFileID(location);
+    const auto *entry = source.getFileEntryForID(file);
+    if (entry == nullptr || source.isFileOverridden(entry) ||
+        contextualCanonicalPath(source.getFilename(location)) !=
+            "/usr/include/stdio.h")
+      return false;
+  }
+  const auto *reference = llvm::dyn_cast<clang::DeclRefExpr>(
+      call->getCallee()->IgnoreParenImpCasts());
+  if (reference == nullptr || reference->hasQualifier())
+    return false;
+  const auto *owner = enclosingNonLambdaFunction(call, context);
+  if (owner == nullptr || owner->hasAttr<clang::CUDADeviceAttr>() ||
+      owner->hasAttr<clang::CUDAGlobalAttr>() || owner->isDependentContext() ||
+      owner->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate)
+    return false;
+  const auto parents = context.getParents(*call);
+  // The new diagnostic has a different byte count. Never rewrite a used
+  // printf result, a conditional expression or another nested call.
+  if (parents.size() != 1 || parents[0].get<clang::CompoundStmt>() == nullptr)
+    return false;
+  const auto *literal = llvm::dyn_cast<clang::StringLiteral>(
+      call->getArg(0)->IgnoreParenImpCasts());
+  if (literal == nullptr || literal->getCharByteWidth() != 1)
+    return false;
+  const auto format = literal->getString();
+  if (format.contains('\0') ||
+      (!format.contains("SM ") && !format.contains("Compute ") &&
+       !format.contains("compute capability")))
+    return false;
+
+  struct Conversion { size_t offset; char kind; };
+  std::vector<Conversion> conversions;
+  for (size_t index = 0; index < format.size(); ++index) {
+    if (format[index] != '%')
+      continue;
+    if (++index == format.size())
+      return false;
+    if (format[index] == '%')
+      continue;
+    // Deliberately exclude positional, width, precision, length, star and
+    // write-through %n formats. Each supported conversion takes one argument.
+    if (format[index] != 'd' && format[index] != 's')
+      return false;
+    conversions.push_back({index - 1, format[index]});
+  }
+  if (conversions.size() + 1 != call->getNumArgs())
+    return false;
+
+  auto localMember = [&](const clang::Expr *expression,
+                         llvm::StringRef name) -> const clang::VarDecl * {
+    const auto *member = llvm::dyn_cast<clang::MemberExpr>(
+        expression->IgnoreParenImpCasts());
+    if (member == nullptr || member->isArrow() ||
+        member->getMemberDecl()->getName() != name ||
+        member->getType().isVolatileQualified() ||
+        !context.hasSameType(member->getType().getUnqualifiedType(), context.IntTy))
+      return nullptr;
+    const auto *field = llvm::dyn_cast<clang::FieldDecl>(member->getMemberDecl());
+    if (field == nullptr || field->getParent()->getQualifiedNameAsString() !=
+                                "cudaDeviceProp")
+      return nullptr;
+    const auto location = source.getSpellingLoc(field->getLocation());
+    if (location.isInvalid() ||
+        !cudaRuntimeApiSdkFileIds.count(source.getFileID(location).getHashValue()))
+      return nullptr;
+    const auto *base = llvm::dyn_cast<clang::DeclRefExpr>(
+        member->getBase()->IgnoreParenImpCasts());
+    const auto *variable = base == nullptr ? nullptr :
+        llvm::dyn_cast<clang::VarDecl>(base->getDecl());
+    if (variable == nullptr || !variable->isLocalVarDecl() ||
+        !variable->hasLocalStorage() || variable->getDeclContext() != owner ||
+        variable->getTLSKind() != clang::VarDecl::TLS_None ||
+        variable->getType()->isReferenceType() ||
+        variable->getType().isVolatileQualified())
+      return nullptr;
+    return variable;
+  };
+  // Attribute-query diagnostics use independent integer locals. Require the
+  // complete use set of each local to be one owned query and this one display;
+  // neither names nor initial zero values establish a capability value.
+  auto localAttribute = [&](const clang::Expr *expression, llvm::StringRef name)
+      -> const clang::Expr * {
+    const auto *reference = llvm::dyn_cast<clang::DeclRefExpr>(
+        expression->IgnoreParenImpCasts());
+    const auto *variable = reference == nullptr ? nullptr :
+        llvm::dyn_cast<clang::VarDecl>(reference->getDecl());
+    if (variable == nullptr || !variable->isLocalVarDecl() ||
+        !variable->hasLocalStorage() || variable->getDeclContext() != owner ||
+        variable->getTLSKind() != clang::VarDecl::TLS_None ||
+        !context.hasSameType(variable->getType(), context.IntTy))
+      return nullptr;
+    const clang::Expr *device = nullptr;
+    unsigned reads = 0, queries = 0;
+    class Uses : public clang::RecursiveASTVisitor<Uses> {
+    public:
+      std::function<bool(clang::DeclRefExpr *)> check;
+      bool VisitDeclRefExpr(clang::DeclRefExpr *use) { return check(use); }
+      const clang::VarDecl *variable = nullptr;
+      bool VisitLambdaExpr(clang::LambdaExpr *lambda) {
+        for (const auto &capture : lambda->captures())
+          if (capture.capturesVariable() && capture.getCapturedVar() == variable)
+            return false;
+        return true;
+      }
+    } uses;
+    uses.variable = variable;
+    uses.check = [&](clang::DeclRefExpr *use) {
+      if (use->getDecl() != variable) return true;
+      const clang::Expr *current = use;
+      auto parents = context.getParents(*current);
+      while (parents.size() == 1) {
+        if (const auto *paren = parents[0].get<clang::ParenExpr>()) current = paren;
+        else if (const auto *cast = parents[0].get<clang::ImplicitCastExpr>()) {
+          if (cast->getCastKind() != clang::CK_LValueToRValue) return false;
+          current = cast;
+        } else break;
+        parents = context.getParents(*current);
+      }
+      if (parents.size() != 1) return false;
+      if (parents[0].get<clang::CallExpr>() == call) {
+        ++reads;
+        return true;
+      }
+      const auto *address = parents[0].get<clang::UnaryOperator>();
+      if (address == nullptr || address->getOpcode() != clang::UO_AddrOf)
+        return false;
+      const auto addressParents = context.getParents(*address);
+      const auto *query = addressParents.size() == 1 ?
+          addressParents[0].get<clang::CallExpr>() : nullptr;
+      const auto *function = query == nullptr ? nullptr : query->getDirectCallee();
+      if (function == nullptr || query->getNumArgs() != 3 ||
+          query->getArg(0) != address || function->hasBody() ||
+          function->getQualifiedNameAsString() != "cudaDeviceGetAttribute")
+        return false;
+      for (const auto *declaration : function->redecls()) {
+        const auto location = source.getSpellingLoc(declaration->getLocation());
+        if (location.isInvalid() || !cudaRuntimeApiSdkFileIds.count(
+                source.getFileID(location).getHashValue())) return false;
+      }
+      const auto *attribute = llvm::dyn_cast<clang::DeclRefExpr>(
+          query->getArg(1)->IgnoreParenImpCasts());
+      const auto *enumerator = attribute == nullptr ? nullptr :
+          llvm::dyn_cast<clang::EnumConstantDecl>(attribute->getDecl());
+      if (enumerator == nullptr || enumerator->getName() != name ||
+          !cudaRuntimeApiSdkFileIds.count(source.getFileID(
+              source.getSpellingLoc(enumerator->getLocation())).getHashValue()))
+        return false;
+      const auto queryParents = context.getParents(*query);
+      // Both queries and the display must be direct statements in the same
+      // block, with the query text preceding the display.
+      if (queryParents.size() != 1 ||
+          queryParents[0].get<clang::CompoundStmt>() == nullptr ||
+          queryParents[0].get<clang::CompoundStmt>() !=
+              context.getParents(*call)[0].get<clang::CompoundStmt>())
+        return false;
+      if (query->getBeginLoc().isMacroID() || query->getEndLoc().isMacroID() ||
+          !source.isWrittenInMainFile(query->getBeginLoc()) ||
+          !source.isBeforeInTranslationUnit(query->getEndLoc(), call->getBeginLoc()))
+        return false;
+      device = query->getArg(2)->IgnoreParenImpCasts();
+      if (device->getType().isVolatileQualified() ||
+          (!llvm::isa<clang::IntegerLiteral>(device) &&
+           !llvm::isa<clang::DeclRefExpr>(device))) return false;
+      ++queries;
+      return true;
+    };
+    if (!uses.TraverseStmt(owner->getBody()) || reads != 1 || queries != 1)
+      return nullptr;
+    return device;
+  };
+  size_t pair = conversions.size();
+  const clang::VarDecl *property = nullptr;
+  for (size_t index = 0; index + 1 < conversions.size(); ++index) {
+    if (conversions[index].kind != 'd' || conversions[index + 1].kind != 'd' ||
+        conversions[index + 1].offset != conversions[index].offset + 3 ||
+        format[conversions[index].offset + 2] != '.')
+      continue;
+    const auto *major = localMember(call->getArg(index + 1), "major");
+    const auto *minor = localMember(call->getArg(index + 2), "minor");
+    if (major == nullptr || major != minor) {
+      const auto *majorDevice = localAttribute(call->getArg(index + 1),
+          "cudaDevAttrComputeCapabilityMajor");
+      const auto *minorDevice = localAttribute(call->getArg(index + 2),
+          "cudaDevAttrComputeCapabilityMinor");
+      if (majorDevice == nullptr || minorDevice == nullptr) continue;
+      const auto *lhsRef = llvm::dyn_cast<clang::DeclRefExpr>(majorDevice);
+      const auto *rhsRef = llvm::dyn_cast<clang::DeclRefExpr>(minorDevice);
+      const auto *lhsInt = llvm::dyn_cast<clang::IntegerLiteral>(majorDevice);
+      const auto *rhsInt = llvm::dyn_cast<clang::IntegerLiteral>(minorDevice);
+      if (!((lhsRef && rhsRef && lhsRef->getDecl() == rhsRef->getDecl()) ||
+            (lhsInt && rhsInt && lhsInt->getValue() == rhsInt->getValue())))
+        continue;
+    }
+    if (pair != conversions.size())
+      return false;
+    pair = index;
+    property = major;
+  }
+  if (pair == conversions.size())
+    return false;
+  // Remaining expressions must not contain nested API rewrites or effects.
+  for (unsigned index = 1; index < call->getNumArgs(); ++index) {
+    if (index == pair + 1 || index == pair + 2)
+      continue;
+    const auto *expression = call->getArg(index)->IgnoreParenImpCasts();
+    if (expression->HasSideEffects(context) ||
+        expression->getType().isVolatileQualified())
+      return false;
+    if (const auto *member = llvm::dyn_cast<clang::MemberExpr>(expression)) {
+      if (member->isArrow() ||
+          !llvm::isa<clang::DeclRefExpr>(member->getBase()->IgnoreParenImpCasts()) ||
+          member->getBase()->getType().isVolatileQualified())
+        return false;
+    } else if (!llvm::isa<clang::DeclRefExpr>(expression) &&
+               !llvm::isa<clang::IntegerLiteral>(expression) &&
+               !llvm::isa<clang::StringLiteral>(expression)) {
+      return false;
+    }
+  }
+  const auto begin = call->getBeginLoc();
+  const auto last = call->getEndLoc();
+  if (begin.isInvalid() || last.isInvalid() || begin.isMacroID() ||
+      last.isMacroID() || !source.isWrittenInMainFile(begin) ||
+      !source.isWrittenInMainFile(last))
+    return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto end = clang::Lexer::getLocForEndOfToken(last, 0, source, options);
+  if (end.isInvalid())
+    return false;
+  const auto firstOffset = source.getFileOffset(begin);
+  const auto endOffset = source.getFileOffset(end);
+  const auto file = source.getFileID(begin);
+  for (const auto &macro : cudaLaneIdMacroRanges)
+    if (macro.file == file && firstOffset < macro.endOffset &&
+        macro.beginOffset < endOffset)
+      return false;
+
+  std::string diagnostic = format.str();
+  diagnostic.replace(conversions[pair].offset, 5, "N/A (Ascend)");
+  // Octal escapes are exactly three digits, so adjacent decimal/hexadecimal
+  // text cannot extend an escape. Preserve all other bytes, including UTF-8.
+  std::string replacement = "printf(\"";
+  for (unsigned char byte : diagnostic) {
+    if (byte == '\\' || byte == '"') {
+      replacement += '\\'; replacement += static_cast<char>(byte);
+    } else if (byte >= 32 && byte <= 126) {
+      replacement += static_cast<char>(byte);
+    } else {
+      replacement += '\\';
+      replacement += static_cast<char>('0' + ((byte >> 6) & 7));
+      replacement += static_cast<char>('0' + ((byte >> 3) & 7));
+      replacement += static_cast<char>('0' + (byte & 7));
+    }
+  }
+  replacement += '"';
+  for (unsigned index = 1; index < call->getNumArgs(); ++index) {
+    if (index == pair + 1 || index == pair + 2)
+      continue;
+    bool invalid = false;
+    const auto spelling = clang::Lexer::getSourceText(
+        clang::CharSourceRange::getTokenRange(call->getArg(index)->getSourceRange()),
+        source, options, &invalid);
+    if (invalid || spelling.empty())
+      return false;
+    replacement += ", " + spelling.str();
+  }
+  replacement += ')';
+  if (rewrittenCudaSmDiagnosticOffsets.count(firstOffset))
+    return true;
+
+  // Some callers initialize these two fields before querying the device.
+  // Remove only dead literal-zero stores when every use of the entire local
+  // object is this display, a store, or an owned output-only property query.
+  // In particular, passing even another member's address can expose the whole
+  // record; copies, aliases, captures and any other observations retain stores.
+  std::vector<const clang::BinaryOperator *> deadStores;
+  if (property != nullptr) {
+    class Uses : public clang::RecursiveASTVisitor<Uses> {
+    public:
+      std::function<bool(clang::DeclRefExpr *)> check;
+      const clang::VarDecl *variable = nullptr;
+      bool VisitDeclRefExpr(clang::DeclRefExpr *use) { return check(use); }
+      bool VisitLambdaExpr(clang::LambdaExpr *lambda) {
+        for (const auto &capture : lambda->captures())
+          if (capture.capturesVariable() && capture.getCapturedVar() == variable)
+            return false;
+        return true;
+      }
+    } uses;
+    uses.variable = property;
+    uses.check = [&](clang::DeclRefExpr *use) {
+      if (use->getDecl() != property) return true;
+      const clang::Expr *current = use;
+      auto parents = context.getParents(*current);
+      while (parents.size() == 1 && parents[0].get<clang::ParenExpr>()) {
+        current = parents[0].get<clang::ParenExpr>();
+        parents = context.getParents(*current);
+      }
+      if (parents.size() != 1) return false;
+      if (const auto *address = parents[0].get<clang::UnaryOperator>()) {
+        if (address->getOpcode() != clang::UO_AddrOf) return false;
+        const auto addressParents = context.getParents(*address);
+        const auto *query = addressParents.size() == 1 ?
+            addressParents[0].get<clang::CallExpr>() : nullptr;
+        const auto *function = query == nullptr ? nullptr : query->getDirectCallee();
+        if (function == nullptr || function->hasBody() ||
+            function->getQualifiedNameAsString() != "cudaGetDeviceProperties" ||
+            query->getNumArgs() != 2 || query->getArg(0) != address)
+          return false;
+        for (const auto *declaration : function->redecls()) {
+          const auto location = source.getSpellingLoc(declaration->getLocation());
+          if (location.isInvalid() || !cudaRuntimeApiSdkFileIds.count(
+                  source.getFileID(location).getHashValue())) return false;
+        }
+        return true;
+      }
+      const auto *member = parents[0].get<clang::MemberExpr>();
+      if (member == nullptr || member->isArrow()) return false;
+      const auto field = member->getMemberDecl()->getName();
+      current = member;
+      parents = context.getParents(*current);
+      while (parents.size() == 1) {
+        if (const auto *paren = parents[0].get<clang::ParenExpr>()) current = paren;
+        else if (const auto *cast = parents[0].get<clang::ImplicitCastExpr>()) {
+          if (cast->getCastKind() != clang::CK_LValueToRValue &&
+              cast->getCastKind() != clang::CK_ArrayToPointerDecay) return false;
+          current = cast;
+        } else break;
+        parents = context.getParents(*current);
+      }
+      if (parents.size() != 1) return false;
+      if (parents[0].get<clang::CallExpr>() == call) return true;
+      const auto *assignment = parents[0].get<clang::BinaryOperator>();
+      if (assignment == nullptr || assignment->getOpcode() != clang::BO_Assign ||
+          assignment->getLHS() != current || (field != "major" && field != "minor"))
+        return false;
+      const auto *zero = llvm::dyn_cast<clang::IntegerLiteral>(
+          assignment->getRHS()->IgnoreParenImpCasts());
+      if (zero == nullptr || !zero->getValue().isZero()) return false;
+      const auto assignmentParents = context.getParents(*assignment);
+      if (assignmentParents.size() != 1 ||
+          assignmentParents[0].get<clang::CompoundStmt>() == nullptr) return false;
+      deadStores.push_back(assignment);
+      return true;
+    };
+    if (!uses.TraverseStmt(owner->getBody())) deadStores.clear();
+  }
+
+  // Publish the display and optional dead stores as one replacement transaction.
+  ct::Replacements staged(*replacements);
+  std::vector<SemanticRewriteRange> ranges;
+  std::vector<ct::Replacement> edits;
+  auto stage = [&](clang::SourceLocation first, clang::SourceLocation lastToken,
+                   const std::string &text) {
+    if (first.isInvalid() || lastToken.isInvalid() || first.isMacroID() ||
+        lastToken.isMacroID() || !source.isWrittenInMainFile(first) ||
+        !source.isWrittenInMainFile(lastToken)) return false;
+    const auto after = clang::Lexer::getLocForEndOfToken(lastToken, 0, source, options);
+    if (after.isInvalid() || source.getFileID(first) != source.getFileID(after)) return false;
+    SemanticRewriteRange range{source.getFileID(first), source.getFileOffset(first),
+                               source.getFileOffset(after)};
+    if (range.endOffset <= range.beginOffset) return false;
+    auto overlaps = [&](const SemanticRewriteRange &other) {
+      return range.file == other.file && range.beginOffset < other.endOffset &&
+             other.beginOffset < range.endOffset;
+    };
+    for (const auto &macro : cudaLaneIdMacroRanges) if (overlaps(macro)) return false;
+    for (const auto &existing : SemanticRewriteRanges) if (overlaps(existing)) return false;
+    for (const auto &pending : ranges) if (overlaps(pending)) return false;
+    ct::Replacement edit(source, first, range.endOffset - range.beginOffset, text);
+    if (!llcompat::insertReplacement(staged, edit)) return false;
+    ranges.push_back(range);
+    edits.push_back(edit);
+    return true;
+  };
+  if (!stage(begin, last, replacement)) return false;
+  for (const auto *assignment : deadStores)
+    if (!stage(assignment->getBeginLoc(), assignment->getEndLoc(), "(void)0"))
+      return false;
+  *replacements = std::move(staged);
+  SemanticRewriteRanges.insert(SemanticRewriteRanges.end(), ranges.begin(), ranges.end());
+  rewrittenCudaSmDiagnosticOffsets.insert(firstOffset);
+  if (PrintStats || PrintStatsCSV) {
+    for (const auto &edit : edits) Statistics::current().bytesChanged(edit.getLength());
+    Statistics::current().lineTouched(clang::FullSourceLoc(begin, source).getExpansionLineNumber());
+  }
+  static const dppCounter counter = {
+      "CUDA SM diagnostic", CONV_DEVICE, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(counter, "CUDA SM display unavailable on Ascend");
+  return true;
+}
+
 bool AscifyAction::preserveCudaIntegerIntrinsicArgumentConversion(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call =
@@ -6726,7 +7144,8 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
 
 void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
                                 const clang::MacroDefinition &MD,
-                                clang::SourceRange Range) {
+                                clang::SourceRange Range,
+                                const clang::MacroArgs *Args) {
   observeCudaRuntimeApiMacroUse(MacroNameTok);
   if (MacroNameTok.getIdentifierInfo() == nullptr)
     return;
@@ -6805,6 +7224,84 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
           << "outside the main file keeps all helper edits\n";
     }
     return;
+  }
+  if (name == "MAX" && Args != nullptr &&
+      !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks &&
+      !MacroNameTok.getLocation().isMacroID() &&
+      !Range.getBegin().isMacroID() && !Range.getEnd().isMacroID() &&
+      frozenNvidiaSampleHelperFileRole(sourceManager, macroInfo->getDefinitionLoc()) ==
+          FrozenOfficialNvidiaSampleHelperCuda &&
+      activeFrozenHelperCudaMaxBodyMatches(*macroInfo,
+                                          getCompilerInstance().getPreprocessor())) {
+    // Preserve this exact macro's unparenthesized argument substitution and
+    // repeated evaluation. Renaming to a function or to helper_image's MAX
+    // would change behavior for side effects or low-precedence expressions.
+    // Clang caches argument pre-expansion; asking for it here is the same
+    // expansion the original invocation uses. A consumed __COUNTER__ must
+    // retain the invocation, or later target expansions would be renumbered.
+    auto &preprocessor = getCompilerInstance().getPreprocessor();
+    const auto counterBefore = preprocessor.getCounterValue();
+    std::string arguments[2];
+    bool admitted = true;
+    for (unsigned index = 0; index != 2 && admitted; ++index) {
+      const auto &tokens = const_cast<clang::MacroArgs *>(Args)->getPreExpArgument(
+          index, preprocessor);
+      unsigned count = 0;
+      for (const auto &token : tokens) {
+        if (token.is(clang::tok::eof)) break;
+        if (++count > 512 || token.isAnnotation()) { admitted = false; break; }
+        const std::string spelling = preprocessor.getSpelling(token);
+        if (spelling.empty()) { admitted = false; break; }
+        if (auto *identifier = token.getIdentifierInfo()) {
+          // A suppressed/self-referential macro could expand differently when
+          // emitted as ordinary source. API identifiers would also need an
+          // independent rewrite inside this transaction; retain those cases.
+          const auto word = identifier->getName();
+          if (preprocessor.getMacroDefinition(identifier) ||
+              word.starts_with("cu") ||
+              word.starts_with("__") || word == "_Pragma") {
+            admitted = false; break;
+          }
+        }
+        switch (token.getKind()) {
+        case clang::tok::identifier: case clang::tok::numeric_constant:
+        case clang::tok::l_paren: case clang::tok::r_paren:
+        case clang::tok::l_square: case clang::tok::r_square:
+        case clang::tok::question: case clang::tok::colon:
+        case clang::tok::plus: case clang::tok::minus:
+        case clang::tok::star: case clang::tok::slash: case clang::tok::percent:
+        case clang::tok::less: case clang::tok::greater:
+        case clang::tok::lessequal: case clang::tok::greaterequal:
+        case clang::tok::equalequal: case clang::tok::exclaimequal:
+        case clang::tok::lessless: case clang::tok::greatergreater:
+        case clang::tok::amp: case clang::tok::ampamp:
+        case clang::tok::pipe: case clang::tok::pipepipe: case clang::tok::caret:
+        case clang::tok::exclaim: case clang::tok::tilde:
+        case clang::tok::equal: case clang::tok::plusplus: case clang::tok::minusminus:
+        case clang::tok::comma: case clang::tok::period: case clang::tok::arrow:
+          arguments[index] += spelling + " ";
+          break;
+        default: admitted = false; break;
+        }
+        if (!admitted) break;
+      }
+      if (count == 0) admitted = false;
+    }
+    if (preprocessor.getCounterValue() != counterBefore) admitted = false;
+    const auto after = clang::Lexer::getLocForEndOfToken(
+        Range.getEnd(), 0, sourceManager, getCompilerInstance().getLangOpts());
+    if (admitted && after.isValid() && sourceManager.isWrittenInMainFile(after) &&
+        sourceManager.getFileID(macroLocation) == sourceManager.getFileID(after)) {
+      SemanticRewriteRange invocation{sourceManager.getFileID(macroLocation),
+          sourceManager.getFileOffset(macroLocation), sourceManager.getFileOffset(after)};
+      if (invocation.beginOffset < invocation.endOffset) {
+        nvidiaSampleExpandedMacros.push_back({macroLocation, invocation,
+            "( " + arguments[0] + "> " + arguments[1] + "? " + arguments[0] +
+            ": " + arguments[1] + ")"});
+        nvidiaSampleHelperNormalMacroOffsets.insert(invocation.beginOffset);
+        return;
+      }
+    }
   }
   if (name != "checkCudaErrors" && name != "getLastCudaError") {
     nvidiaSampleHelperUnsupportedMacroUse = true;
@@ -7410,6 +7907,20 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
     committedMacroLocations.push_back(candidate.nameLocation);
     stagedSemanticRanges.push_back(candidate.rewriteRange);
   }
+  for (const auto &candidate : nvidiaSampleExpandedMacros) {
+    if (!stagingError.empty()) break;
+    for (const auto &existing : SemanticRewriteRanges)
+      if (overlaps(candidate.range, existing)) stagingError = "expanded macro overlaps an existing rewrite";
+    for (const auto &pending : stagedSemanticRanges)
+      if (overlaps(candidate.range, pending)) stagingError = "expanded macro overlaps a pending rewrite";
+    if (!stagingError.empty()) break;
+    ct::Replacement replacement(sourceManager, candidate.location,
+        candidate.range.endOffset - candidate.range.beginOffset, candidate.text);
+    if (!llcompat::insertReplacement(staged, replacement, &stagingError)) break;
+    committedMacroReplacements.push_back(replacement);
+    committedMacroLocations.push_back(candidate.location);
+    stagedSemanticRanges.push_back(candidate.range);
+  }
 
   for (const NvidiaSampleTemplateGuard &guard : nvidiaSampleTemplateGuards) {
     if (!stagingError.empty())
@@ -7805,8 +8316,8 @@ public:
   void MacroExpands(const clang::Token &MacroNameTok,
                     const clang::MacroDefinition &MD,
                     clang::SourceRange Range,
-                    const clang::MacroArgs *) override {
-    ascifyAction.MacroExpands(MacroNameTok, MD, Range);
+                    const clang::MacroArgs *Args) override {
+    ascifyAction.MacroExpands(MacroNameTok, MD, Range, Args);
   }
 
   void SourceRangeSkipped(clang::SourceRange Range, clang::SourceLocation EndifLoc) override {
@@ -8192,7 +8703,8 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
   }
   if (Result.Nodes.getNodeAs<clang::CallExpr>(
           sProvenGlobalAtomicCall) != nullptr) {
-    if (!preserveCudaIntegerIntrinsicArgumentConversion(Result) &&
+    if (!rewriteCudaSmDiagnostic(Result) &&
+        !preserveCudaIntegerIntrinsicArgumentConversion(Result) &&
         !rewriteProvenGlobalAtomicCall(Result))
       (void)rewriteProvenDeviceMemoryCall(Result);
     return;

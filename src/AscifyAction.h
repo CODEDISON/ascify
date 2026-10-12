@@ -79,6 +79,12 @@ private:
     bool rewritten = false;
   };
 
+  struct NvidiaSampleExpandedMacroCandidate {
+    clang::SourceLocation location;
+    SemanticRewriteRange range;
+    std::string text;
+  };
+
   struct NvidiaSampleTemplateGuard {
     clang::SourceLocation insertionLocation;
     SemanticRewriteRange anchorRange;
@@ -100,6 +106,7 @@ private:
       nvidiaSampleHelperMacroCandidates;
   std::vector<NvidiaSampleFindDeviceCandidate>
       nvidiaSampleFindDeviceCandidates;
+  std::vector<NvidiaSampleExpandedMacroCandidate> nvidiaSampleExpandedMacros;
   std::vector<NvidiaSampleTemplateGuard> nvidiaSampleTemplateGuards;
   std::vector<NvidiaSampleHelperInclude> nvidiaSampleHelperIncludes;
   std::set<std::string> recognizedNvidiaSampleHelperPaths;
@@ -183,6 +190,7 @@ private:
   std::set<unsigned> rewrittenGlobalAtomicOffsets;
   std::set<unsigned> rewrittenDeviceMemoryOffsets;
   std::set<unsigned> rewrittenIntegerIntrinsicArgumentOffsets;
+  std::set<unsigned> rewrittenCudaSmDiagnosticOffsets;
   std::set<unsigned> rewrittenWarpAddReductionOffsets;
   std::set<unsigned> taggedCanonicalReducerOffsets;
   std::set<std::string> rowwiseSimdMacrosEverDefined;
@@ -246,6 +254,7 @@ public:
   bool preserveCudaIntegerIntrinsicArgumentConversion(
       const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaLaneIdAsm(const mat::MatchFinder::MatchResult &Result);
+  bool rewriteCudaSmDiagnostic(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCanonicalWarpAddReduction(
       const mat::MatchFinder::MatchResult &Result);
   bool tagCanonicalBinaryReducer(
@@ -308,7 +317,8 @@ public:
   // intentionally outside this callback's admitted set.
   void MacroExpands(const clang::Token &MacroNameTok,
                     const clang::MacroDefinition &MD,
-                    clang::SourceRange Range);
+                    clang::SourceRange Range,
+                    const clang::MacroArgs *Args);
   //
   void AddSkippedSourceRange(clang::SourceRange Range);
 

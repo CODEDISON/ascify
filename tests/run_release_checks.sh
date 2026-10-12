@@ -184,6 +184,19 @@ run_check "CUDA lane ID instruction boundaries" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
 
+run_check "CUDA SM display and dead initialization boundaries" \
+  "$python" -B "$rewrite_dir/check_sm_diagnostics.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+
+run_check "frozen Samples MAX expression preservation" \
+  "$python" -B "$rewrite_dir/check_helper_max.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda "$ASCIFY_CUDA_PATH" \
+    --resource "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --evidence "$work_dir/helper_max"
+
 run_check "real ascify local-header publication negatives" \
   sh "$rewrite_dir/check_local_header_integration.sh"
 run_check "half2 syntax and separate rounding conversion" \

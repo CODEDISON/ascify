@@ -8,6 +8,10 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Bounded host diagnostics that display CUDA SM versions as unavailable on
+  Ascend without inventing numeric device capabilities.
+- Exact expression preservation for admitted frozen Samples `MAX` invocations
+  when converting the surrounding helper closure.
 - Bounded conversion of the nonvolatile CUDA lane-ID instruction, with
   three-dimensional block indexing and conservative assembly boundaries.
 

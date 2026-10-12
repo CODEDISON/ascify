@@ -6,6 +6,37 @@ the [English tutorial](user-guide.en.md) or [中文教程](user-guide.zh-CN.md).
 Supported APIs and limitations are described in the
 [compatibility reference](compatibility.md).
 
+## CUDA SM display diagnostics
+
+An ordinary host `printf` statement that only displays the SDK-owned
+`cudaDeviceProp.major` and `.minor` fields as `%d.%d` can print `N/A (Ascend)`
+instead. Ascend has no CUDA SM version. The fields remain unsupported for
+capability checks, workload selection, arithmetic and other computation.
+This conversion intentionally changes the displayed metadata; it never
+supplies a fictional numeric compute capability.
+
+The bounded rule requires the physical Linux libc `printf` declaration, an
+ignored return value, a literal format containing `SM `, `Compute ` or `compute capability`,
+and a single adjacent version pair from the same nonvolatile automatic local
+property object. Only plain `%d`, `%s` and `%%` formats are admitted. Other
+arguments must be simple expressions with no side effects. Macros, templates,
+device functions, pointers, references, external property objects, positional
+or width formats and used return values retain the source.
+
+The same display rule can recognize two ordinary integer locals populated by
+the SDK's major/minor attribute queries. Each local must have exactly one query
+and one display use, with both queries preceding the display in the same block
+and using the same simple device expression. Queries remain in the program;
+the Runtime adapter reports those unavailable attributes as unsupported without
+writing invented values. Any additional read, write, alias or capture retains
+the original display.
+
+Literal-zero assignments to the two property fields can be removed with the
+display when every use of that entire local property object is the display,
+one of those assignments, or an SDK property output query. Record copies,
+member addresses, captures and numeric observations retain the assignments.
+The display and dead assignments are published in one transaction.
+
 ## CUDA lane ID instruction
 
 The frontend converts the exact nonvolatile inline PTX instruction
@@ -262,6 +293,15 @@ Ascify recognizes a restricted `helper_cuda.h` dependency and can replace
 device and selects logical zero. Recognition is automatic and depends on source
 identity, active macro definitions, and supported call types. It does not enable
 general CUDA Samples or library compatibility.
+
+A literal main-file invocation of the frozen `helper_cuda.h` `MAX` macro can
+be materialized as its original conditional expression. The converter uses
+Clang's expanded argument tokens and retains the original argument precedence
+and repeated evaluation. It does not replace the macro with a function or the
+different `helper_image.h` definition. Stateful counter expansion, residual
+active macros, unsupported tokens, indirect invocations and conflicting source
+edits retain the complete helper transaction. Other helper include, identity
+and macro-observation checks still apply.
 
 See [CUDA Samples helper compatibility](sample-helpers.md) for supported include
 forms, status domains, frozen dependencies, and rejection behavior.
