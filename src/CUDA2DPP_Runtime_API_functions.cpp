@@ -27,6 +27,7 @@ using SEC = runtime::CUDA_RUNTIME_API_SECTIONS;
 // Map of all CUDA Runtime API functions
 const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   std::map<llvm::StringRef,  dppCounter> m;
+  m["cudaMemcpyFromSymbol"] = {"ascify::cudaMemcpyFromSymbol", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["cudaMemcpyToSymbol"] = {"ascify::cudaMemcpyToSymbol", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["cudaGetDeviceProperties"] = {"ascify::cudaGetDeviceProperties", CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
   // The admitted CUDA SDK aliases the public spelling to this exact symbol.

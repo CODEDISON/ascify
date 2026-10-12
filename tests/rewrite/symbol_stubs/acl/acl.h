@@ -17,6 +17,9 @@ enum aclrtMemcpyKind {
   ACL_MEMCPY_DEVICE_TO_HOST,
   ACL_MEMCPY_DEVICE_TO_DEVICE
 };
+aclError aclrtMemcpy(void *, size_t, const void *, size_t, aclrtMemcpyKind);
+aclError aclrtMemcpyFromSymbol(void *, size_t, const void *, size_t, size_t, aclrtMemcpyKind);
+
 static const aclError ACL_SUCCESS = 0;
 static const aclError ACL_ERROR_RT_PARAM_INVALID = 107000;
 

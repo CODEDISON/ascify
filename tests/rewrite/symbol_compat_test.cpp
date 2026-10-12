@@ -14,6 +14,11 @@ struct Recorded {
   int ready_calls = 0;
   int size_calls = 0;
   int copy_calls = 0;
+  int resolver_calls = 0;
+  int memory_calls = 0;
+  aclError resolver_status = ACL_SUCCESS;
+  void *device_address = nullptr;
+  void *destination = nullptr;
   aclError ready_status = ACL_SUCCESS;
   aclError size_status = ACL_SUCCESS;
   aclError copy_status = ACL_SUCCESS;
@@ -56,6 +61,27 @@ aclError aclrtMemcpyToSymbol(const void *symbol, const void *source,
   recorded.offset = offset;
   recorded.kind = kind;
   return recorded.copy_status;
+}
+
+aclError aclrtMemcpy(void *destination, size_t capacity, const void *source,
+                     size_t count, aclrtMemcpyKind kind) {
+  assert(count <= capacity);
+  ++recorded.memory_calls;
+  recorded.destination = destination; recorded.source = source;
+  recorded.count = count; recorded.kind = kind;
+  return recorded.copy_status;
+}
+aclError aclrtMemcpyFromSymbol(void *destination, size_t capacity,
+                               const void *token, size_t count, size_t offset,
+                               aclrtMemcpyKind kind) {
+  assert(count <= capacity);
+  recorded.destination = destination;
+  return aclrtMemcpyToSymbol(token, nullptr, count, offset, kind);
+}
+aclError resolve(void **address) {
+  ++recorded.resolver_calls;
+  *address = recorded.device_address;
+  return recorded.resolver_status;
 }
 
 int main() {
@@ -149,5 +175,35 @@ int main() {
   assert(recorded.ready_calls == 2 && recorded.size_calls == 2);
   assert(recorded.copy_calls == 1);
 
+
+  // Resolver contract uses registered definition size, never a host write or a
+  // stale cached device address. These are synthetic call-routing assertions.
+  unsigned char fake_device_storage[sizeof(array)] = {};
+  {
+    ascify::detail::DeviceSymbolResolver registration(&array, sizeof(array), resolve);
+    reset(sizeof(array)); recorded.device_address = fake_device_storage;
+    assert(ascify::cudaMemcpyToSymbol(array, source, 4, 8) == ACL_SUCCESS);
+    assert(recorded.destination == fake_device_storage + 8);
+    assert(recorded.memory_calls == 1 && recorded.resolver_calls == 1);
+    assert(recorded.size_calls == 0 && recorded.copy_calls == 0);
+    float readback[2] = {};
+    assert(ascify::cudaMemcpyFromSymbol(readback, array, 8, 4) == ACL_SUCCESS);
+    assert(recorded.source == fake_device_storage + 4 && recorded.destination == readback);
+    assert(recorded.resolver_calls == 2 && readback[0] == 0);
+    assert(ascify::cudaMemcpyFromSymbol(readback, array, 1, sizeof(array)) == ACL_ERROR_RT_PARAM_INVALID);
+    assert(ascify::cudaMemcpyToSymbol(array, source, 2, std::numeric_limits<size_t>::max()) == ACL_ERROR_RT_PARAM_INVALID);
+    assert(recorded.resolver_calls == 2);
+    recorded.resolver_status = 98710;
+    assert(ascify::cudaMemcpyToSymbol(array, source, 1) == 98710);
+    assert(recorded.memory_calls == 2);
+    recorded.resolver_status = ACL_SUCCESS; recorded.device_address = nullptr;
+    assert(ascify::cudaMemcpyFromSymbol(readback, array, 1) == ACL_ERROR_RT_PARAM_INVALID);
+    recorded.device_address = fake_device_storage; recorded.copy_status = 98711;
+    assert(ascify::cudaMemcpyFromSymbol(readback, array, 1) == 98711);
+    assert(recorded.memory_calls == 3);
+  }
+  reset(sizeof(array)); recorded.size_status = 98712;
+  assert(ascify::cudaMemcpyFromSymbol(nullptr, array, 0) == 98712);
+  assert(recorded.memory_calls == 0 && recorded.size_calls == 1);
   std::puts("synthetic symbol compatibility host contracts passed (no NPU)");
 }

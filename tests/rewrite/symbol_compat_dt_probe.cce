@@ -6,12 +6,16 @@
 #include <cstdlib>
 #include <limits>
 
-__constant__ float ascifySymbolArray[8];
+__constant__ float ascifySymbolArray[8] = {-1,-2,-3,-4,-5,-6,-7,-8};
+ASCIFY_REGISTER_DEVICE_SYMBOL(ascifySymbolArray, ascify_array);
 static __constant__ unsigned int ascifySymbolTable[2][4];
+ASCIFY_REGISTER_DEVICE_SYMBOL(ascifySymbolTable, ascify_table);
+__aicore__ int ascifyMutableValues[4] = {51,52,53,54};
+ASCIFY_REGISTER_DEVICE_SYMBOL(ascifyMutableValues, ascify_mutable);
 extern __constant__ unsigned int ascifySymbolExternal[4];
 extern "C" void ascifySymbolLaunchExternal(float *output);
 
-ASCIFY_GLOBAL void ascifySymbolReadLocal(float *output) {
+ASCIFY_GLOBAL void sequence_gpu(float *output) {
   const unsigned i = threadIdx.x;
   if (i < 8) {
     output[i] = ascifySymbolArray[i];
@@ -19,6 +23,13 @@ ASCIFY_GLOBAL void ascifySymbolReadLocal(float *output) {
   }
 }
 
+ASCIFY_GLOBAL void mutate_symbol(int increment) {
+  if (threadIdx.x < 4) ascifyMutableValues[threadIdx.x] += increment;
+}
+int sequence_cpu(const float *actual, const float *expected) {
+  for (unsigned i = 0; i < 22; ++i) if (actual[i] != expected[i]) return int(i + 1);
+  return 0;
+}
 #define SYMBOL_CHECK(call)                                                    \
   do {                                                                      \
     const aclError status = (call);                                          \
@@ -33,6 +44,19 @@ int main(int argc, char **argv) {
   const int device = argc == 2 ? std::atoi(argv[1]) : 0;
   for (unsigned pass = 0; pass < 2; ++pass) {
     SYMBOL_CHECK(ascify::cudaSetDevice(device));
+    void *first = nullptr, *again = nullptr, *table_address = nullptr;
+    SYMBOL_CHECK(ascify_array_resolve(&first));
+    SYMBOL_CHECK(ascify_array_resolve(&again));
+    SYMBOL_CHECK(ascify_table_resolve(&table_address));
+    if (!first || first != again || first == table_address) return 1;
+    int mutable_input[4] = {int(pass+1),int(pass+2),int(pass+3),int(pass+4)};
+    SYMBOL_CHECK(ascify::cudaMemcpyToSymbol(ascifyMutableValues, mutable_input, sizeof(mutable_input)));
+    mutate_symbol<<<1,32>>>(5);
+    mutate_symbol<<<1,32>>>(7);
+    SYMBOL_CHECK(ascify::cudaDeviceSynchronize());
+    int mutable_back[4] = {};
+    SYMBOL_CHECK(ascify::cudaMemcpyFromSymbol(mutable_back, ascifyMutableValues, sizeof(mutable_back)));
+    for (unsigned i=0;i<4;++i) if (mutable_back[i] != mutable_input[i]+12) return 1;
     float source[8];
     unsigned table[2][4];
     unsigned external[4];
@@ -94,7 +118,7 @@ int main(int argc, char **argv) {
     SYMBOL_CHECK(ascify::cudaMalloc(&output, sizeof(actual)));
     SYMBOL_CHECK(ascify::cudaMemcpy(output, actual, sizeof(actual),
                                     ACL_MEMCPY_HOST_TO_DEVICE));
-    ascifySymbolReadLocal<<<dim3(1), dim3(8), 0, nullptr>>>(output + 1);
+    sequence_gpu<<<dim3(1), dim3(8), 0, nullptr>>>(output + 1);
     ascifySymbolLaunchExternal(output + 17);
     SYMBOL_CHECK(ascify::cudaDeviceSynchronize());
     SYMBOL_CHECK(ascify::cudaMemcpy(actual, output, sizeof(actual),
@@ -106,11 +130,22 @@ int main(int argc, char **argv) {
         return 1;
       }
     }
+    if (sequence_cpu(actual, expected) != 0) return 1;
+    float readback[8] = {};
+    SYMBOL_CHECK(ascify::cudaMemcpyFromSymbol(readback, ascifySymbolArray, sizeof(readback)));
+    for (unsigned i=0;i<8;++i) if (readback[i] != expected[i+1]) return 1;
+    unsigned table_readback[3] = {};
+    SYMBOL_CHECK(ascify::cudaMemcpyFromSymbol(table_readback, ascifySymbolTable, sizeof(table_readback), 3*sizeof(unsigned)));
+    for (unsigned i=0;i<3;++i) if (float(table_readback[i]) != expected[12+i]) return 1;
+    if (ascify::cudaMemcpyFromSymbol(readback, ascifySymbolArray, 1, sizeof(ascifySymbolArray)) != ACL_ERROR_RT_PARAM_INVALID) return 1;
+    SYMBOL_CHECK(ascify_array_resolve(&again));
+    if (first != again) return 1;
     SYMBOL_CHECK(ascify::cudaFree(output));
     SYMBOL_CHECK(ascify::cudaDeviceReset());
     std::printf("synthetic symbol DT pass=%u array=8 static-table=8 "
                 "cross-TU=4 guards=2 partial-copy=passed D2D=passed reset=passed\n", pass);
   }
+  std::puts("SYMBOL RESOLVER PROBE PASSED: 2 reset cycles, 3 local symbols, 1 cross-TU symbol, H2D/D2D/readback/bounds");
   return 0;
 }
 

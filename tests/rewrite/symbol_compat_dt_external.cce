@@ -2,6 +2,7 @@
 #include <ascify/symbol_compat.hpp>
 
 __constant__ unsigned int ascifySymbolExternal[4];
+ASCIFY_REGISTER_DEVICE_SYMBOL(ascifySymbolExternal, ascify_external);
 
 ASCIFY_GLOBAL void ascifySymbolReadExternal(float *output) {
   const unsigned i = threadIdx.x;

@@ -75,6 +75,7 @@ const std::string s_string_literal = "[string literal]";
 const StringRef sCudaGlobalScalarDoubleParam = "cudaGlobalScalarDoubleParam";
 const StringRef sCudaDefaultDim3 = "cudaDefaultDim3";
 const StringRef sCudaHalf2DirectInit = "cudaHalf2DirectInit";
+const StringRef sCudaDeviceSymbol = "cudaDeviceSymbol";
 const StringRef sCudaHalf2Operator = "cudaHalf2Operator";
 const StringRef sFrontendHostMath = "frontendHostMath";
 const StringRef sProvenGlobalAtomicCall = "provenGlobalAtomicCall";
@@ -600,6 +601,7 @@ bool isAscifyCudaCompatReservedMacro(llvm::StringRef name) {
       "ASCIFY_ALIGN",
       "ASCIFY_FORCEINLINE",
       "ASCIFY_GLOBAL",
+      "ASCIFY_REGISTER_DEVICE_SYMBOL",
       "ASCIFY_DEFINE_GLOBAL_ATOMIC_BINARY",
       "ASCIFY_DEFINE_GLOBAL_ATOMIC_CAS",
       "ASCIFY_DEFINE_GLOBAL_ATOMIC_UNSIGNED",
@@ -629,6 +631,7 @@ bool isAscifyCudaCompatPublishedMacro(llvm::StringRef name) {
       "ASCIFY_ALIGN",
       "ASCIFY_FORCEINLINE",
       "ASCIFY_GLOBAL",
+      "ASCIFY_REGISTER_DEVICE_SYMBOL",
       "ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS",
       "ASCIFY_NVIDIA_SAMPLE_GET_LAST_CUDA_ERROR",
   };
@@ -836,7 +839,7 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaFreeHost", "cudaGetDevice", "cudaSetDevice",
       "cudaGetDeviceCount", "cudaDeviceGetAttribute",
       "cudaGetDeviceProperties", "cudaGetDeviceProperties_v2",
-      "cudaMemcpyToSymbol",
+      "cudaMemcpyToSymbol", "cudaMemcpyFromSymbol",
       "cudaDeviceSynchronize", "cudaDeviceReset",
       "cudaFuncGetAttributes", "cudaFuncSetAttribute",
       "cudaStreamCreate", "cudaStreamCreateWithFlags",
@@ -1695,7 +1698,7 @@ static bool requiresCudaCompatHeader(llvm::StringRef name) {
          name == "cudaMalloc" ||
          name == "cudaFree" ||
          name == "cudaMemcpy" ||
-         name == "cudaMemcpyToSymbol" ||
+         name == "cudaMemcpyToSymbol" || name == "cudaMemcpyFromSymbol" ||
          name == "cudaMemcpyAsync" ||
          name == "cudaMemset" ||
          name == "cudaMemsetAsync" ||
@@ -5039,6 +5042,103 @@ bool AscifyAction::rewriteCudaHalf2Operator(
       clang::FullSourceLoc(begin, sourceManager), begin, end);
 }
 
+// Only complete, non-const, trivially copyable file-scope CUDA device objects
+// receive a resolver. This does not rewrite their declaration or consumer code.
+// Reject references, templates, inline definitions and C++ const subobjects:
+// those require linkage/folding proofs beyond this same-module address recipe.
+static bool admitsDeviceSymbolStorage(clang::QualType type,
+                                     clang::ASTContext &context,
+                                     unsigned depth = 0) {
+  if (depth > 32 || type.isNull() || type->isDependentType() ||
+      type->isIncompleteType() || type.isConstQualified() ||
+      type.isVolatileQualified() || type->isReferenceType()) return false;
+  if (const auto *array = context.getAsConstantArrayType(type))
+    return !array->getSize().isZero() &&
+           admitsDeviceSymbolStorage(array->getElementType(), context, depth + 1);
+  if (type->isArrayType()) return false;
+  if (type->isArithmeticType() || type->isEnumeralType() || type->isPointerType())
+    return true;
+  const auto *recordType = type->getAs<clang::RecordType>();
+  if (recordType == nullptr || !type.isTriviallyCopyableType(context) ||
+      !type->isStandardLayoutType()) return false;
+  const auto *record = recordType->getDecl()->getDefinition();
+  if (record == nullptr || record->isUnion()) return false;
+  if (const auto *cppRecord = llvm::dyn_cast<clang::CXXRecordDecl>(record))
+    if (cppRecord->getNumBases() != 0) return false;
+  for (const auto *field : record->fields())
+    if (!admitsDeviceSymbolStorage(field->getType(), context, depth + 1)) return false;
+  return true;
+}
+
+bool AscifyAction::registerCudaDeviceSymbol(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *variable = Result.Nodes.getNodeAs<clang::VarDecl>(sCudaDeviceSymbol);
+  if (variable == nullptr || Result.Context == nullptr ||
+      Result.SourceManager == nullptr || variable->isImplicit() ||
+      variable->getIdentifier() == nullptr || !variable->hasGlobalStorage() ||
+      !variable->getDeclContext()->isFileContext() || variable->isStaticDataMember() ||
+      variable->getDescribedVarTemplate() != nullptr || variable->isInline() ||
+      llvm::isa<clang::VarTemplateSpecializationDecl>(variable) ||
+      variable->isThisDeclarationADefinition() == clang::VarDecl::DeclarationOnly ||
+      (!variable->hasAttr<clang::CUDAConstantAttr>() &&
+       !variable->hasAttr<clang::CUDADeviceAttr>()) ||
+      variable->hasAttr<clang::CUDASharedAttr>() ||
+      !admitsDeviceSymbolStorage(variable->getType(), *Result.Context)) return false;
+  auto &source = *Result.SourceManager;
+  // Qualified references prevent the generated parameter/local names from
+  // shadowing the original object. Anonymous namespace lookup can become
+  // ambiguous under absolute qualification, so retain that unproved case.
+  for (const auto *owner = variable->getDeclContext(); owner != nullptr;
+       owner = owner->getParent()) {
+    if (const auto *space = llvm::dyn_cast<clang::NamespaceDecl>(owner))
+      if (space->isAnonymousNamespace()) return false;
+  }
+  const auto name = variable->getLocation();
+  const auto last = variable->getEndLoc();
+  if (name.isInvalid() || last.isInvalid() || name.isMacroID() || last.isMacroID() ||
+      !source.isWrittenInMainFile(name) || !source.isWrittenInMainFile(last)) return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto next = clang::Lexer::findNextToken(last, source, options);
+  if (!next || !next->is(clang::tok::semi) || next->getLocation().isMacroID()) return false;
+  const auto insertion = clang::Lexer::getLocForEndOfToken(next->getLocation(), 0, source, options);
+  if (insertion.isInvalid()) return false;
+  const unsigned offset = source.getFileOffset(name);
+  if (!registeredCudaSymbolOffsets.insert(offset).second) return true;
+  const std::string tag = "ascify_generated_symbol_" + std::to_string(offset);
+  // Generated identifiers must not bind to project declarations or macros,
+  // including declarations produced by token pasting in a local header.
+  auto &preprocessor = getCompilerInstance().getPreprocessor();
+  for (const char *suffix : {"_address", "_resolve", "_registration"}) {
+    auto *identifier = &Result.Context->Idents.get(tag + suffix);
+    if (!variable->getDeclContext()->lookup(identifier).empty() ||
+        preprocessor.getMacroDefinitionAtLoc(identifier, name).getMacroInfo() != nullptr) {
+      needsCudaCompatHeader = true;
+      cudaDeviceSymbolGeneratedNameConflict = true;
+      registeredCudaSymbolOffsets.erase(offset);
+      return false;
+    }
+  }
+  auto *addressBuiltin = &Result.Context->Idents.get("__builtin_addressof");
+  if (preprocessor.getMacroDefinitionAtLoc(addressBuiltin, name).getMacroInfo() != nullptr) {
+    needsCudaCompatHeader = true;
+    cudaDeviceSymbolGeneratedNameConflict = true;
+    registeredCudaSymbolOffsets.erase(offset);
+    return false;
+  }
+  const std::string text = "\nASCIFY_REGISTER_DEVICE_SYMBOL(::" +
+      variable->getQualifiedNameAsString() + ", " + tag + ");\n";
+  if (!insertReplacement(ct::Replacement(source, insertion, 0, text),
+                         clang::FullSourceLoc(insertion, source))) {
+    registeredCudaSymbolOffsets.erase(offset);
+    return false;
+  }
+  needsCudaCompatHeader = true;
+  static const dppCounter counter = {
+      "CUDA device symbol resolver", CONV_MEMORY, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(counter, "CUDA device symbol resolver");
+  return true;
+}
+
 bool AscifyAction::rewriteCudaHalf2DirectInit(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *variable =
@@ -6231,6 +6331,8 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
             .bind(sCudaGlobalScalarDoubleParam),
         this);
   }
+  Finder->addMatcher(
+      mat::varDecl(mat::isExpansionInMainFile()).bind(sCudaDeviceSymbol), this);
   Finder->addMatcher(
       mat::varDecl(mat::isExpansionInMainFile())
           .bind(sCudaDefaultDim3),
@@ -8296,6 +8398,16 @@ void AscifyAction::EndSourceFileAction() {
         getCompilerInstance().getASTContext().getTranslationUnitDecl());
   }
   finalizePendingNvidiaSampleHelperPragma();
+  if (cudaDeviceSymbolGeneratedNameConflict) {
+    const auto diagnostic =
+        getCompilerInstance().getDiagnostics().getCustomDiagID(
+            clang::DiagnosticsEngine::Error,
+            "Ascify cannot publish CUDA compatibility output because an "
+            "input declaration or macro conflicts with a generated device "
+            "symbol resolver");
+    getCompilerInstance().getDiagnostics().Report(diagnostic);
+    return;
+  }
   if (needsCudaCompatHeader &&
       nvidiaSampleHelperOutputMacroEverDefined) {
     const auto diagnostic =
@@ -8929,6 +9041,10 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
   if (Result.Nodes.getNodeAs<clang::ParmVarDecl>(
           sCudaGlobalScalarDoubleParam) != nullptr) {
     (void)lowerCudaGlobalScalarDoubleParam(Result);
+    return;
+  }
+  if (Result.Nodes.getNodeAs<clang::VarDecl>(sCudaDeviceSymbol) != nullptr) {
+    (void)registerCudaDeviceSymbol(Result);
     return;
   }
   if (Result.Nodes.getNodeAs<clang::VarDecl>(sCudaDefaultDim3) != nullptr) {

@@ -140,6 +140,7 @@ private:
   bool nvidiaSampleHelperOutputMacroEverDefined = false;
   bool nvidiaSampleHelperPendingMacroGeneratedPragma = false;
   bool ascifyCudaCompatDeclarationConflict = false;
+  bool cudaDeviceSymbolGeneratedNameConflict = false;
   bool ascifyCudaCompatIncludeConflict = false;
   bool ascifyCudaCompatActiveMacroConflict = false;
   std::string ascifyCudaCompatActiveMacroConflictName;
@@ -247,6 +248,8 @@ public:
   // MatchCallback listeners
   bool lowerCudaGlobalScalarDoubleParam(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaDefaultDim3(const mat::MatchFinder::MatchResult &Result);
+  std::set<unsigned> registeredCudaSymbolOffsets;
+  bool registerCudaDeviceSymbol(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaHalf2DirectInit(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaHalf2Operator(const mat::MatchFinder::MatchResult &Result);
   bool rewriteFrontendHostMath(const mat::MatchFinder::MatchResult &Result);
