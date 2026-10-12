@@ -5742,8 +5742,12 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
                     mat::isExpansionInMainFile())
           .bind(sProvenGlobalAtomicCall),
       this);
+  // Test location through Stmt's concrete-kind dispatch: the abstract
+  // AsmStmt base does not supply the GCC statement's source location.
   Finder->addMatcher(
-      mat::asmStmt(mat::isExpansionInMainFile()).bind(sCudaLaneIdAsm), this);
+      mat::stmt(mat::isExpansionInMainFile(), mat::asmStmt())
+          .bind(sCudaLaneIdAsm),
+      this);
   if (TargetPolicy == "dav-c310-vec" && SimtMathMode == "fast") {
     // Keep the matcher broad and perform the semantic proof in the callback.
     // This prevents source-name coupling and makes every failed proof a
