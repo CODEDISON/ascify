@@ -5156,7 +5156,6 @@ bool AscifyAction::rewriteCudaLaneIdAsm(
       statement->isSimple() ||
       statement->getNumOutputs() != 1 || statement->getNumInputs() != 0 ||
       statement->getNumClobbers() != 0 ||
-      statement->getOutputConstraint(0) != "=r" ||
       !statement->getOutputName(0).empty() ||
       getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)
     return false;
@@ -5176,7 +5175,8 @@ bool AscifyAction::rewriteCudaLaneIdAsm(
   const auto *asmLiteral = statement->getAsmString();
 #endif
   if (asmLiteral == nullptr ||
-      asmLiteral->getString() != "mov.u32 %0, %%laneid;")
+      asmLiteral->getString() != "mov.u32 %0, %%laneid;" ||
+      statement->getOutputConstraint(0) != "=r")
     return false;
   auto &context = *Result.Context;
   auto &source = *Result.SourceManager;
