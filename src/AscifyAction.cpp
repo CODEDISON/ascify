@@ -5147,6 +5147,100 @@ bool AscifyAction::rewriteCudaDefaultDim3(
   return true;
 }
 
+bool AscifyAction::preserveCudaFfsArgumentConversion(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *call =
+      Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
+  if (call == nullptr || Result.Context == nullptr ||
+      Result.SourceManager == nullptr || call->getNumArgs() != 1 ||
+      call->isTypeDependent() || call->isValueDependent() ||
+      getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)
+    return false;
+  const auto *callee = call->getDirectCallee();
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  if (callee == nullptr || callee->getIdentifier() == nullptr ||
+      callee->getQualifiedNameAsString() != "__ffs" ||
+      !callee->hasAttr<clang::CUDADeviceAttr>() || callee->isVariadic() ||
+      callee->getNumParams() != 1 ||
+      !context.hasSameType(callee->getReturnType(), context.IntTy) ||
+      !context.hasSameType(callee->getParamDecl(0)->getType(), context.IntTy))
+    return false;
+  // A system-header annotation alone cannot make a project overload a CUDA
+  // intrinsic. Require every declaration to belong to the physical SDK or
+  // the compiler-owned forced CUDA wrapper closure.
+  for (const auto *declaration : callee->redecls()) {
+    const auto location = source.getSpellingLoc(declaration->getLocation());
+    if (location.isInvalid() || !source.isInSystemHeader(location))
+      return false;
+    const auto file = source.getFileID(location);
+    if (!cudaRuntimeApiSdkFileIds.count(file.getHashValue()) &&
+        !isOwnedCudaCompilerInput(file, getCompilerInstance()))
+      return false;
+  }
+  const auto *owner = enclosingNonLambdaFunction(call, context);
+  if (owner == nullptr || owner->hasAttr<clang::CUDAHostAttr>() ||
+      (!owner->hasAttr<clang::CUDADeviceAttr>() &&
+       !owner->hasAttr<clang::CUDAGlobalAttr>()) ||
+      owner->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate)
+    return false;
+  const auto *reference = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
+      call->getCallee()->IgnoreParenImpCasts());
+  if (reference == nullptr || reference->getDecl()->getCanonicalDecl() !=
+                                  callee->getCanonicalDecl() ||
+      reference->getLocation().isMacroID())
+    return false;
+  const auto *conversion = llvm::dyn_cast<clang::ImplicitCastExpr>(call->getArg(0));
+  if (conversion == nullptr || conversion->getCastKind() != clang::CK_IntegralCast ||
+      !context.hasSameType(conversion->getType(), context.IntTy) ||
+      !conversion->getSubExpr()->getType()->isIntegerType())
+    return false;
+  const auto *argument = conversion->getSubExpr();
+  // Calls can contain independent rewrites, so retain them. Also retain
+  // macro-expanded argument-expression node boundaries; an operator-only
+  // macro token inside an ordinary node keeps its original spelling below.
+  // Templates require a separate source-range proof and are left unchanged.
+  struct ArgumentAudit : clang::RecursiveASTVisitor<ArgumentAudit> {
+    bool VisitStmt(clang::Stmt *statement) {
+      return !statement->getBeginLoc().isMacroID() &&
+             !statement->getEndLoc().isMacroID();
+    }
+    bool VisitCallExpr(clang::CallExpr *) { return false; }
+  } audit;
+  if (!audit.TraverseStmt(const_cast<clang::Expr *>(argument)))
+    return false;
+  const auto begin = argument->getBeginLoc();
+  const auto last = argument->getEndLoc();
+  if (begin.isInvalid() || last.isInvalid() ||
+      !source.isWrittenInMainFile(begin) || !source.isWrittenInMainFile(last))
+    return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto end = clang::Lexer::getLocForEndOfToken(last, 0, source, options);
+  bool invalid = false;
+  const auto spelling = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(argument->getSourceRange()),
+      source, options, &invalid);
+  if (invalid || spelling.empty() || end.isInvalid())
+    return false;
+  const auto offset = source.getFileOffset(begin);
+  if (!rewrittenFfsArgumentOffsets.insert(offset).second)
+    return true;
+  // CUDA resolves __ffs to int(int), even for a wider or unsigned operand.
+  // Native SIMT also overloads long and long long. Materialize the conversion
+  // already present in the CUDA AST, preserving width and one evaluation.
+  ct::Replacement edit(source, begin, source.getFileOffset(end) - offset,
+                       "static_cast<int>(" + spelling.str() + ")");
+  if (!insertSemanticReplacement(edit, clang::FullSourceLoc(begin, source),
+                                 begin, end)) {
+    rewrittenFfsArgumentOffsets.erase(offset);
+    return false;
+  }
+  static const dppCounter counter = {
+      "__ffs int argument", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(counter, "CUDA __ffs integral conversion");
+  return true;
+}
+
 bool AscifyAction::rewriteProvenGlobalAtomicCall(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call =
@@ -7969,7 +8063,8 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
   }
   if (Result.Nodes.getNodeAs<clang::CallExpr>(
           sProvenGlobalAtomicCall) != nullptr) {
-    if (!rewriteProvenGlobalAtomicCall(Result))
+    if (!preserveCudaFfsArgumentConversion(Result) &&
+        !rewriteProvenGlobalAtomicCall(Result))
       (void)rewriteProvenDeviceMemoryCall(Result);
     return;
   }

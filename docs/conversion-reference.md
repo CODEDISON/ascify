@@ -107,6 +107,25 @@ compatibility mappings. In particular, CUDA vector struct layouts and libcu++'s
 standard `<cmath>` header. Generated source must compile against the target
 SDK without adding NVIDIA include directories.
 
+## Integer intrinsic argument conversions
+
+For a proven CUDA `__ffs(int)` call, Ascify preserves an implicit integral
+argument conversion by spelling it as `static_cast<int>(argument)`. Native
+SIMT also overloads `__ffs` for `long` and `long long`; selecting an overload
+from the original operand type could change the bit width or make an unsigned
+call ambiguous. The explicit conversion retains CUDA's resolved parameter type
+and evaluates the argument once.
+
+This rule requires a direct call in a non-template device or global function,
+the exact SDK/compiler-owned declaration chain, and an ordinary integer
+expression written in the current source file. Macro-expanded callees or
+argument-expression node boundaries, arguments containing calls, floating-point
+conversions, dependent code and caller-owned overloads remain unchanged. An
+operator-only macro token inside an otherwise ordinary expression retains its
+original spelling and may be enclosed by the cast. An already-`int` argument
+needs no edit. The rule does not add a general intrinsic-name mapping or adapt
+`__ffsll`.
+
 ## Input filesystem overlays
 
 Ascify rejects `-ivfsoverlay` before preprocessing. Its current LibTooling entry

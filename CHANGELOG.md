@@ -35,6 +35,8 @@ for supported domains and experimental paths.
 
 ### Fixed
 
+- Preserve proven CUDA `__ffs(int)` integral argument conversions when the
+  target provides additional integer-width overloads.
 - Recognize proven adjacent local Runtime status assignments in NVIDIA
   Samples error checks, retaining unsupported control-flow and alias cases.
 - Recognize proven NVIDIA Samples device selection in automatic local-variable

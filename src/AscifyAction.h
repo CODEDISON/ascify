@@ -180,6 +180,7 @@ private:
   std::set<unsigned> rewrittenCudaHalf2OperatorOffsets;
   std::set<unsigned> rewrittenGlobalAtomicOffsets;
   std::set<unsigned> rewrittenDeviceMemoryOffsets;
+  std::set<unsigned> rewrittenFfsArgumentOffsets;
   std::set<unsigned> rewrittenWarpAddReductionOffsets;
   std::set<unsigned> taggedCanonicalReducerOffsets;
   std::set<std::string> rowwiseSimdMacrosEverDefined;
@@ -239,6 +240,8 @@ public:
   bool rewriteProvenGlobalAtomicCall(
       const mat::MatchFinder::MatchResult &Result);
   bool rewriteProvenDeviceMemoryCall(
+      const mat::MatchFinder::MatchResult &Result);
+  bool preserveCudaFfsArgumentConversion(
       const mat::MatchFinder::MatchResult &Result);
   bool rewriteCanonicalWarpAddReduction(
       const mat::MatchFinder::MatchResult &Result);
