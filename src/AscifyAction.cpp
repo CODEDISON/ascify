@@ -5147,7 +5147,7 @@ bool AscifyAction::rewriteCudaDefaultDim3(
   return true;
 }
 
-bool AscifyAction::preserveCudaFfsArgumentConversion(
+bool AscifyAction::preserveCudaIntegerIntrinsicArgumentConversion(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call =
       Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
@@ -5160,7 +5160,8 @@ bool AscifyAction::preserveCudaFfsArgumentConversion(
   auto &context = *Result.Context;
   auto &source = *Result.SourceManager;
   if (callee == nullptr || callee->getIdentifier() == nullptr ||
-      callee->getQualifiedNameAsString() != "__ffs" ||
+      (callee->getQualifiedNameAsString() != "__ffs" &&
+       callee->getQualifiedNameAsString() != "__clz") ||
       !callee->hasAttr<clang::CUDADeviceAttr>() || callee->isVariadic() ||
       callee->getNumParams() != 1 ||
       !context.hasSameType(callee->getReturnType(), context.IntTy) ||
@@ -5223,21 +5224,27 @@ bool AscifyAction::preserveCudaFfsArgumentConversion(
   if (invalid || spelling.empty() || end.isInvalid())
     return false;
   const auto offset = source.getFileOffset(begin);
-  if (!rewrittenFfsArgumentOffsets.insert(offset).second)
+  if (!rewrittenIntegerIntrinsicArgumentOffsets.insert(offset).second)
     return true;
-  // CUDA resolves __ffs to int(int), even for a wider or unsigned operand.
-  // Native SIMT also overloads long and long long. Materialize the conversion
-  // already present in the CUDA AST, preserving width and one evaluation.
+  // Preserve the proven CUDA int(int) overload of __ffs or __clz. Some CUDA
+  // frontend/host combinations instead declare __clz as unsigned(unsigned);
+  // that signature is deliberately outside this proof. Native SIMT also
+  // overloads long and long long, so materialize the resolved conversion.
   ct::Replacement edit(source, begin, source.getFileOffset(end) - offset,
                        "static_cast<int>(" + spelling.str() + ")");
   if (!insertSemanticReplacement(edit, clang::FullSourceLoc(begin, source),
                                  begin, end)) {
-    rewrittenFfsArgumentOffsets.erase(offset);
+    rewrittenIntegerIntrinsicArgumentOffsets.erase(offset);
     return false;
   }
-  static const dppCounter counter = {
+  static const dppCounter ffsCounter = {
       "__ffs int argument", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
-  Statistics::current().incrementCounter(counter, "CUDA __ffs integral conversion");
+  static const dppCounter clzCounter = {
+      "__clz int argument", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
+  const bool isFfs = callee->getName() == "__ffs";
+  Statistics::current().incrementCounter(
+      isFfs ? ffsCounter : clzCounter,
+      isFfs ? "CUDA __ffs integral conversion" : "CUDA __clz integral conversion");
   return true;
 }
 
@@ -8063,7 +8070,7 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
   }
   if (Result.Nodes.getNodeAs<clang::CallExpr>(
           sProvenGlobalAtomicCall) != nullptr) {
-    if (!preserveCudaFfsArgumentConversion(Result) &&
+    if (!preserveCudaIntegerIntrinsicArgumentConversion(Result) &&
         !rewriteProvenGlobalAtomicCall(Result))
       (void)rewriteProvenDeviceMemoryCall(Result);
     return;

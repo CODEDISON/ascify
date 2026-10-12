@@ -35,6 +35,7 @@ for supported domains and experimental paths.
 
 ### Fixed
 
+- Extend proven CUDA integer argument conversion preservation to `__clz(int)`.
 - Preserve proven CUDA `__ffs(int)` integral argument conversions when the
   target provides additional integer-width overloads.
 - Recognize proven adjacent local Runtime status assignments in NVIDIA

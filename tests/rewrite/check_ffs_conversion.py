@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check source-valid CUDA __ffs argument conversion and retained boundaries."""
+"""Check source-valid CUDA int-parameter intrinsic conversions and boundaries."""
 import argparse
 from dataclasses import dataclass, field
 import hashlib
@@ -37,7 +37,7 @@ def device_case(name, expression, expected=None, parameters="unsigned x", prefix
                 {"value": expression if expected is None else expected})
 
 
-def cases():
+def ffs_cases():
     # Preserve the original Sobol expression and its two already-int calls.
     yield Case("sobol_unsigned32", """__device__ int sample(unsigned i, int stride,
                                        unsigned v_stridemask) {
@@ -119,6 +119,30 @@ def cases():
                {"value": "__ffs(x)"})
 
 
+def cases(intrinsic="ffs"):
+    if intrinsic == "ffs":
+        yield from ffs_cases()
+        return
+    if intrinsic != "clz":
+        raise ValueError("unsupported intrinsic: " + intrinsic)
+
+    def clz(text):
+        return text.replace("__ffs", "__clz").replace("PROJECT_FFS", "PROJECT_CLZ")
+
+    # Use the unchanged mergeSort helper expression as the project case.
+    # Both families then exercise the same exact declaration/source guards.
+    for case in ffs_cases():
+        if case.name == "sobol_unsigned32":
+            yield Case("mergesort_unsigned32", "__device__ unsigned nextPowerOfTwo(unsigned x) {\n"
+                       "  return x == 0 ? 0 : 1U << (32 - " +
+                       mark("value", "__clz(x - 1)") + ");\n}\n",
+                       {"value": "__clz(static_cast<int>(x - 1))"})
+        else:
+            yield Case(case.name, clz(case.code),
+                       {key: clz(value) for key, value in case.expected.items()},
+                       {name: clz(text) for name, text in case.headers.items()})
+
+
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -133,6 +157,7 @@ def regions(text):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--intrinsic", choices=("ffs", "clz"), default="ffs")
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--cuda-path", required=True, type=Path)
     parser.add_argument("--resource-dir", required=True, type=Path)
@@ -164,11 +189,12 @@ def main():
             clang_major.group(1) != resource_major.group(1)):
         parser.error("clang major version does not match --resource-dir; "
                      "supply --clang with the frontend's matching clang++")
-    with tempfile.TemporaryDirectory(prefix="ascify-ffs-conversion-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="ascify-" + args.intrinsic + "-conversion-") as temporary:
         work = args.evidence_dir.resolve() if args.evidence_dir else Path(temporary)
         if args.evidence_dir:
             work.mkdir(parents=True, exist_ok=False)
-        summary = {"schema": "ascify.ffs-conversion.v1", "passed": False,
+        summary = {"schema": "ascify." + args.intrinsic + "-conversion.v1", "passed": False,
+                   "intrinsic": "__" + args.intrinsic,
                    "binary": str(binary), "binary_sha256": sha(binary),
                    "clang": str(clang), "clang_sha256": sha(clang), "clang_version": version,
                    "clang_resource_major": int(resource_major.group(1)),
@@ -188,7 +214,7 @@ def main():
 
         save()
         try:
-            for case in cases():
+            for case in cases(args.intrinsic):
                 directory = work / case.name
                 directory.mkdir()
                 source = directory / "input.cu"
@@ -259,7 +285,7 @@ def main():
             summary["failure"] = str(error)
             save()
             raise
-        print("__ffs frontend: " + str(summary["total"]) + " cases passed")
+        print("__" + args.intrinsic + " frontend: " + str(summary["total"]) + " cases passed")
 
 
 if __name__ == "__main__":

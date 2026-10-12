@@ -109,9 +109,9 @@ SDK without adding NVIDIA include directories.
 
 ## Integer intrinsic argument conversions
 
-For a proven CUDA `__ffs(int)` call, Ascify preserves an implicit integral
+For a proven CUDA `__ffs(int)` or `__clz(int)` call, Ascify preserves an implicit integral
 argument conversion by spelling it as `static_cast<int>(argument)`. Native
-SIMT also overloads `__ffs` for `long` and `long long`; selecting an overload
+SIMT also overloads these functions for `long` and `long long`; selecting an overload
 from the original operand type could change the bit width or make an unsigned
 call ambiguous. The explicit conversion retains CUDA's resolved parameter type
 and evaluates the argument once.
@@ -124,7 +124,8 @@ conversions, dependent code and caller-owned overloads remain unchanged. An
 operator-only macro token inside an otherwise ordinary expression retains its
 original spelling and may be enclosed by the cast. An already-`int` argument
 needs no edit. The rule does not add a general intrinsic-name mapping or adapt
-`__ffsll`.
+`__ffsll` or `__clzll`. CUDA frontend/host configurations declaring `__clz` as
+`unsigned int(unsigned int)` do not match this rule's exact `int(int)` contract.
 
 ## Input filesystem overlays
 
