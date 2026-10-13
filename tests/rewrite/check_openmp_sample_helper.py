@@ -90,7 +90,7 @@ def main():
         summary['cases'].append(row);save();assert r.returncode==0,(name,r.stderr)
         if not args.syntax_only:
             r=run(d,'convert',[args.binary,source,'--target-policy=dav-c310-vec','--simt-math=fast','--target-recipe=none',
-                '--default-preprocessor','--local-headers-recursive','--cuda-path='+str(args.cuda_path),
+                '--default-preprocessor','--print-stats','--local-headers-recursive','--cuda-path='+str(args.cuda_path),
                 '--clang-resource-directory='+str(args.resource_dir),'--migration-receipt='+str(receipt),'-o',output,'--',*flags])
             row['conversion_returncode']=r.returncode;save()
             assert r.returncode==0,(name,r.stderr)
@@ -100,10 +100,11 @@ def main():
             assert text.count('#pragma omp')==source.read_text().count('#pragma omp'),(name,text)
             assert re.findall(r'^\s*#pragma omp[^\n]*',text,re.M)==re.findall(r'^\s*#pragma omp[^\n]*',source.read_text(),re.M),(name,text)
             if removed:
-                assert 'checkCudaErrors(' not in text and 'unsupported_macro=0' in r.stderr,(name,text,r.stderr)
+                assert 'checkCudaErrors(' not in text and 'closure: include removed; portable surface retained' in r.stderr,(name,text,r.stderr)
+                assert text.count('ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(')==source.read_text().count('checkCudaErrors('),(name,text)
             else:
                 assert text.count('checkCudaErrors(')==source.read_text().count('checkCudaErrors('),(name,text)
-                assert 'ASCIFY_CUDA_CHECK' not in text,(name,text)
+                assert 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS' not in text,(name,text)
         row['passed']=True;save()
     assert sha(header)==summary['omp_header_sha256'] and sha(args.binary)==summary['binary_sha256']
     summary['passed']=True;save()
