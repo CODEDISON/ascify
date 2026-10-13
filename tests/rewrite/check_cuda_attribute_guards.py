@@ -82,7 +82,8 @@ def main():
                 assert len(generated_files) == 1, label
             generated = generated_files[0].read_text()
             assert generated.count(MARKER) == count, label+'\n'+generated+'\n'+result.stderr
-            expected = text.replace('__device__', '__aicore__')
+            # Existing raw translation retains excluded conditional bodies.
+            expected = text if label == 'inactive' else text.replace('__device__', '__aicore__')
             if count:
                 expected = expected.replace('#ifdef __CUDACC__', MARKER)
             assert expected in generated, label+': body or unrelated directive changed\n'+generated
