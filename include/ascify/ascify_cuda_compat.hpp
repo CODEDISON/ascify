@@ -239,6 +239,27 @@ __aicore__ ASCIFY_FORCEINLINE T atomic_add_generic(T *, V) {
 }
 #endif
 
+// Exact SDK int/uint exchange on a generic pointer/reference or shared scalar.
+// Keep the address space inferred by pure SIMT; do not force references to GM.
+#if defined(ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS) && \
+    defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
+__aicore__ ASCIFY_FORCEINLINE int32_t atomic_exch_generic(
+    int32_t *address, int32_t value) {
+  return asc_atomic_exch(address, value);
+}
+__aicore__ ASCIFY_FORCEINLINE uint32_t atomic_exch_generic(
+    uint32_t *address, uint32_t value) {
+  return asc_atomic_exch(address, value);
+}
+#else
+template<typename T, typename V>
+__aicore__ ASCIFY_FORCEINLINE T atomic_exch_generic(T *, V) {
+  static_assert(detail::dependentFalse<T>::value,
+                "Ascify: generic exchange requires the admitted pure-SIMT API");
+  return T{};
+}
+#endif
+
 // These wrappers are internal targets for AST-proven global atomic calls.
 // The frontend admits only addresses rooted at a parameter of the current
 // CUDA global kernel. The explicit cast supplies the address-space type that

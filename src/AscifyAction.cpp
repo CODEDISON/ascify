@@ -755,12 +755,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 64949)
+  if (contents.size() != 65753)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "1e85d1971dbd85f9cf432a07a640ae8ef630ab46b832261bd8f9d0789ea07cbd");
+      "1e7495d398dbb4eac3194c9ece12997c3737cd0484f533be65f080be9b23c4cd");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -787,12 +787,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 64949)
+  if (invalidBuffer || contents.size() != 65753)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "1e85d1971dbd85f9cf432a07a640ae8ef630ab46b832261bd8f9d0789ea07cbd");
+      "1e7495d398dbb4eac3194c9ece12997c3737cd0484f533be65f080be9b23c4cd");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -6691,6 +6691,106 @@ bool AscifyAction::preserveCudaIntegerIntrinsicArgumentConversion(
   return true;
 }
 
+bool AscifyAction::rewriteProvenGenericAtomicExchCall(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
+  if (call == nullptr || Result.Context == nullptr || Result.SourceManager == nullptr ||
+      call->isTypeDependent() || call->isValueDependent() ||
+      getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)
+    return false;
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  const auto *callee = call->getDirectCallee();
+  const auto *spec = findGlobalAtomicSpec("atomicExch");
+  if (callee == nullptr || callee->getQualifiedNameAsString() != "atomicExch" ||
+      call->getNumArgs() != 2 || !callee->hasAttr<clang::CUDADeviceAttr>())
+    return false;
+  const auto kind = classifyGlobalAtomicPointer(call->getArg(0)->getType(), context);
+  if (kind == GlobalAtomicScalarKind::Unsupported ||
+      !hasExactGlobalAtomicSignature(callee, *spec, kind, context) ||
+      classifyGlobalAtomicScalar(call->getArg(1)->getType(), context) != kind)
+    return false;
+  for (const auto *declaration : callee->redecls()) {
+    const auto location = source.getSpellingLoc(declaration->getLocation());
+    if (location.isInvalid() || !source.isInSystemHeader(location)) return false;
+    const auto file = source.getFileID(location);
+    if (!cudaRuntimeApiSdkFileIds.count(file.getHashValue()) &&
+        !isOwnedCudaCompilerInput(file, getCompilerInstance())) return false;
+  }
+  const auto *owner = enclosingNvidiaFindDeviceFunction(call, context);
+  if (owner == nullptr || llvm::isa<clang::CXXMethodDecl>(owner) ||
+      !owner->getDeclContext()->getRedeclContext()->isTranslationUnit() ||
+      owner->hasAttr<clang::CUDAHostAttr>() ||
+      (!owner->hasAttr<clang::CUDADeviceAttr>() && !owner->hasAttr<clang::CUDAGlobalAttr>()) ||
+      (owner->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate &&
+       owner->getTemplatedKind() != clang::FunctionDecl::TK_FunctionTemplate))
+    return false;
+  // The primary template is admitted only for this already-resolved,
+  // nondependent call and a fixed int/uint parameter type. No dependent
+  // argument or class lookup is inferred from an observed specialization.
+  const auto *address = call->getArg(0)->IgnoreParenImpCasts();
+  bool takesAddress = false;
+  if (const auto *unary = llvm::dyn_cast<clang::UnaryOperator>(address)) {
+    if (unary->getOpcode() != clang::UO_AddrOf) return false;
+    takesAddress = true;
+    address = unary->getSubExpr()->IgnoreParenImpCasts();
+  }
+  const auto *root = llvm::dyn_cast<clang::DeclRefExpr>(address);
+  const auto *variable = root == nullptr ? nullptr :
+      llvm::dyn_cast<clang::VarDecl>(root->getDecl());
+  if (variable == nullptr || variable->getDeclContext()->getRedeclContext() !=
+          owner->getRedeclContext()) return false;
+  if (const auto *parameter = llvm::dyn_cast<clang::ParmVarDecl>(variable)) {
+    const auto type = parameter->getType();
+    if (takesAddress) {
+      if (!type->isLValueReferenceType() ||
+          classifyGlobalAtomicScalar(type->getPointeeType(), context) != kind)
+        return false;
+    } else if (classifyGlobalAtomicPointer(type, context) != kind) {
+      return false;
+    }
+  } else if (!takesAddress || !variable->hasAttr<clang::CUDASharedAttr>() ||
+             variable->hasAttr<clang::CUDAConstantAttr>() ||
+             classifyGlobalAtomicScalar(variable->getType(), context) != kind) {
+    return false;
+  }
+  // Preserve the actual GM/UB address. In particular, a scalar reference
+  // parameter does not establish GM, so no explicit address-space cast occurs.
+  const auto *reference = llvm::dyn_cast<clang::DeclRefExpr>(call->getCallee()->IgnoreParenImpCasts());
+  if (reference == nullptr || reference->hasQualifier() ||
+      reference->getDecl()->getCanonicalDecl() != callee->getCanonicalDecl()) return false;
+  const auto begin = call->getBeginLoc(), last = call->getEndLoc();
+  const auto name = reference->getLocation();
+  if (begin.isInvalid() || last.isInvalid() || name.isInvalid() ||
+      begin.isMacroID() || last.isMacroID() || name.isMacroID() ||
+      !source.isWrittenInMainFile(begin) || !source.isWrittenInMainFile(last) ||
+      !source.isWrittenInMainFile(name)) return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto end = clang::Lexer::getLocForEndOfToken(last, 0, source, options);
+  const auto nameEnd = clang::Lexer::getLocForEndOfToken(name, 0, source, options);
+  if (end.isInvalid() || nameEnd.isInvalid()) return false;
+  const auto file = source.getFileID(begin);
+  const unsigned first = source.getFileOffset(begin), limit = source.getFileOffset(end);
+  for (const auto &macro : cudaLaneIdMacroRanges)
+    if (macro.file == file && first < macro.endOffset && macro.beginOffset < limit)
+      return false;
+  const auto spelling = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(name, name), source, options);
+  if (spelling != "atomicExch") return false;
+  const auto offset = source.getFileOffset(name);
+  if (!rewrittenGlobalAtomicOffsets.insert(offset).second) return true;
+  if (!insertSemanticReplacement(ct::Replacement(source, name, spelling.size(),
+          "::ascify::atomic_exch_generic"), clang::FullSourceLoc(name, source), name, nameEnd)) {
+    rewrittenGlobalAtomicOffsets.erase(offset);
+    return false;
+  }
+  needsCudaCompatHeader = true;
+  static const dppCounter counter = {
+      "CUDA generic exchange", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(counter, "SDK int/uint generic atomicExch");
+  return true;
+}
+
 bool AscifyAction::rewriteProvenGenericAtomicAddCall(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
@@ -10064,7 +10164,8 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
         !rewriteProvenKernelAttributeCall(Result) &&
         !preserveCudaIntegerIntrinsicArgumentConversion(Result) &&
         !rewriteProvenGlobalAtomicCall(Result) &&
-        !rewriteProvenGenericAtomicAddCall(Result))
+        !rewriteProvenGenericAtomicAddCall(Result) &&
+        !rewriteProvenGenericAtomicExchCall(Result))
       (void)rewriteProvenDeviceMemoryCall(Result);
     return;
   }

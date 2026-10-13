@@ -229,6 +229,7 @@
     "atomic_and_global",
     "atomic_cas_global",
     "atomic_dec_global",
+    "atomic_exch_generic",
     "atomic_exch_global",
     "atomic_flag",
     "atomic_inc_global",

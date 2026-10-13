@@ -256,6 +256,8 @@ run_check "quoted frozen sample-helper transaction ownership" \
   "$python" -B "$rewrite_dir/check_quoted_sample_helper.py"
 run_check "resolved device float frexp overload boundary" \
   "$python" -B "$rewrite_dir/check_float_frexp_conversion.py"
+run_check "resolved generic integer atomic exchange boundary" \
+  "$python" -B "$rewrite_dir/check_generic_exch_conversion.py"
 run_check "parent source macro and declaration context boundary" \
   "$python" -B "$rewrite_dir/check_parent_source_context.py"
 run_check "private device copy AST admission and refusal boundaries" \

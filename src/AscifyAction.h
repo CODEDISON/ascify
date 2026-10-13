@@ -278,6 +278,7 @@ public:
   bool preserveHostStandardMathCall(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaFloatFrexp(const mat::MatchFinder::MatchResult &Result);
   std::set<unsigned> rewrittenCudaFloatFrexpOffsets;
+  bool rewriteProvenGenericAtomicExchCall(const clang::ast_matchers::MatchFinder::MatchResult &Result);
   bool rewriteProvenGenericAtomicAddCall(
       const mat::MatchFinder::MatchResult &Result);
   bool rewriteProvenGlobalAtomicCall(
