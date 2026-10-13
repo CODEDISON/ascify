@@ -23,6 +23,7 @@ THE SOFTWARE.
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <iterator>
 #include <string>
 #include <utility>
@@ -36,6 +37,7 @@ THE SOFTWARE.
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/TypeLoc.h"
 #include "clang/AST/Stmt.h"
+#include "clang/AST/StmtOpenMP.h"
 #include "clang/Basic/FileManager.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/SourceManager.h"
@@ -1541,6 +1543,73 @@ static bool physicalSourceFileMatches(llvm::StringRef path,
   }
   const auto contents = source.getFileManager().getBufferForFile(path);
   return contents && (*contents)->getBuffer() == (*physical)->getBuffer();
+}
+
+static unsigned physicalLineBegin(llvm::StringRef contents, unsigned offset) {
+  while (offset > 0 && contents[offset - 1] != '\n' &&
+         contents[offset - 1] != '\r')
+    --offset;
+  return offset;
+}
+
+static bool hasExactDirectiveTokens(
+    llvm::StringRef line, std::initializer_list<llvm::StringRef> expected) {
+  const auto tokens = directPragmaTokens(line);
+  if (tokens.size() != expected.size())
+    return false;
+  size_t index = 0;
+  for (const auto spelling : expected)
+    if (tokens[index++].spelling != spelling)
+      return false;
+  return true;
+}
+
+// An include-search path or system_header pragma cannot own an OpenMP header.
+// This optional role is the actual header of the toolchain used to build this
+// converter, with an independently reviewed complete LLVM23 byte identity.
+// Installed builds that no longer have that toolchain fail closed here.
+static bool isFrozenNativeOpenMPHeader(clang::SourceManager &source,
+                                      clang::FileID file) {
+#ifdef ASCIFY_CLANG_RESOURCE_BUILD_DIR
+  if (file.isInvalid())
+    return false;
+  const auto start = source.getLocForStartOfFile(file);
+  const auto path = source.getFilename(start);
+  const auto *entry = source.getFileEntryForID(file);
+  llvm::SmallString<256> owned(ASCIFY_CLANG_RESOURCE_BUILD_DIR);
+  llvm::sys::path::append(owned, "include", "omp.h");
+  if (entry == nullptr || llvm::sys::path::filename(path) != "omp.h" ||
+      !physicalFileIdentityMatches(owned, *entry) ||
+      !physicalSourceFileMatches(path, *entry, source))
+    return false;
+  bool invalid = false;
+  const auto contents = source.getBufferData(file, &invalid);
+  if (invalid || contents.size() != 27483 ||
+      contextualInputSha256(contents) !=
+          "4066c7a384a8c9a8a241287db0e2625216746da831c61083124d11ae203ab66f")
+    return false;
+  const auto include = source.getIncludeLoc(file);
+  if (include.isInvalid() || include.isMacroID() ||
+      !source.isWrittenInMainFile(include))
+    return false;
+  const auto main = source.getBufferData(source.getMainFileID(), &invalid);
+  if (invalid)
+    return false;
+  const unsigned begin = physicalLineBegin(main, source.getFileOffset(include));
+  const auto end = main.find_first_of("\r\n", begin);
+  return hasExactDirectiveTokens(main.slice(begin, end),
+                                {"#", "include", "<", "omp", ".", "h", ">"});
+#else
+  return false;
+#endif
+}
+
+static bool isFrozenOpenMPVariantPragma(llvm::StringRef line) {
+  return hasExactDirectiveTokens(line, {"#", "pragma", "omp", "end", "declare", "variant"}) ||
+      hasExactDirectiveTokens(line, {"#", "pragma", "omp", "begin", "declare", "variant", "match",
+          "(", "device", "=", "{", "kind", "(", "host", ")", "}", ")"}) ||
+      hasExactDirectiveTokens(line, {"#", "pragma", "omp", "begin", "declare", "variant", "match",
+          "(", "device", "=", "{", "kind", "(", "nohost", ")", "}", ")"});
 }
 
 // A caller-selected ResourceDir is an include-search setting, not an owner
@@ -3964,6 +4033,50 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
   return visitor.hasConflict() || compatNamespaceConflict;
 }
 
+void AscifyAction::proveNvidiaSampleOpenMPParallelPragmas() {
+  if (nvidiaSampleOpenMPParallelPragmaLines.empty())
+    return;
+  auto &context = getCompilerInstance().getASTContext();
+  auto &source = getCompilerInstance().getSourceManager();
+  auto pending = nvidiaSampleOpenMPParallelPragmaLines;
+  class Visitor : public clang::RecursiveASTVisitor<Visitor> {
+  public:
+    Visitor(clang::ASTContext &context, clang::SourceManager &source,
+            std::set<unsigned> &pending)
+        : context(context), source(source), pending(pending) {}
+    bool VisitOMPParallelDirective(clang::OMPParallelDirective *directive) {
+      const auto begin = directive->getBeginLoc();
+      const auto end = directive->getEndLoc();
+      if (directive->getNumClauses() != 0 || begin.isInvalid() ||
+          begin.isMacroID() || end.isInvalid() || end.isMacroID() ||
+          !source.isWrittenInMainFile(begin) ||
+          !source.isWrittenInMainFile(end))
+        return true;
+      const auto *owner = enclosingNvidiaFindDeviceFunction(directive, context);
+      if (owner == nullptr || !owner->hasBody() ||
+          owner->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+          owner->isDependentContext() ||
+          owner->hasAttr<clang::CUDADeviceAttr>() ||
+          owner->hasAttr<clang::CUDAGlobalAttr>())
+        return true;
+      bool invalid = false;
+      const auto contents = source.getBufferData(source.getMainFileID(), &invalid);
+      if (!invalid)
+        pending.erase(physicalLineBegin(contents, source.getFileOffset(begin)));
+      return true;
+    }
+    clang::ASTContext &context;
+    clang::SourceManager &source;
+    std::set<unsigned> &pending;
+  } visitor(context, source, pending);
+  visitor.TraverseDecl(context.getTranslationUnitDecl());
+  if (!pending.empty()) {
+    nvidiaSampleHelperUnsupportedMacroUse = true;
+    llvm::errs() << "Ascify NVIDIA sample-helper closure: unproved OpenMP "
+                    "parallel owner keeps all helper edits\n";
+  }
+}
+
 bool AscifyAction::RewriteToken(clang::Lexer &, clang::Token &tok) {
   auditRawNvidiaSampleHelperToken(tok);
   // AST semantic transformations own their complete source span.  The raw
@@ -4608,6 +4721,20 @@ void AscifyAction::PragmaDirective(
     return;
   }
   std::string pragmaOperation;
+  const unsigned lineBegin = physicalLineBegin(buffer, offset);
+  const auto lineEnd = buffer.find_first_of("\r\n", lineBegin);
+  const auto physicalLine = buffer.slice(lineBegin, lineEnd);
+  if (getCompilerInstance().getLangOpts().OpenMP && !Loc.isMacroID()) {
+    if (sourceManager.isWrittenInMainFile(fileLocation) &&
+        hasExactDirectiveTokens(physicalLine,
+                                {"#", "pragma", "omp", "parallel"})) {
+      nvidiaSampleOpenMPParallelPragmaLines.insert(lineBegin);
+      return;
+    }
+    if (isFrozenOpenMPVariantPragma(physicalLine) &&
+        isFrozenNativeOpenMPHeader(sourceManager, file))
+      return;
+  }
   if (!isDirectlyAllowedHashPragma(
           line, pragmaOperation,
           locationComesFromInitiallyTrustedSystemFile(
@@ -9678,6 +9805,7 @@ void AscifyAction::ExecuteAction() {
       hasInputTopLevelAscifyDeclaration(
           getCompilerInstance().getASTContext(), SM);
   if (!nvidiaSampleHelperIncludes.empty()) {
+    proveNvidiaSampleOpenMPParallelPragmas();
     nvidiaSampleHelperUnsupportedDeclarationUse =
         hasUnsupportedNvidiaSampleHelperDeclarationUse();
     rewriteProvenNvidiaSampleHelperMacros();

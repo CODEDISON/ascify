@@ -205,6 +205,14 @@ run_check "inactive sample-helper configuration and transaction boundaries" \
     --clang "${CLANG:-clang}" \
     --evidence-dir "$work_dir/inactive_sample_helper"
 
+run_check "OpenMP sample-helper pragma and compiler-header boundaries" \
+  "$python" -B "$rewrite_dir/check_openmp_sample_helper.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang}" \
+    --evidence-dir "$work_dir/openmp_sample_helper"
+
 run_check "CUDA lane ID instruction boundaries" \
   "$python" -B "$rewrite_dir/check_lane_id_conversion.py" \
     --binary "$ASCIFY_BINARY" \

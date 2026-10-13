@@ -106,6 +106,23 @@ retain the transaction. `_Pragma`/`__pragma` requires a confirmed diagnostic ope
 trusted system file. The [helper tests](../tests/rewrite/check_sample_helper_compat.sh) cover exact
 accepted forms, macro-state observations, spoofed spellings and unsafe provider mutations.
 
+With actual OpenMP frontend parsing enabled, a literal main-file `#pragma omp parallel`
+without clauses may coexist with the helper transaction. Its real AST must be a parallel
+directive in an ordinary non-template, non-lambda host function. The pragma and captured
+body remain in the output; all existing runtime-status, macro observation and transaction
+proofs still apply. Other OpenMP directives, clauses and macro-generated forms remain
+outside this support domain. The target compiler must also enable real OpenMP code
+generation and link an appropriate host runtime; conversion alone does not verify that ABI.
+
+The exact host/nohost declare-variant pairs in the reviewed LLVM23 `omp.h` are accepted
+only for that complete byte-frozen compiler header, included directly as `<omp.h>` from
+the physical main file. Its physical file identity must match the OpenMP header under the
+converter's build-time Clang resource directory. Copies, altered headers, remapped files,
+transitive/quoted/macro include spellings and system-header promotions cannot acquire this
+role. The original build toolchain header must still be available; installed deployments
+without it conservatively retain the helper transaction. This narrow header role does not
+admit user declare-variant regions or modify/install an OpenMP SDK or runtime.
+
 ## Include replacement and publication
 
 There must be exactly one removable, direct main-file include using the literal `helper_cuda.h`

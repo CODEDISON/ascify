@@ -152,6 +152,7 @@ private:
   bool nvidiaSampleHelperRewriteFailed = false;
   bool nvidiaSampleHelperOutputMacroEverDefined = false;
   bool nvidiaSampleHelperPendingMacroGeneratedPragma = false;
+  std::set<unsigned> nvidiaSampleOpenMPParallelPragmaLines;
   bool ascifyCudaCompatDeclarationConflict = false;
   bool cudaDeviceSymbolGeneratedNameConflict = false;
   bool ascifyCudaCompatIncludeConflict = false;
@@ -223,6 +224,7 @@ private:
   bool isInSemanticRewriteRange(clang::SourceLocation loc);
   bool isInNvidiaSampleHelperMacroRange(clang::SourceLocation loc);
   bool hasUnsupportedNvidiaSampleHelperDeclarationUse();
+  void proveNvidiaSampleOpenMPParallelPragmas();
   void rewriteProvenNvidiaSampleHelperMacros();
   void auditRawNvidiaSampleHelperToken(const clang::Token &token);
   void recordInactiveNvidiaSampleHelperBranch(
