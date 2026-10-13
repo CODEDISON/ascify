@@ -14,6 +14,16 @@ class-scope friends, inherited attributes and template specializations are
 excluded. User or command-line modification of `__CUDACC__`, including a later
 modification in the same translation unit, retains all such guards.
 
+A guard remains unchanged when the canonical return or parameter types contain
+`double` or `long double`, including through pointers, references, arrays,
+function pointers, member pointers, vectors, complex or atomic element types.
+This excludes known FP64 interfaces from the newly opened device attributes.
+Typedef spelling cannot bypass it. An unused or host-used double function can
+remain host code; a genuine device caller still requires target diagnostics.
+No function is deleted and no floating-point expression is changed. This is not
+a reachability proof or full body/type capability analysis: record fields,
+dependent template bodies and other unsupported operations are not inferred.
+
 An admitted opener becomes
 `#if 1 /* Ascify: proven CUDA host/device attributes */`. The closing directive,
 attributes and function body stay in place; the existing device-attribute

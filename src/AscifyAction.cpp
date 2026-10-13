@@ -7373,6 +7373,41 @@ void AscifyAction::proveCudaAttributeGuard(
       function->getLexicalDeclContext()->isRecord() ||
       function->getTemplateSpecializationKind() != clang::TSK_Undeclared ||
       function->hasAttr<clang::CUDAGlobalAttr>()) return;
+  // Opening an inactive target guard must not manufacture a device FP64
+  // interface. This is a known-signature exclusion, not reachability analysis
+  // or a proof that arbitrary function bodies are supported by the target.
+  std::set<const clang::Type *> visitedTypes;
+  std::function<bool(clang::QualType)> hasKnownFp64 =
+      [&](clang::QualType original) -> bool {
+    if (original.isNull()) return false;
+    const auto type = original.getCanonicalType();
+    if (!visitedTypes.insert(type.getTypePtr()).second) return false;
+    if (type->isSpecificBuiltinType(clang::BuiltinType::Double) ||
+        type->isSpecificBuiltinType(clang::BuiltinType::LongDouble)) return true;
+    if (const auto *pointer = type->getAs<clang::PointerType>())
+      return hasKnownFp64(pointer->getPointeeType());
+    if (const auto *reference = type->getAs<clang::ReferenceType>())
+      return hasKnownFp64(reference->getPointeeType());
+    if (const auto *array = result.Context->getAsArrayType(type))
+      return hasKnownFp64(array->getElementType());
+    if (const auto *vector = type->getAs<clang::VectorType>())
+      return hasKnownFp64(vector->getElementType());
+    if (const auto *complex = type->getAs<clang::ComplexType>())
+      return hasKnownFp64(complex->getElementType());
+    if (const auto *atomic = type->getAs<clang::AtomicType>())
+      return hasKnownFp64(atomic->getValueType());
+    if (const auto *member = type->getAs<clang::MemberPointerType>())
+      return hasKnownFp64(member->getPointeeType());
+    if (const auto *prototype = type->getAs<clang::FunctionProtoType>()) {
+      if (hasKnownFp64(prototype->getReturnType())) return true;
+      for (const auto parameter : prototype->param_types())
+        if (hasKnownFp64(parameter)) return true;
+    }
+    return false;
+  };
+  if (hasKnownFp64(function->getReturnType())) return;
+  for (const auto *parameter : function->parameters())
+    if (hasKnownFp64(parameter->getType())) return;
   const auto *host = function->getAttr<clang::CUDAHostAttr>();
   const auto *device = function->getAttr<clang::CUDADeviceAttr>();
   if (host == nullptr || device == nullptr || host->isInherited() || device->isInherited()) return;

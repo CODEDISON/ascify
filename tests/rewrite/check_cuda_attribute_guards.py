@@ -28,6 +28,22 @@ def main():
         ('primary_template', 'template<class T>\n'+GUARD+'inline T function(T x) { return x < T(0) ? T(-1) : T(1); }\n', 1, [], False),
         ('two_guards', body+body.replace('function', 'second'), 2, [], False),
         ('local_header', body, 1, [], True),
+        ('double_return', GUARD+'inline double function(float x) { return x; }\n', 0, [], False),
+        ('double_parameter', GUARD+'inline float function(double x) { return float(x); }\n', 0, [], False),
+        ('double_reference', GUARD+'inline double function(const double& x) { return x < 0.0 ? -1.0 : 1.0; }\n', 0, [], False),
+        ('double_pointer', GUARD+'inline float function(const double* x) { return float(*x); }\n', 0, [], False),
+        ('double_alias', 'using Value = double;\n'+GUARD+'inline Value function(const Value& x) { return x; }\n', 0, [], False),
+        ('double_array', GUARD+'inline float function(const double (&x)[2]) { return float(x[0]); }\n', 0, [], False),
+        ('double_callback', GUARD+'inline void function(double (*callback)(float)) { (void)callback; }\n', 0, [], False),
+        ('double_callback_argument', GUARD+'inline void function(float (*callback)(double)) { (void)callback; }\n', 0, [], False),
+        ('double_member_pointer', 'struct Value { double member; };\n'+GUARD+'inline void function(double Value::* p) { (void)p; }\n', 0, [], False),
+        ('double_vector', 'using Value = double __attribute__((ext_vector_type(2)));\n'+GUARD+'inline Value function(Value x) { return x; }\n', 0, [], False),
+        ('double_complex', GUARD+'inline __complex__ double function(__complex__ double x) { return x; }\n', 0, [], False),
+        ('long_double', GUARD+'inline long double function(long double x) { return x; }\n', 0, [], False),
+        ('double_host_use', GUARD+'inline double function(const double& x) { return x < 0.0 ? -1.0 : 1.0; }\nint main() { return function(-2.0) == -1.0 ? 0 : 1; }\n', 0, [], False),
+        ('double_device_use', GUARD+'inline double function(const double& x) { return x < 0.0 ? -1.0 : 1.0; }\n__global__ void kernel(float* out) { out[0] = float(function(-2.0)); }\n', 0, [], False),
+        ('float_and_double', body+GUARD+'inline double other(double x) { return x; }\n', 1, [], False),
+        ('double_then_float', GUARD+'inline double other(double x) { return x; }\n'+body, 1, [], False),
         ('extra_body_keyword', body.replace('__host__ __device__', 'inline __host__ __device__').replace('inline float', 'float'), 0, [], False),
         ('extra_attribute', body.replace('__host__ __device__', '__host__ __device__ __noinline__'), 0, [], False),
         ('device_only', body.replace('__host__ ', ''), 0, [], False),
@@ -83,13 +99,18 @@ def main():
             generated = generated_files[0].read_text()
             assert generated.count(MARKER) == count, label+'\n'+generated+'\n'+result.stderr
             # Existing raw translation retains excluded conditional bodies.
-            expected = text if label == 'inactive' else text.replace('__device__', '__aicore__')
+            expected = text if label == 'inactive' else text.replace('__device__', '__aicore__').replace('__global__', 'ASCIFY_GLOBAL')
             if count:
-                expected = expected.replace('#ifdef __CUDACC__', MARKER)
+                if label == 'double_then_float':
+                    left, opener, right = expected.rpartition('#ifdef __CUDACC__')
+                    assert opener
+                    expected = left + MARKER + right
+                else:
+                    expected = expected.replace('#ifdef __CUDACC__', MARKER, count)
             assert expected in generated, label+': body or unrelated directive changed\n'+generated
             assert {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs} == before
             print(label+': attribute guards='+str(count))
-    print('CUDA attribute guards: 28 source-valid cases; '+('source syntax only' if args.syntax_only else '6 admitted, 22 retained'))
+    print('CUDA attribute guards: 44 source-valid cases; '+('source syntax only' if args.syntax_only else '8 admitted, 36 retained'))
 
 
 if __name__ == '__main__':
