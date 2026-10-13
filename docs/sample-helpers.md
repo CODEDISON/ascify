@@ -67,6 +67,18 @@ visible logical device and binds device zero; the active-definition, provenance 
 continue to apply. The [v13.4 fixture](../tests/rewrite/fixtures/nvidia_samples_v13_4/README.md)
 records the pinned source and original license.
 
+The v13.0 profile at commit `3f1c50965017932fc81e6d94a3fc9e04c105b312`
+also admits its exact 14,875-byte `helper_string.h` (SHA-256
+`616ac8b2588a6e73aed207f85faf0da5e617404390df1790f6637b1042dbcc94`).
+Its other four helper files equal the v13.3 fixture. The differences are only
+`sdkFindFilePath` search strings: the older `Samples/` layout and absence of
+CUDA Tile paths. The generated source retains the original `helper_string.h`
+include, so those search paths and portable helper functions keep their original
+behavior. No basename-only or changed-header admission is added. The
+[v13.0 fixture](../tests/rewrite/fixtures/nvidia_samples_v13_0/README.md)
+and focused identity matrix cover this profile separately from actual sample
+compilation or execution.
+
 Trust in system files is recorded at their first physical-file entry. Later `system_header` pragmas,
 re-entry, forged `#line` filenames, remapped provider files and command-line definitions cannot acquire
 that provenance. The configured converter, Clang resources, CUDA SDK, sysroot and system include paths

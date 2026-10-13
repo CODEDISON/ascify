@@ -205,6 +205,14 @@ run_check "inactive sample-helper configuration and transaction boundaries" \
     --clang "${CLANG:-clang}" \
     --evidence-dir "$work_dir/inactive_sample_helper"
 
+run_check "CUDA Samples v13.0 exact helper dependency profile" \
+  "$python" -B "$rewrite_dir/check_sample_helper_v13_0.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang}" \
+    --evidence-dir "$work_dir/sample_helper_v13_0"
+
 run_check "OpenMP sample-helper pragma and compiler-header boundaries" \
   "$python" -B "$rewrite_dir/check_openmp_sample_helper.py" \
     --binary "$ASCIFY_BINARY" \

@@ -232,6 +232,14 @@ unsigned frozenNvidiaSampleHelperFileRole(
             "0494246768a4e3dbfcd688d79f4abad1fa39fc9f2d9dc3264a894f1c96d3785d"))
       return FrozenOfficialNvidiaSampleHelperCuda;
   } else if (filename == "helper_string.h") {
+    // Reviewed v13.0 commit 3f1c50965017932fc81e6d94a3fc9e04c105b312:
+    // sdkFindFilePath retains the original Samples/ search paths. This header
+    // stays included in the generated TU; only its exact provenance is added.
+    if (contents.size() == 14875 &&
+        sha256Equals(
+            contents,
+            "616ac8b2588a6e73aed207f85faf0da5e617404390df1790f6637b1042dbcc94"))
+      return FrozenOfficialNvidiaSampleHelperString;
     if (contents.size() == 15079 &&
         sha256Equals(
             contents,
