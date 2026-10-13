@@ -82,6 +82,7 @@ const StringRef sCudaHalf2Operator = "cudaHalf2Operator";
 const StringRef sFrontendHostMath = "frontendHostMath";
 const StringRef sProvenGlobalAtomicCall = "provenGlobalAtomicCall";
 const StringRef sCudaLaneIdAsm = "cudaLaneIdAsm";
+const StringRef sCudaAttributeGuard = "cudaAttributeGuard";
 const StringRef sCanonicalWarpAddReduction = "canonicalWarpAddReduction";
 const StringRef sCanonicalBinaryReducer = "canonicalBinaryReducer";
 
@@ -7264,6 +7265,9 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
       mat::stmt(mat::isExpansionInMainFile(), mat::asmStmt())
           .bind(sCudaLaneIdAsm),
       this);
+  Finder->addMatcher(
+      mat::functionDecl(mat::isExpansionInMainFile()).bind(sCudaAttributeGuard),
+      this);
   if (TargetPolicy == "dav-c310-vec" && SimtMathMode == "fast") {
     // Keep the matcher broad and perform the semantic proof in the callback.
     // This prevents source-name coupling and makes every failed proof a
@@ -7282,6 +7286,145 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
   return Finder->newASTConsumer();
 }
 
+void AscifyAction::recordCudaAttributeGuard(
+    clang::SourceLocation location, const clang::Token &name,
+    const clang::MacroDefinition &definition) {
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  auto &preprocessor = compiler.getPreprocessor();
+  const auto *macro = definition.getMacroInfo();
+  const bool compilerDefinition = macro != nullptr &&
+      ((source.getFileID(macro->getDefinitionLoc()) == preprocessor.getPredefinesFileID() &&
+        source.isWrittenInBuiltinFile(macro->getDefinitionLoc())) ||
+       isOwnedCudaCompilerInput(source.getFileID(macro->getDefinitionLoc()), compiler));
+  if (TargetPolicy != "dav-c310-vec" || AscifyAMAP ||
+      compiler.getPreprocessorOpts().RetainExcludedConditionalBlocks ||
+      cudaAttributeControlModified || !location.isFileID() ||
+      !source.isWrittenInMainFile(location) ||
+      name.getIdentifierInfo() == nullptr ||
+      name.getIdentifierInfo()->getName() != "__CUDACC__" || macro == nullptr ||
+      !compilerDefinition)
+    return;
+  bool invalid = false;
+  const auto file = source.getFileID(location);
+  const auto buffer = source.getBufferData(file, &invalid);
+  const unsigned offset = source.getFileOffset(location);
+  if (invalid || offset >= buffer.size()) return;
+  const auto newline = buffer.rfind('\n', offset);
+  const auto lineBegin = newline == llvm::StringRef::npos ? 0 : newline + 1;
+  const auto lineEnd = buffer.find('\n', offset);
+  if (lineEnd == llvm::StringRef::npos) return;
+  auto line = buffer.slice(lineBegin, lineEnd).trim(" \t");
+  if (!line.consume_front("#")) return;
+  line = line.ltrim(" \t");
+  if (!line.consume_front("ifdef") || line.empty() ||
+      (line.front() != ' ' && line.front() != '\t') ||
+      line.trim(" \t") != "__CUDACC__") return;
+  const auto start = source.getLocForStartOfFile(file);
+  clang::Lexer lexer(start, compiler.getLangOpts(), buffer.begin(),
+                     buffer.begin() + lineEnd + 1, buffer.end());
+  clang::Token tokens[4];
+  for (auto &token : tokens) lexer.LexFromRawLexer(token);
+  if (!tokens[0].isAnyIdentifier() || !tokens[1].isAnyIdentifier() ||
+      !tokens[2].is(clang::tok::hash) || !tokens[2].isAtStartOfLine() ||
+      !tokens[3].isAnyIdentifier()) return;
+  auto spelling = [&](const clang::Token &token) {
+    return clang::Lexer::getSpelling(token, source, compiler.getLangOpts());
+  };
+  if (spelling(tokens[0]) != "__host__" || spelling(tokens[1]) != "__device__" ||
+      spelling(tokens[3]) != "endif") return;
+  const unsigned closingOffset = source.getFileOffset(tokens[2].getLocation());
+  const auto closingEnd = buffer.find('\n', closingOffset);
+  if (closingEnd == llvm::StringRef::npos ||
+      buffer.slice(closingOffset, closingEnd).trim(" \t") != "#endif") return;
+  // Exclude escaped physical lines and alternative directive spellings. The
+  // raw lexer otherwise permits ordinary whitespace and comments in the body.
+  const auto physical = buffer.slice(lineBegin, closingEnd);
+  if (physical.contains('\\') || physical.contains('\r') ||
+      physical.contains("??") || physical.contains("%:")) return;
+  const unsigned hash = lineBegin + buffer.slice(lineBegin, lineEnd).find('#');
+  cudaAttributeGuards.push_back({start.getLocWithOffset(hash),
+      start.getLocWithOffset(lineEnd), tokens[0].getLocation(),
+      tokens[1].getLocation(), false});
+}
+
+void AscifyAction::proveCudaAttributeGuard(
+    const mat::MatchFinder::MatchResult &result) {
+  const auto *function = result.Nodes.getNodeAs<clang::FunctionDecl>(sCudaAttributeGuard);
+  if (function == nullptr || !function->isThisDeclarationADefinition() ||
+      llvm::isa<clang::CXXMethodDecl>(function) ||
+      function->getLexicalDeclContext()->isRecord() ||
+      function->getTemplateSpecializationKind() != clang::TSK_Undeclared ||
+      function->hasAttr<clang::CUDAGlobalAttr>()) return;
+  const auto *host = function->getAttr<clang::CUDAHostAttr>();
+  const auto *device = function->getAttr<clang::CUDADeviceAttr>();
+  if (host == nullptr || device == nullptr || host->isInherited() || device->isInherited()) return;
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  auto &preprocessor = compiler.getPreprocessor();
+  auto ownedAttribute = [&](llvm::StringRef name, clang::SourceLocation location) {
+    std::set<const clang::IdentifierInfo *> seen;
+    std::vector<const clang::IdentifierInfo *> pending = {
+        preprocessor.getIdentifierInfo(name)};
+    while (!pending.empty()) {
+      const auto *identifier = pending.back();
+      pending.pop_back();
+      if (!seen.insert(identifier).second) continue;
+      if (seen.size() > 16) return false;
+      const auto *info = preprocessor.getMacroDefinitionAtLoc(
+          identifier, location).getMacroInfo();
+      if (info == nullptr) return false;
+      const auto file = source.getFileID(source.getSpellingLoc(info->getDefinitionLoc()));
+      if (!file.isValid() ||
+          (!cudaRuntimeApiSdkFileIds.count(file.getHashValue()) &&
+           !isOwnedCudaCompilerInput(file, compiler))) return false;
+      for (const auto &token : info->tokens()) {
+        if (token.is(clang::tok::hash) || token.is(clang::tok::hashhash)) return false;
+        const auto *dependency = token.getIdentifierInfo();
+        if (dependency == nullptr) continue;
+        bool parameter = false;
+        if (info->isFunctionLike())
+          for (const auto *argument : info->params()) parameter |= argument == dependency;
+        if (!parameter && preprocessor.getMacroDefinitionAtLoc(dependency, location).getMacroInfo())
+          pending.push_back(dependency);
+      }
+    }
+    return true;
+  };
+  for (auto &guard : cudaAttributeGuards) {
+    if (source.getExpansionLoc(host->getLocation()) != guard.host ||
+        source.getExpansionLoc(device->getLocation()) != guard.device ||
+        !ownedAttribute("__host__", guard.host) ||
+        !ownedAttribute("__device__", guard.device)) continue;
+    guard.functionProven = true;
+  }
+}
+
+void AscifyAction::finalizeCudaAttributeGuards() {
+  if (cudaAttributeControlModified) return;
+  auto &source = getCompilerInstance().getSourceManager();
+  ct::Replacements staged = *replacements;
+  std::vector<SemanticRewriteRange> admitted;
+  for (const auto &guard : cudaAttributeGuards) {
+    if (!guard.functionProven) continue;
+    const auto file = source.getFileID(guard.begin);
+    const unsigned begin = source.getFileOffset(guard.begin);
+    const unsigned end = source.getFileOffset(guard.end);
+    for (const auto &range : SemanticRewriteRanges)
+      if (range.file == file && begin < range.endOffset && range.beginOffset < end)
+        return;
+    const ct::Replacement replacement(source, guard.begin, end - begin,
+        "#if 1 /* Ascify: proven CUDA host/device attributes */");
+    std::string error;
+    if (!llcompat::insertReplacement(staged, replacement, &error)) return;
+    admitted.push_back({file, begin, end});
+  }
+  if (admitted.empty()) return;
+  *replacements = std::move(staged);
+  SemanticRewriteRanges.insert(SemanticRewriteRanges.end(), admitted.begin(), admitted.end());
+  llvm::errs() << "Ascify attribute-only CUDA guards: " << admitted.size() << "\n";
+}
+
 void AscifyAction::Ifndef(clang::SourceLocation Loc, const clang::Token &MacroNameTok, const clang::MacroDefinition &MD) {
   ConditionalDirectiveEntered();
   auditExternalNvidiaSampleHelperPreprocessorUse(
@@ -7293,6 +7436,7 @@ void AscifyAction::Ifndef(clang::SourceLocation Loc, const clang::Token &MacroNa
 void AscifyAction::Ifdef(clang::SourceLocation Loc,
                          const clang::Token &MacroNameTok,
                          const clang::MacroDefinition &MD) {
+  recordCudaAttributeGuard(Loc, MacroNameTok, MD);
   recordInactiveNvidiaSampleHelperBranch(Loc, MacroNameTok, MD);
   ConditionalDirectiveEntered();
   auditExternalNvidiaSampleHelperPreprocessorUse(
@@ -7341,6 +7485,14 @@ void AscifyAction::MacroUndefined(
     const clang::Token &MacroNameTok,
     const clang::MacroDefinition &MD) {
   if (MacroNameTok.getIdentifierInfo() != nullptr &&
+      MacroNameTok.getIdentifierInfo()->getName() == "__CUDACC__") {
+    auto &compiler = getCompilerInstance();
+    auto &source = compiler.getSourceManager();
+    if (!isOwnedCudaCompilerInput(source.getFileID(
+            source.getSpellingLoc(MacroNameTok.getLocation())), compiler))
+      cudaAttributeControlModified = true;
+  }
+  if (MacroNameTok.getIdentifierInfo() != nullptr &&
       MacroNameTok.getIdentifierInfo()->getName() == "__STRICT_ANSI__")
     cudaRuntimeApiStrictControlModified = true;
   if (MacroNameTok.getIdentifierInfo() != nullptr &&
@@ -7367,6 +7519,11 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
       getCompilerInstance().getSourceManager();
   const auto definitionFile = sourceManager.getFileID(
       sourceManager.getSpellingLoc(MacroNameTok.getLocation()));
+  if (name == "__CUDACC__" &&
+      (definitionFile != getCompilerInstance().getPreprocessor().getPredefinesFileID() ||
+       !sourceManager.isWrittenInBuiltinFile(MacroNameTok.getLocation())) &&
+      !isOwnedCudaCompilerInput(definitionFile, getCompilerInstance()))
+    cudaAttributeControlModified = true;
   if (name == "__STRICT_ANSI__" &&
       (definitionFile != getCompilerInstance().getPreprocessor().getPredefinesFileID() ||
        !sourceManager.isWrittenInBuiltinFile(MacroNameTok.getLocation())))
@@ -9423,6 +9580,7 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
 void AscifyAction::EndSourceFileAction() {
   if (cudaRuntimeApiBoundaryFailed)
     return;
+  finalizeCudaAttributeGuards();
   if (localHeaderContext != nullptr && localHeaderContext->depth == 0 &&
       localHeaderContext->plan != nullptr) {
     // References include declarations in signatures and instantiated bodies.
@@ -10134,6 +10292,10 @@ void AscifyAction::AddSkippedSourceRange(clang::SourceRange Range,
 void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
   if (davC310TargetRecipe.collect(Result))
     return;
+  if (Result.Nodes.getNodeAs<clang::FunctionDecl>(sCudaAttributeGuard) != nullptr) {
+    proveCudaAttributeGuard(Result);
+    return;
+  }
   if (Result.Nodes.getNodeAs<clang::GCCAsmStmt>(sCudaLaneIdAsm) != nullptr) {
     (void)rewriteCudaLaneIdAsm(Result);
     return;

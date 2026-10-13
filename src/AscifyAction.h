@@ -111,6 +111,15 @@ private:
   std::vector<SemanticRewriteRange> SemanticRewriteRanges;
   std::vector<SemanticRewriteRange> cudaLaneIdMacroRanges;
   std::set<unsigned> rewrittenCudaLaneIdOffsets;
+  struct CudaAttributeGuard {
+    clang::SourceLocation begin;
+    clang::SourceLocation end;
+    clang::SourceLocation host;
+    clang::SourceLocation device;
+    bool functionProven = false;
+  };
+  std::vector<CudaAttributeGuard> cudaAttributeGuards;
+  bool cudaAttributeControlModified = false;
   std::vector<SemanticRewriteRange> nvidiaSampleHelperMacroRanges;
   std::vector<NvidiaSampleHelperMacroCandidate>
       nvidiaSampleHelperMacroCandidates;
@@ -291,6 +300,11 @@ public:
       const mat::MatchFinder::MatchResult &Result);
   bool auditKernelAttributeObservations();
   bool rewriteCudaLaneIdAsm(const mat::MatchFinder::MatchResult &Result);
+  void recordCudaAttributeGuard(clang::SourceLocation location,
+                                const clang::Token &name,
+                                const clang::MacroDefinition &definition);
+  void proveCudaAttributeGuard(const mat::MatchFinder::MatchResult &result);
+  void finalizeCudaAttributeGuards();
   bool rewriteCudaSmDiagnostic(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCanonicalWarpAddReduction(
       const mat::MatchFinder::MatchResult &Result);
