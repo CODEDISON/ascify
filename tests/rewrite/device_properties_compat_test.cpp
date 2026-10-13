@@ -36,8 +36,13 @@ int main() {
   assert(ascify::cudaDeviceGetAttribute(&unavailable,
       ascify::cudaDevAttrComputeCapabilityMinor, -1) == ACL_ERROR_RT_PARAM_INVALID);
   assert(unavailable == 12345 && ascify_test_get_device_info_calls == 0);
+  // Property queries target logical Device 0 even with no bound context or
+  // another bound device; the runtime reports its own Device 0 SocName.
+  ascify_test_get_device_status = 71;
   ascify::cudaDeviceProp properties = {};
-  assert(ascify::cudaGetDeviceProperties(&properties, 2) == ACL_SUCCESS);
+  assert(ascify::cudaGetDeviceProperties(&properties, 0) == ACL_SUCCESS);
+  assert(ascify_test_get_device_calls == 0);
+  ascify_test_get_device_status = ACL_SUCCESS;
   assert(properties.multiProcessorCount == 48);
   assert(properties.totalGlobalMem == (uint64_t{1} << 40));
   assert(properties.maxThreadsPerBlock == 2048);
@@ -49,53 +54,58 @@ int main() {
     int64_t &limit = i == 0 ? ascify_test_block_limit : ascify_test_grid_limit[i - 1];
     const int64_t old = limit;
     status = 79;
-    assert(ascify::cudaGetDeviceProperties(&properties, 2) == 79);
+    assert(ascify::cudaGetDeviceProperties(&properties, 0) == 79);
     assert(std::memcmp(&properties, &saved, sizeof(properties)) == 0);
     status = ACL_SUCCESS;
     for (int64_t invalid : {int64_t{0}, int64_t{-1}, int64_t{INT_MAX} + 1}) {
       limit = invalid;
-      assert(ascify::cudaGetDeviceProperties(&properties, 2) == ACL_ERROR_FEATURE_UNSUPPORTED);
+      assert(ascify::cudaGetDeviceProperties(&properties, 0) == ACL_ERROR_FEATURE_UNSUPPORTED);
       assert(std::memcmp(&properties, &saved, sizeof(properties)) == 0);
     }
     limit = INT_MAX;
-    assert(ascify::cudaGetDeviceProperties(&properties, 2) == ACL_SUCCESS);
+    assert(ascify::cudaGetDeviceProperties(&properties, 0) == ACL_SUCCESS);
     assert((i == 0 ? properties.maxThreadsPerBlock : properties.maxGridSize[i - 1]) == INT_MAX);
     limit = old;
     properties = saved;
   }
-  assert(ascify::cudaGetDeviceProperties(nullptr, 2) == ACL_ERROR_RT_PARAM_INVALID);
+  assert(ascify::cudaGetDeviceProperties(nullptr, 0) == ACL_ERROR_RT_PARAM_INVALID);
   assert(ascify::cudaGetDeviceProperties(&properties, -1) == ACL_ERROR_RT_PARAM_INVALID);
-  assert(ascify::cudaGetDeviceProperties(&properties, 0) == ACL_ERROR_FEATURE_UNSUPPORTED);
+  for (int other : {1, 2, 3}) {
+    assert(ascify::cudaGetDeviceProperties(&properties, other) == ACL_ERROR_FEATURE_UNSUPPORTED);
+    assert(std::memcmp(&properties, &saved, sizeof(properties)) == 0);
+    assert(ascify_test_get_device_calls == 0);
+  }
   ascify_test_get_device_status = 71;
-  assert(ascify::cudaGetDeviceProperties(&properties, 2) == 71);
+  assert(ascify::cudaGetDeviceProperties(&properties, 0) == ACL_SUCCESS);
+  assert(ascify_test_get_device_calls == 0);
   ascify_test_get_device_status = ACL_SUCCESS;
   ascify_test_vector_core_info_status = 72;
-  assert(ascify::cudaGetDeviceProperties(&properties, 2) == 72);
+  assert(ascify::cudaGetDeviceProperties(&properties, 0) == 72);
   ascify_test_vector_core_info_status = ACL_SUCCESS;
   ascify_test_memory_info_status = 77;
-  assert(ascify::cudaGetDeviceProperties(&properties, 2) == 77);
+  assert(ascify::cudaGetDeviceProperties(&properties, 0) == 77);
   ascify_test_memory_info_status = ACL_SUCCESS;
   for (int64_t memory : {int64_t{0}, int64_t{-1}}) {
     ascify_test_total_global_memory = memory;
-    assert(ascify::cudaGetDeviceProperties(&properties, 2) == ACL_ERROR_FEATURE_UNSUPPORTED);
+    assert(ascify::cudaGetDeviceProperties(&properties, 0) == ACL_ERROR_FEATURE_UNSUPPORTED);
     assert(std::memcmp(&properties, &saved, sizeof(properties)) == 0);
   }
   ascify_test_total_global_memory = int64_t{1} << 40;
   for (int64_t count : {int64_t{0}, int64_t{-1}, int64_t{INT_MAX} + 1}) {
     ascify_test_vector_core_count = count;
-    assert(ascify::cudaGetDeviceProperties(&properties, 2) == ACL_ERROR_FEATURE_UNSUPPORTED);
+    assert(ascify::cudaGetDeviceProperties(&properties, 0) == ACL_ERROR_FEATURE_UNSUPPORTED);
   }
   ascify_test_vector_core_count = 48;
   ascify_test_soc_name = nullptr;
-  assert(ascify::cudaGetDeviceProperties(&properties, 2) == ACL_ERROR_FEATURE_UNSUPPORTED);
+  assert(ascify::cudaGetDeviceProperties(&properties, 0) == ACL_ERROR_FEATURE_UNSUPPORTED);
   ascify_test_soc_name = "";
-  assert(ascify::cudaGetDeviceProperties(&properties, 2) == ACL_ERROR_FEATURE_UNSUPPORTED);
+  assert(ascify::cudaGetDeviceProperties(&properties, 0) == ACL_ERROR_FEATURE_UNSUPPORTED);
   assert(std::memcmp(&properties, &saved, sizeof(properties)) == 0);
   char long_name[400];
   std::memset(long_name, 'N', sizeof(long_name));
   long_name[399] = '\0';
   ascify_test_soc_name = long_name;
-  assert(ascify::cudaGetDeviceProperties(&properties, 2) == ACL_SUCCESS);
+  assert(ascify::cudaGetDeviceProperties(&properties, 0) == ACL_SUCCESS);
   assert(std::strlen(properties.name) == 255);
   ascify::cudaFuncAttributes attributes{};
   attributes.sharedSizeBytes = 791;  // The restricted helper never claims UB metadata.

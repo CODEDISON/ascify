@@ -338,6 +338,14 @@ fails explicitly and leaves the caller's object unchanged. This also means
 older runtimes/devices without these queries cannot provide this extended
 property surface. No CUDA SM version metadata is added.
 
+Property queries support Runtime logical Device 0, including before any
+`cudaSetDevice` call. They do not require or change the caller's current device
+or context. CANN's `aclrtGetSocName` always describes Device 0; requests for a
+different device therefore return `ACL_ERROR_FEATURE_UNSUPPORTED` without
+writing the output, even if that other device is currently bound. Binding it
+temporarily would not make the name query describe it. This boundary follows
+the [CANN 9.1 name-query contract](https://www.hiascend.com/doc_center/source/zh/CANNCommunityEdition/910beta2/API/runtimeapi/aclcppdevg_03_0048.html).
+
 A restricted `cudaFuncGetAttributes` conversion can publish
 `maxThreadsPerBlock` when the CUDA SDK call names a concrete, defined,
 non-template global kernel at translation-unit scope in the input or owned

@@ -1270,15 +1270,14 @@ inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) 
   if (initialized != ACL_SUCCESS) {
     return detail::rememberLifecycleError(initialized);
   }
-  // GetSocName describes the bound device. Never silently return the current
-  // device's name for a different requested device, or rebind the caller.
-  int32_t current = -1;
-  aclError status = aclrtGetDevice(&current);
-  if (status != ACL_SUCCESS) { return status; }
-  if (current != device) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  // GetSocName reports runtime Device 0, even when another device is bound.
+  // Neither it nor GetDeviceInfo requires a current context. Preserve CUDA's
+  // query-before-SetDevice behavior without binding/resetting the caller or
+  // reporting Device 0's name as the identity of a different device.
+  if (device != 0) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
   int64_t cores = 0;
-  status = aclrtGetDeviceInfo(static_cast<uint32_t>(device),
-                            ACL_DEV_ATTR_VECTOR_CORE_NUM, &cores);
+  aclError status = aclrtGetDeviceInfo(static_cast<uint32_t>(device),
+                                     ACL_DEV_ATTR_VECTOR_CORE_NUM, &cores);
   if (status != ACL_SUCCESS) { return status; }
   if (cores <= 0 || cores > INT_MAX) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
   // CANN's total available global memory is measured in bytes. Keep the
