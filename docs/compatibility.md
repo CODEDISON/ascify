@@ -62,6 +62,19 @@ implicit ordering for blocking streams. Programs requiring that ordering remain
 outside the supported contract. See the [CANN 9.1 stream
 contract](https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/910/others/acldevg/runtime_doc_dev_0011.html).
 
+For ordinary `cudaMemcpy`, every device-memory direction first waits for the
+current default stream, then performs the immediate ACL copy; synchronization
+failures prevent the copy and are returned unchanged. H2H does not wait for
+device work. D2D retains the adapter's existing blocking behavior: CUDA may
+queue D2D without a host wait, but doing that here would also require a lifetime
+change because `aclrtFree` does not wait for outstanding memory users. This
+conservative D2D path is not a performance or host-asynchrony equivalence claim.
+Independent nonblocking streams are not synchronized. The legacy cross-stream
+limitation above still applies; symbol copies and other memory entry points
+have their own contracts. See [CUDA copy synchronization](https://docs.nvidia.com/cuda/cuda-runtime-api/api-sync-behavior.html),
+[CANN default streams](https://www.hiascend.com/doc_center/source/zh/CANNCommunityEdition/910beta2/programug/acldevg/runtime_doc_dev_0013.html),
+and [CANN immediate free](https://www.hiascend.com/doc_center/source/zh/CANNCommunityEdition/910beta2/API/runtimeapi/aclcppdevg_03_0100.html).
+
 Parsing-only declarations in test support are not device arithmetic
 implementations. The legacy RMSNorm block-affine route additionally preserves
 two FP16 rounding points and confines packed weight multiplication to its

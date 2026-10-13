@@ -1,5 +1,6 @@
 #define __aicore__
 #define ASCIFY_TEST_ACL_CONTROLLABLE_RUNTIME_MEMORY
+#define ASCIFY_TEST_ACL_COPY_ORDER
 
 #include <ascify/ascify_cuda_compat.hpp>
 
@@ -29,6 +30,12 @@ int ascify_test_value = 0;
 aclrtMemcpyKind ascify_test_memcpy_kind = ACL_MEMCPY_HOST_TO_HOST;
 aclrtStream ascify_test_stream = nullptr;
 aclrtMemMallocPolicy ascify_test_malloc_policy = ACL_MEM_MALLOC_HUGE_FIRST;
+int ascify_test_copy_order = 0;
+int ascify_test_copy_sequence = 0;
+int ascify_test_sync_sequence = 0;
+int ascify_test_sync_calls = 0;
+aclrtStream ascify_test_sync_stream = nullptr;
+aclError ascify_test_sync_status = ACL_SUCCESS;
 
 namespace {
 
@@ -159,6 +166,43 @@ void testCopyContracts() {
          ACL_ERROR_RT_PARAM_INVALID);
 }
 
+void testDefaultStreamCopyOrdering() {
+  unsigned char source[16] = {}, destination[16] = {};
+  ascify_test_runtime_status = ACL_SUCCESS;
+  for (aclrtMemcpyKind kind : {ACL_MEMCPY_HOST_TO_DEVICE,
+                              ACL_MEMCPY_DEVICE_TO_HOST, ACL_MEMCPY_DEVICE_TO_DEVICE}) {
+    const int copies = ascify_test_memcpy_calls;
+    const int waits = ascify_test_sync_calls;
+    ascify_test_copy_order = 0;
+    ascify_test_sync_stream = reinterpret_cast<aclrtStream>(1);
+    assert(ascify::cudaMemcpy(destination, source, sizeof(source), kind) == ACL_SUCCESS);
+    assert(ascify_test_sync_calls == waits + 1);
+    assert(ascify_test_sync_stream == nullptr);
+    assert(ascify_test_sync_sequence == 1 && ascify_test_copy_sequence == 2);
+    assert(ascify_test_memcpy_calls == copies + 1);
+    ascify_test_sync_status = 98765;
+    assert(ascify::cudaMemcpy(destination, source, sizeof(source), kind) == 98765);
+    assert(ascify_test_memcpy_calls == copies + 1);
+    ascify_test_sync_status = ACL_SUCCESS;
+    ascify_test_runtime_status = 98766;
+    assert(ascify::cudaMemcpy(destination, source, sizeof(source), kind) == 98766);
+    ascify_test_runtime_status = ACL_SUCCESS;
+  }
+  const int waits = ascify_test_sync_calls;
+  assert(ascify::cudaMemcpy(destination, source, sizeof(source), ACL_MEMCPY_HOST_TO_HOST) == ACL_SUCCESS);
+  assert(ascify_test_sync_calls == waits);
+  const int copies = ascify_test_memcpy_calls;
+  const int queued = ascify_test_memcpy_async_calls;
+  for (aclrtMemcpyKind kind : {ACL_MEMCPY_HOST_TO_DEVICE, ACL_MEMCPY_DEVICE_TO_HOST,
+                              ACL_MEMCPY_DEVICE_TO_DEVICE, ACL_MEMCPY_HOST_TO_HOST}) {
+    assert(ascify::cudaMemcpy(nullptr, nullptr, 0, kind) == ACL_SUCCESS);
+    assert(ascify::cudaMemcpy(nullptr, source, 1, kind) == ACL_ERROR_RT_PARAM_INVALID);
+    assert(ascify::cudaMemcpy(destination, nullptr, 1, kind) == ACL_ERROR_RT_PARAM_INVALID);
+  }
+  assert(ascify_test_sync_calls == waits && ascify_test_memcpy_calls == copies);
+  assert(ascify_test_memcpy_async_calls == queued);
+}
+
 void testMemsetAndErrorContracts() {
   unsigned char destination[16] = {};
   aclrtStream stream = reinterpret_cast<aclrtStream>(0x5678);
@@ -206,6 +250,7 @@ void testMemsetAndErrorContracts() {
 int main() {
   testAllocationContracts();
   testCopyContracts();
+  testDefaultStreamCopyOrdering();
   testMemsetAndErrorContracts();
   return 0;
 }

@@ -895,6 +895,15 @@ inline aclError cudaMemcpy(void* destination, const void* source, size_t bytes,
   }
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
+  // ACL's immediate copy does not order itself after default-stream work.
+  // Wait for that work before copying device memory, without synchronizing
+  // independent nonblocking streams. D2D retains this adapter's blocking copy:
+  // queuing it would require a matching lifetime fix because aclrtFree neither
+  // waits for outstanding users nor implicitly synchronizes the device.
+  if (kind != ACL_MEMCPY_HOST_TO_HOST) {
+    const aclError status = aclrtSynchronizeStream(nullptr);
+    if (status != ACL_SUCCESS) { return status; }
+  }
   return aclrtMemcpy(destination, bytes, source, bytes, kind);
 }
 

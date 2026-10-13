@@ -198,6 +198,14 @@ extern int ascify_test_value;
 extern aclrtMemcpyKind ascify_test_memcpy_kind;
 extern aclrtStream ascify_test_stream;
 extern aclrtMemMallocPolicy ascify_test_malloc_policy;
+#ifdef ASCIFY_TEST_ACL_COPY_ORDER
+extern int ascify_test_copy_order;
+extern int ascify_test_copy_sequence;
+extern int ascify_test_sync_sequence;
+extern int ascify_test_sync_calls;
+extern aclrtStream ascify_test_sync_stream;
+extern aclError ascify_test_sync_status;
+#endif
 
 inline aclError aclrtMalloc(
     void** pointer, size_t, aclrtMemMallocPolicy policy) {
@@ -235,6 +243,9 @@ inline aclError aclrtMemcpy(void* destination, size_t destination_max,
                             const void* source, size_t count,
                             aclrtMemcpyKind kind) {
   ++ascify_test_memcpy_calls;
+#ifdef ASCIFY_TEST_ACL_COPY_ORDER
+  ascify_test_copy_sequence = ++ascify_test_copy_order;
+#endif
   ascify_test_destination = destination;
   ascify_test_destination_max = destination_max;
   ascify_test_source = source;
@@ -247,6 +258,9 @@ inline aclError aclrtMemcpyAsync(void* destination, size_t destination_max,
                                  const void* source, size_t count,
                                  aclrtMemcpyKind kind, aclrtStream stream) {
   ++ascify_test_memcpy_async_calls;
+#ifdef ASCIFY_TEST_ACL_COPY_ORDER
+  ascify_test_copy_sequence = ++ascify_test_copy_order;
+#endif
   ascify_test_destination = destination;
   ascify_test_destination_max = destination_max;
   ascify_test_source = source;
@@ -461,7 +475,17 @@ inline aclError aclrtCreateStream(aclrtStream* stream) {
 }
 
 inline aclError aclrtDestroyStream(aclrtStream) { return ACL_SUCCESS; }
-inline aclError aclrtSynchronizeStream(aclrtStream) { return ACL_SUCCESS; }
+inline aclError aclrtSynchronizeStream(aclrtStream stream) {
+#ifdef ASCIFY_TEST_ACL_COPY_ORDER
+  ++ascify_test_sync_calls;
+  ascify_test_sync_stream = stream;
+  ascify_test_sync_sequence = ++ascify_test_copy_order;
+  return ascify_test_sync_status;
+#else
+  (void)stream;
+  return ACL_SUCCESS;
+#endif
+}
 
 inline aclError aclrtCreateEvent(aclrtEvent* event) {
   *event = reinterpret_cast<aclrtEvent>(1);
