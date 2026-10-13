@@ -101,6 +101,7 @@ private:
 
   ct::Replacements *replacements = nullptr;
   LocalHeaderRewriteContext *localHeaderContext = nullptr;
+  std::set<std::string> siblingSourceMacroContextUsers;
   ascify::FrontendCompatibilityConfig frontendCompatibility;
   std::set<unsigned> rewrittenFrontendHostMathOffsets;
   std::set<unsigned> preservedHostMathCalleeOffsets;

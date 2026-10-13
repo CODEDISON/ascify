@@ -8030,13 +8030,21 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
     const auto definition = sourceManager.getSpellingLoc(macroInfo->getDefinitionLoc());
     const auto use = sourceManager.getExpansionLoc(MacroNameTok.getLocation());
     if (definition.isValid() && use.isValid() &&
-        !sourceManager.isWrittenInMainFile(use) &&
-        (sourceManager.isWrittenInMainFile(definition) ||
-         (sourceManager.getFileID(definition) != sourceManager.getFileID(use) &&
-          localHeaderContext->plan->isSelectedRootHeader(
-              sourceManager.getFilename(definition).str()))))
-      localHeaderContext->plan->requireInheritedSourceContext(
-          sourceManager.getFilename(use).str());
+        !sourceManager.isWrittenInMainFile(use)) {
+      if (sourceManager.isWrittenInMainFile(definition)) {
+        // Preserve the original root-dependency rule, including its later
+        // refusal for a non-leaf that genuinely needs parent definitions.
+        localHeaderContext->plan->requireInheritedSourceContext(
+            sourceManager.getFilename(use).str());
+      } else if (sourceManager.getFileID(definition) != sourceManager.getFileID(use) &&
+                 localHeaderContext->plan->isSelectedRootHeader(
+                     sourceManager.getFilename(definition).str())) {
+        // A later include in this file can still establish that it is not a
+        // leaf. Decide sibling eligibility only after preprocessing finishes.
+        siblingSourceMacroContextUsers.insert(contextualCanonicalPath(
+            sourceManager.getFilename(use)));
+      }
+    }
   }
   if (MacroNameTok.getIdentifierInfo()->getName() == "CUDART_CB" &&
       macroInfo != nullptr && !macroInfo->isFunctionLike() &&
@@ -9109,26 +9117,44 @@ void AscifyAction::EndSourceFileAction() {
     // at this include only because the original parse resolved it; the same
     // position/token/macro proof still governs the inline transaction.
     // No declaration text, initializer or type is synthesized here.
+    // The new sibling rule is limited to leaves. A non-leaf may include the
+    // declaration provider itself, so it must retain ordinary closure parsing
+    // instead of being misclassified as requiring an inherited context.
+    const auto *inputEvidence = localHeaderContext->inputEvidence;
+    if (inputEvidence != nullptr) {
+      for (const auto &path : siblingSourceMacroContextUsers)
+        if (!path.empty() && !inputEvidence->quotedIncludeParents.count(path))
+          localHeaderContext->plan->requireInheritedSourceContext(path);
+    }
     class ParentSourceDependencies
         : public clang::RecursiveASTVisitor<ParentSourceDependencies> {
       clang::SourceManager &source;
       LocalHeaderClosurePlan &plan;
+      const LocalHeaderInputEvidence *inputEvidence;
       void observe(clang::SourceLocation use, const clang::Decl *declaration) {
         if (declaration == nullptr)
           return;
         use = source.getExpansionLoc(use);
         const auto definition = source.getSpellingLoc(declaration->getLocation());
-        if (use.isValid() && definition.isValid() &&
-            !source.isWrittenInMainFile(use) &&
-            (source.isWrittenInMainFile(definition) ||
-             (source.getFileID(definition) != source.getFileID(use) &&
-              plan.isSelectedRootHeader(source.getFilename(definition).str()))))
+        if (use.isInvalid() || definition.isInvalid() ||
+            source.isWrittenInMainFile(use))
+          return;
+        if (source.isWrittenInMainFile(definition)) {
+          plan.requireInheritedSourceContext(source.getFilename(use).str());
+          return;
+        }
+        if (inputEvidence != nullptr &&
+            source.getFileID(definition) != source.getFileID(use) &&
+            plan.isSelectedRootHeader(source.getFilename(definition).str()) &&
+            !inputEvidence->quotedIncludeParents.count(
+                contextualCanonicalPath(source.getFilename(use))))
           plan.requireInheritedSourceContext(source.getFilename(use).str());
       }
      public:
       ParentSourceDependencies(clang::SourceManager &source,
-                               LocalHeaderClosurePlan &plan)
-          : source(source), plan(plan) {}
+                               LocalHeaderClosurePlan &plan,
+                               const LocalHeaderInputEvidence *inputEvidence)
+          : source(source), plan(plan), inputEvidence(inputEvidence) {}
       bool shouldVisitTemplateInstantiations() const { return true; }
       bool VisitDeclRefExpr(clang::DeclRefExpr *reference) {
         observe(reference->getExprLoc(), reference->getDecl());
@@ -9148,7 +9174,7 @@ void AscifyAction::EndSourceFileAction() {
         return true;
       }
     } dependencies(getCompilerInstance().getSourceManager(),
-                   *localHeaderContext->plan);
+                   *localHeaderContext->plan, inputEvidence);
     dependencies.TraverseDecl(
         getCompilerInstance().getASTContext().getTranslationUnitDecl());
   }

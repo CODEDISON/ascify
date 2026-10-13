@@ -56,6 +56,15 @@ direct headers. These dependencies can be preserved by converting the header
 at its original include position. Ascify does not manufacture a standalone
 macro environment or copy initializer values.
 
+A selected direct leaf may also reference a declaration or macro from an earlier
+selected sibling. Only this added sibling rule requires the consumer to have
+no quoted includes of its own; otherwise it uses ordinary recursive closure
+parsing. This avoids mistaking a self-contained header's own included provider
+for an inherited sibling dependency. Macro observations are deferred until the
+original preprocessing pass completes, so later quoted includes are considered.
+The original root-defined dependency rule and contextual leaf checks remain
+unchanged: a non-leaf that genuinely needs a root definition is still rejected.
+
 This path requires standard preprocessing (`--default-preprocessor`), no
 `--amap`, and no target recipe. A candidate must have exactly one direct literal
 include on its own line, one file entry, a final newline, no nested quoted

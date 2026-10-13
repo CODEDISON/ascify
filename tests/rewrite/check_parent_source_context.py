@@ -32,7 +32,7 @@ def main():
                 args.append('--local-headers-recursive')
             if standard:
                 args.append('--default-preprocessor')
-            args += ['--', '-std=c++17']
+            args += ['--', '-std=c++17', '-I' + str(inputs)]
             before = identity(inputs.iterdir())
             result = subprocess.run(args, text=True, capture_output=True)
             assert identity(inputs.iterdir()) == before, 'inputs modified'
@@ -172,7 +172,54 @@ def main():
         assert 'Proven contextual' not in result.stdout
         assert 'context_inline=' not in Path(str(normal) + '.headers/.ascify-local-closure').read_text()
         print('nonrecursive behavior and independent staged header unchanged')
-        print('parent source context: 15 successes, 9 atomic refusal pairs, 2 mode boundaries passed')
+        # A direct header that includes the same provider itself is not a leaf
+        # requiring sibling inheritance. It must use ordinary staged closure.
+        for label, definitions, use in [
+            ('nonleaf_record_typedef_template',
+             'struct Value { int x; };\ntypedef Value Alias;\n'
+             'template<class T> struct Box { T x; };\n',
+             '__device__ int read(Value const &v, Alias const &a, Box<int> const &b) '
+             '{ return v.x + a.x + b.x; }\n'),
+            ('nonleaf_constant', 'constexpr int bias = 7;\n',
+             '__global__ void add(int *p) { p[threadIdx.x] += bias; }\n'),
+            ('nonleaf_macro', '#define SIBLING_BIAS 13\n',
+             '__global__ void add(int *p) { p[threadIdx.x] += SIBLING_BIAS; }\n'),
+        ]:
+            sibling.write_text('#ifndef TYPES_GUARD\n#define TYPES_GUARD\n' + definitions + '#endif\n')
+            root.write_text(sibling_parent)
+            child.write_text('#include "types.cuh"\n' + use)
+            destination = work / (label + '.cce')
+            result = convert(destination)
+            assert result.returncode == 0, label + ': ' + result.stdout + result.stderr
+            proof = Path(str(destination) + '.headers/.ascify-local-closure').read_text()
+            assert 'context_inline=' not in proof, (label, proof)
+            assert 'original parent source context' not in result.stdout, (label, result.stdout)
+            staged = list(Path(str(destination) + '.headers').rglob('leaf.cuh.dpp'))
+            assert len(staged) == 1, (label, staged)
+            assert 'types.cuh.dpp' in staged[0].read_text(), (label, staged[0].read_text())
+            assert len(list(Path(str(destination) + '.headers').rglob('types.cuh.dpp'))) == 1
+            print(label + ': self-contained non-leaf uses ordinary staged closure')
+        # The first own quoted include may occur after a sibling macro use.
+        # This header obtains the macro independently through an angle include;
+        # deciding leaf eligibility in MacroExpands would misclassify it.
+        sibling.write_text('#ifndef TYPES_GUARD\n#define TYPES_GUARD\n'
+                           '#define SIBLING_BIAS 13\n#endif\n')
+        (inputs / 'late.h').write_text('constexpr int late_value = 1;\n')
+        root.write_text(sibling_parent)
+        child.write_text('#include <types.cuh>\n'
+                         '__global__ void late(int *p) { p[threadIdx.x] += SIBLING_BIAS; }\n'
+                         '#include "late.h"\n')
+        destination = work / 'nonleaf_macro_before_late_include.cce'
+        result = convert(destination)
+        assert result.returncode == 0, result.stdout + result.stderr
+        proof = Path(str(destination) + '.headers/.ascify-local-closure').read_text()
+        assert 'context_inline=' not in proof, proof
+        staged = list(Path(str(destination) + '.headers').rglob('leaf.cuh.dpp'))
+        assert len(staged) == 1 and 'late.h.dpp' in staged[0].read_text()
+        assert '#include <types.cuh>' in staged[0].read_text()
+        print('nonleaf_macro_before_late_include: complete preprocessing determines leaf eligibility')
+        print('parent source context: 15 contextual successes, 4 ordinary non-leaf successes, '
+              '9 atomic refusal pairs, 2 mode boundaries passed')
 
 
 if __name__ == '__main__':
