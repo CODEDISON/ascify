@@ -4507,6 +4507,15 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
   if (localHeaderContext == nullptr)
     return;
 
+  // A recognized direct helper include belongs to the all-or-nothing helper
+  // transaction. Quoting it must not independently redirect its filename into
+  // a local-header artifact: that would overlap the later whole-directive
+  // replacement, or change a retained helper when the proof fails. The same
+  // frozen-profile and literal-range proof above also handles angled includes.
+  if (recognizedNvidiaHelper && file_name == "helper_cuda.h" &&
+      directRange && directSpelling)
+    return;
+
   const clang::SourceLocation fileLoc =
       SM.getFileLoc(filename_range.getBegin());
   const bool isLiteral = !filename_range.getBegin().isMacroID();

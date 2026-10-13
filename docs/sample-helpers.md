@@ -130,6 +130,10 @@ spelling. Duplicate, relative-path, macro-expanded or transitive includes are re
 Ascify preserves these portable includes, in order: `<stdint.h>`, `<stdio.h>`, `<stdlib.h>`,
 `<string.h>`, `<helper_string.h>`. It inserts the authenticated `<ascify/ascify_cuda_compat.hpp>` when
 needed; a later compat include does not establish that its declarations were available earlier.
+For this same frozen profile, a direct quoted include belongs to the helper transaction even with
+`--local-headers-recursive`: it is not separately redirected into a generated local-header copy.
+If the helper proof fails, its quoted include and calls stay in place. Unrecognized same-named project
+headers still follow ordinary local-header selection; the filename alone does not establish ownership.
 
 Every helper macro, device-selection rewrite, template/configuration guard and include change is staged together.
 Declaration uses, unresolved template lookup, raw tokens through EOF, retained headers, macro state and
