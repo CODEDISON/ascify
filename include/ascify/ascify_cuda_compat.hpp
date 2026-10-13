@@ -97,6 +97,17 @@ __aicore__ ASCIFY_FORCEINLINE unsigned int cuda_lane_id() {
   return (threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)) & 31u;
 }
 
+// Internal target for a resolved CUDA float frexp(float, int*) overload.
+// Keep native lookup in this protected header, before caller declarations.
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3)
+__aicore__ inline float cuda_frexp_float(float value, int* exponent) {
+  return ::frexpf(value, exponent);
+}
+#else
+// The public header family has not been admitted for this new operation.
+float cuda_frexp_float(float, int*) = delete;
+#endif
+
 inline constexpr unsigned int cudaStreamDefault = 0x00U;
 inline constexpr unsigned int cudaStreamNonBlocking = 0x01U;
 

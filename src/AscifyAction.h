@@ -276,6 +276,8 @@ public:
   bool rewriteCudaHalf2Operator(const mat::MatchFinder::MatchResult &Result);
   bool rewriteFrontendHostMath(const mat::MatchFinder::MatchResult &Result);
   bool preserveHostStandardMathCall(const mat::MatchFinder::MatchResult &Result);
+  bool rewriteCudaFloatFrexp(const mat::MatchFinder::MatchResult &Result);
+  std::set<unsigned> rewrittenCudaFloatFrexpOffsets;
   bool rewriteProvenGenericAtomicAddCall(
       const mat::MatchFinder::MatchResult &Result);
   bool rewriteProvenGlobalAtomicCall(

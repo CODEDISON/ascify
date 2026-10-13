@@ -755,12 +755,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 63964)
+  if (contents.size() != 64409)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "cc2bf2a39c5925fc81f65652b0e871b72fe3322e940c70d5f320b5e50abf7068");
+      "13d3b47b43b6749adc799f8de0ce0951ee43cdc8640c766ff4cb0d95c4458ce0");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -787,12 +787,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 63964)
+  if (invalidBuffer || contents.size() != 64409)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "cc2bf2a39c5925fc81f65652b0e871b72fe3322e940c70d5f320b5e50abf7068");
+      "13d3b47b43b6749adc799f8de0ce0951ee43cdc8640c766ff4cb0d95c4458ce0");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -5979,6 +5979,74 @@ bool AscifyAction::rewriteCudaSmDiagnostic(
   return true;
 }
 
+bool AscifyAction::rewriteCudaFloatFrexp(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
+  if (call == nullptr || Result.Context == nullptr || Result.SourceManager == nullptr ||
+      call->getNumArgs() != 2 || call->isTypeDependent() || call->isValueDependent() ||
+      getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)
+    return false;
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  const auto *callee = call->getDirectCallee();
+  if (callee == nullptr || callee->isVariadic() || callee->getQualifiedNameAsString() != "frexp" ||
+      callee->getNumParams() != 2 || !callee->hasAttr<clang::CUDADeviceAttr>() ||
+      !context.hasSameType(callee->getReturnType(), context.FloatTy) ||
+      !context.hasSameType(callee->getParamDecl(0)->getType().getUnqualifiedType(), context.FloatTy) ||
+      !context.hasSameType(callee->getParamDecl(1)->getType().getUnqualifiedType(),
+                           context.getPointerType(context.IntTy)) ||
+      context.getTypeSize(context.FloatTy) != 32 || context.getTypeSize(context.IntTy) != 32)
+    return false;
+  for (const auto *declaration : callee->redecls()) {
+    const auto location = source.getSpellingLoc(declaration->getLocation());
+    if (location.isInvalid() || !source.isInSystemHeader(location)) return false;
+    const auto file = source.getFileID(location);
+    if (!cudaRuntimeApiSdkFileIds.count(file.getHashValue()) &&
+        !isOwnedCudaCompilerInput(file, getCompilerInstance())) return false;
+  }
+  const auto *owner = enclosingNvidiaFindDeviceFunction(call, context);
+  if (owner == nullptr || owner->hasAttr<clang::CUDAHostAttr>() ||
+      (!owner->hasAttr<clang::CUDADeviceAttr>() && !owner->hasAttr<clang::CUDAGlobalAttr>()) ||
+      owner->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      owner->isDependentContext())
+    return false;
+  if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(owner))
+    if (method->getParent()->isLambda()) return false;
+  const auto *reference = llvm::dyn_cast<clang::DeclRefExpr>(call->getCallee()->IgnoreParenImpCasts());
+  if (reference == nullptr || reference->hasQualifier() ||
+      reference->getDecl()->getCanonicalDecl() != callee->getCanonicalDecl()) return false;
+  const auto begin = call->getBeginLoc(), last = call->getEndLoc();
+  const auto name = reference->getLocation();
+  if (begin.isInvalid() || last.isInvalid() || name.isInvalid() ||
+      begin.isMacroID() || last.isMacroID() || name.isMacroID() ||
+      !source.isWrittenInMainFile(begin) || !source.isWrittenInMainFile(last) ||
+      !source.isWrittenInMainFile(name)) return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto end = clang::Lexer::getLocForEndOfToken(last, 0, source, options);
+  const auto nameEnd = clang::Lexer::getLocForEndOfToken(name, 0, source, options);
+  if (end.isInvalid() || nameEnd.isInvalid()) return false;
+  const auto file = source.getFileID(begin);
+  const unsigned first = source.getFileOffset(begin), limit = source.getFileOffset(end);
+  for (const auto &macro : cudaLaneIdMacroRanges)
+    if (macro.file == file && first < macro.endOffset && macro.beginOffset < limit)
+      return false;
+  const auto spelling = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(name, name), source, options);
+  if (spelling != "frexp") return false;
+  const auto offset = source.getFileOffset(name);
+  if (!rewrittenCudaFloatFrexpOffsets.insert(offset).second) return true;
+  if (!insertSemanticReplacement(ct::Replacement(source, name, spelling.size(),
+          "::ascify::cuda_frexp_float"), clang::FullSourceLoc(name, source), name, nameEnd)) {
+    rewrittenCudaFloatFrexpOffsets.erase(offset);
+    return false;
+  }
+  needsCudaCompatHeader = true;
+  static const dppCounter counter = {
+      "CUDA float frexp overload", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(counter, "SDK float frexp(float, int*)");
+  return true;
+}
+
 bool AscifyAction::preserveHostStandardMathCall(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
@@ -9990,6 +10058,7 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
   if (Result.Nodes.getNodeAs<clang::CallExpr>(
           sProvenGlobalAtomicCall) != nullptr) {
     if (!rewriteCudaSmDiagnostic(Result) &&
+        !rewriteCudaFloatFrexp(Result) &&
         !preserveHostStandardMathCall(Result) &&
         !rewriteUnsupportedCudaSmAttribute(Result) &&
         !rewriteProvenKernelAttributeCall(Result) &&
