@@ -1258,6 +1258,8 @@ struct cudaDeviceProp {
   char name[256];
   int multiProcessorCount;
   size_t totalGlobalMem;
+  int maxThreadsPerBlock;
+  int maxGridSize[3];
 };
 
 inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) {
@@ -1295,6 +1297,22 @@ inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) 
     return ACL_ERROR_FEATURE_UNSUPPORTED;
   }
   cudaDeviceProp result = {};
+  // These are device-wide SIMT limits, not per-kernel occupancy or an SM
+  // capability number. Keep the frozen RTS ABI values usable with headers
+  // that predate the enum names. A missing/invalid query is an explicit
+  // failure, and no part of the caller's object is written on failure.
+  const unsigned attributes[] = {209U, 205U, 206U, 207U};
+  int limits[4] = {};
+  for (unsigned i = 0; i != 4; ++i) {
+    int64_t raw = 0;
+    status = aclrtGetDeviceInfo(static_cast<uint32_t>(device),
+                               static_cast<aclrtDevAttr>(attributes[i]), &raw);
+    if (status != ACL_SUCCESS) { return status; }
+    if (raw <= 0 || raw > INT_MAX) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+    limits[i] = static_cast<int>(raw);
+  }
+  result.maxThreadsPerBlock = limits[0];
+  for (unsigned i = 0; i != 3; ++i) { result.maxGridSize[i] = limits[i + 1]; }
   size_t index = 0;
   while (index + 1 < sizeof(result.name) && soc_name[index] != '\0') {
     result.name[index] = soc_name[index];

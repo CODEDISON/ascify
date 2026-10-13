@@ -328,9 +328,15 @@ them. Regression:
 ### Real memory and restricted kernel thread limits
 
 On the `dav-c310-vec` legacy SIMT family, `cudaGetDeviceProperties` exposes
-`totalGlobalMem` from CANN's actual total-global-memory device query. Query
-errors propagate; invalid values and failed queries leave the caller's output
-unchanged. This does not add CUDA SM version metadata.
+`totalGlobalMem` from CANN's actual total-global-memory device query,
+`maxThreadsPerBlock` from `ACL_DEV_ATTR_MAX_THREADS_PER_BLOCK`, and
+`maxGridSize[0..2]` from `ACL_DEV_ATTR_MAX_GRID_DIM_X/Y/Z`. These are device
+limits; they do not claim a particular kernel can use the maximum or bypass
+the total-block-count limit. All four SIMT limit queries must succeed with a
+positive value representable by `int`; otherwise the entire property call
+fails explicitly and leaves the caller's object unchanged. This also means
+older runtimes/devices without these queries cannot provide this extended
+property surface. No CUDA SM version metadata is added.
 
 A restricted `cudaFuncGetAttributes` conversion can publish
 `maxThreadsPerBlock` when the CUDA SDK call names a concrete, defined,

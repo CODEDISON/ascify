@@ -13,6 +13,8 @@ aclError ascify_test_memory_info_status = ACL_SUCCESS;
 int64_t ascify_test_total_global_memory = int64_t{1} << 40;
 aclError ascify_test_block_limit_status = ACL_SUCCESS;
 int64_t ascify_test_block_limit = 2048;
+aclError ascify_test_grid_limit_status[3] = {};
+int64_t ascify_test_grid_limit[3] = {65535, 32768, 12345};
 int32_t ascify_test_device = 2;
 int64_t ascify_test_vector_core_count = 48;
 int64_t ascify_test_max_threads_per_core = 1024;
@@ -38,8 +40,29 @@ int main() {
   assert(ascify::cudaGetDeviceProperties(&properties, 2) == ACL_SUCCESS);
   assert(properties.multiProcessorCount == 48);
   assert(properties.totalGlobalMem == (uint64_t{1} << 40));
+  assert(properties.maxThreadsPerBlock == 2048);
+  assert(properties.maxGridSize[0] == 65535 && properties.maxGridSize[1] == 32768 && properties.maxGridSize[2] == 12345);
   assert(std::strcmp(properties.name, ascify_test_soc_name) == 0);
   const ascify::cudaDeviceProp saved = properties;
+  for (unsigned i = 0; i != 4; ++i) {
+    aclError &status = i == 0 ? ascify_test_block_limit_status : ascify_test_grid_limit_status[i - 1];
+    int64_t &limit = i == 0 ? ascify_test_block_limit : ascify_test_grid_limit[i - 1];
+    const int64_t old = limit;
+    status = 79;
+    assert(ascify::cudaGetDeviceProperties(&properties, 2) == 79);
+    assert(std::memcmp(&properties, &saved, sizeof(properties)) == 0);
+    status = ACL_SUCCESS;
+    for (int64_t invalid : {int64_t{0}, int64_t{-1}, int64_t{INT_MAX} + 1}) {
+      limit = invalid;
+      assert(ascify::cudaGetDeviceProperties(&properties, 2) == ACL_ERROR_FEATURE_UNSUPPORTED);
+      assert(std::memcmp(&properties, &saved, sizeof(properties)) == 0);
+    }
+    limit = INT_MAX;
+    assert(ascify::cudaGetDeviceProperties(&properties, 2) == ACL_SUCCESS);
+    assert((i == 0 ? properties.maxThreadsPerBlock : properties.maxGridSize[i - 1]) == INT_MAX);
+    limit = old;
+    properties = saved;
+  }
   assert(ascify::cudaGetDeviceProperties(nullptr, 2) == ACL_ERROR_RT_PARAM_INVALID);
   assert(ascify::cudaGetDeviceProperties(&properties, -1) == ACL_ERROR_RT_PARAM_INVALID);
   assert(ascify::cudaGetDeviceProperties(&properties, 0) == ACL_ERROR_FEATURE_UNSUPPORTED);

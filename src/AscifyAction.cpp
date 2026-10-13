@@ -755,12 +755,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 63007)
+  if (contents.size() != 63921)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "080b4e5580a741633fba2b4983de5ff5bf552b72967d25ca04d91eda8c0165c1");
+      "97db37083c8d2609dcb98d73e6ccfeb76de507e146fed9317206e603c6577147");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -787,12 +787,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 63007)
+  if (invalidBuffer || contents.size() != 63921)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "080b4e5580a741633fba2b4983de5ff5bf552b72967d25ca04d91eda8c0165c1");
+      "97db37083c8d2609dcb98d73e6ccfeb76de507e146fed9317206e603c6577147");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&

@@ -352,6 +352,8 @@ extern aclError ascify_test_memory_info_status;
 extern int64_t ascify_test_total_global_memory;
 extern aclError ascify_test_block_limit_status;
 extern int64_t ascify_test_block_limit;
+extern aclError ascify_test_grid_limit_status[3];
+extern int64_t ascify_test_grid_limit[3];
 #endif
 
 inline aclError aclrtGetDevice(int32_t* device) {
@@ -367,6 +369,11 @@ inline aclError aclrtGetDeviceInfo(
   (void)device;
   ++ascify_test_get_device_info_calls;
 #if defined(ASCIFY_TEST_ACL_CONTROLLABLE_MEMORY_PROPERTY)
+  if (static_cast<unsigned int>(attribute) >= 205U && static_cast<unsigned int>(attribute) <= 207U) {
+    const unsigned index = static_cast<unsigned int>(attribute) - 205U;
+    if (ascify_test_grid_limit_status[index] == ACL_SUCCESS) *value = ascify_test_grid_limit[index];
+    return ascify_test_grid_limit_status[index];
+  }
   if (static_cast<unsigned int>(attribute) == 209U) {
     if (ascify_test_block_limit_status == ACL_SUCCESS) *value = ascify_test_block_limit;
     return ascify_test_block_limit_status;
