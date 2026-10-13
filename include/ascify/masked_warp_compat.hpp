@@ -30,6 +30,32 @@ __SIMT_DEVICE_FUNCTIONS_DECL__ inline uint32_t converged_ballot_sync(
 }
 
 template <typename T>
+__SIMT_DEVICE_FUNCTIONS_DECL__ inline T converged_shfl_up_sync(
+    uint32_t mask, T value, unsigned int delta, int width = 32) {
+  static_assert(std::is_same<T, int32_t>::value ||
+                    std::is_same<T, uint32_t>::value ||
+                    std::is_same<T, float>::value,
+                "Ascify converged shuffle supports int32_t, uint32_t and float only");
+  require_converged_warp_mask(mask);
+  // Keep the earlier up-shuffle width domain. In particular, do not infer
+  // native width=1 support from the separately validated down-shuffle path.
+  const bool valid_width = width == 2 || width == 4 || width == 8 ||
+                           width == 16 || width == 32;
+  if (asc_ballot(!valid_width) != 0) {
+    reject_device_contract();
+  }
+  // CUDA returns this lane's value when delta reaches the segment width.
+  // CANN packs delta directly into the shuffle control word, so large values
+  // must not overwrite its width/clamp bits. Use native delta=0 for those
+  // lanes, keeping every active lane at the shuffle: another lane may still
+  // need this lane's input. Never compact sparse lanes or prescribe a value
+  // for an inactive source.
+  const unsigned int native_delta =
+      delta >= static_cast<unsigned int>(width) ? 0 : delta;
+  return asc_shfl_up(value, native_delta, width);
+}
+
+template <typename T>
 __SIMT_DEVICE_FUNCTIONS_DECL__ inline T converged_shfl_down_sync(
     uint32_t mask, T value, unsigned int delta, int width = 32) {
   static_assert(std::is_same<T, int32_t>::value ||

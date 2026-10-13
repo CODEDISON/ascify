@@ -4,8 +4,11 @@
 #include <stdint.h>
 
 #define __SIMT_DEVICE_FUNCTIONS_DECL__
-inline uint32_t asc_activemask() { return UINT32_MAX; }
-inline uint32_t asc_ballot(int predicate) { return predicate ? UINT32_MAX : 0; }
+inline uint32_t ascify_test_legacy_active_mask = UINT32_MAX;
+inline uint32_t asc_activemask() { return ascify_test_legacy_active_mask; }
+inline uint32_t asc_ballot(int predicate) { return predicate ? ascify_test_legacy_active_mask : 0; }
+inline unsigned int ascify_test_legacy_up_delta;
+inline int ascify_test_legacy_up_width;
 
 inline int ascify_test_legacy_warp_reduce_add_calls = 0;
 inline int ascify_test_legacy_warp_reduce_max_calls = 0;
@@ -64,8 +67,10 @@ inline T asc_shfl(T value, int, int) {
 }
 
 template<typename T>
-inline T asc_shfl_up(T value, unsigned int, int) {
+inline T asc_shfl_up(T value, unsigned int delta, int width) {
   ++ascify_test_legacy_warp_shuffle_calls;
+  ascify_test_legacy_up_delta = delta;
+  ascify_test_legacy_up_width = width;
   return value;
 }
 

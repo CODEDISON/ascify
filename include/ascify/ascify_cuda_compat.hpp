@@ -1476,6 +1476,16 @@ __aicore__ ASCIFY_FORCEINLINE T shfl_sync(uint32_t mask, T value, int source_lan
 template<typename T>
 __aicore__ ASCIFY_FORCEINLINE T shfl_up_sync(uint32_t mask, T value, unsigned int delta,
                                              int width = 32) {
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3)
+  if constexpr (std::is_same<T, int32_t>::value ||
+                std::is_same<T, uint32_t>::value || std::is_same<T, float>::value) {
+    // Admit only an already converged partial-mask cohort. Keep existing
+    // full-mask calls and all other scalar types on their original path.
+    if (mask != UINT32_MAX) {
+      return detail::converged_shfl_up_sync(mask, value, delta, width);
+    }
+  }
+#endif
   detail::requireFullWarpMask(mask);
   detail::requireSupportedWarpWidth(width);
 #if defined(ASCIFY_SIMT_HEADER_FAMILY_PUBLIC_85)

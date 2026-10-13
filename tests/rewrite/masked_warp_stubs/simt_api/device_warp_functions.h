@@ -3,6 +3,7 @@
 
 #include <cassert>
 #include <stdint.h>
+#include <cstring>
 
 #define __SIMT_DEVICE_FUNCTIONS_DECL__
 
@@ -17,6 +18,23 @@ inline unsigned lane;
 inline unsigned ballot_phase;
 inline bool shuffle_mode;
 inline bool shuffled;
+inline bool up_mode = false;
+inline uint32_t lane_bits[32];
+inline unsigned native_up_calls;
+
+template <typename T> T up_value(unsigned source_lane) {
+  static_assert(sizeof(T) == sizeof(uint32_t), "32-bit host model only");
+  T result;
+  std::memcpy(&result, &lane_bits[source_lane], sizeof(result));
+  return result;
+}
+
+template <typename T> uint32_t bits(T value) {
+  static_assert(sizeof(T) == sizeof(uint32_t), "32-bit host model only");
+  uint32_t result;
+  std::memcpy(&result, &value, sizeof(result));
+  return result;
+}
 
 template <typename T> T value(unsigned source_lane) {
   return static_cast<T>(1000 + source_lane);
@@ -41,7 +59,8 @@ inline uint32_t asc_ballot(int32_t predicate) {
   for (unsigned i = 0; i < 32; ++i) {
     const bool current = ballot_phase == 0
         ? masks[i] != active || active == 0
-        : shuffle_mode ? !valid_width(widths[i]) : predicates[i];
+        : shuffle_mode ? (!valid_width(widths[i]) || (up_mode && widths[i] == 1))
+                       : predicates[i];
     if (i == lane) assert((predicate != 0) == current);
     if ((active & (uint32_t{1} << i)) != 0 && current)
       result |= uint32_t{1} << i;
@@ -63,6 +82,24 @@ inline T asc_shfl_down(T local_value, unsigned int delta, int width) {
   if ((active & (uint32_t{1} << source)) == 0)
     return undefined_source_value<T>();
   return value<T>(source);
+}
+
+template <typename T>
+inline T asc_shfl_up(T local_value, unsigned int delta, int width) {
+  using namespace masked_warp_test;
+  assert(up_mode && ballot_phase == 2);
+  assert(bits(local_value) == lane_bits[lane]);
+  assert(width == widths[lane] && width >= 2 && delta < static_cast<unsigned>(width));
+  ++native_up_calls;
+  shuffled = true;
+  // Model subtraction with a signed wide temporary independently of the
+  // caller's unsigned oracle; negative/below-segment results retain self.
+  const long long candidate = static_cast<long long>(lane) - delta;
+  const long long begin = (lane / static_cast<unsigned>(width)) * width;
+  const unsigned source = candidate < begin ? lane : static_cast<unsigned>(candidate);
+  if ((active & (uint32_t{1} << source)) == 0)
+    return undefined_source_value<T>();
+  return up_value<T>(source);
 }
 
 #endif

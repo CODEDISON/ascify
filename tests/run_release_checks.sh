@@ -1354,6 +1354,8 @@ import sys
 text = Path(sys.argv[1]).read_text()
 assert "ascify::ballot_sync" in text and "ascify::shfl_down_sync" in text
 assert "__ballot_sync(" not in text and "__shfl_down_sync(" not in text
+assert text.count("ascify::shfl_up_sync(") == 3
+assert "__shfl_up_sync(" not in text
 PY
 reject_frontend_compat_fixture \
   "$repo_root/tests/frontend_compat/reduce_group_reject.cu" \
