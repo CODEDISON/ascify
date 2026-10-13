@@ -166,13 +166,15 @@ edited name tokens are disjoint. Other semantic overlap remains rejected.
 
 A dependent status call has a separate bounded proof: one named, non-pack type parameter in a main-file
 host function template, with at least one instantiated body. Every observed specialization must be an
-implicit instantiation or explicit instantiation definition for exact `int` or `float`, and every status
+implicit instantiation or explicit instantiation definition for exact `int`, `float` or `double`, and every status
 call must resolve to the proven helper and Runtime domain in every instance. The output receives a
 `static_assert` permitting only the observed type set. Other scalars, cv-qualified types, class ADL,
 explicit specializations, extern instantiations, missing bodies, member/multi-parameter templates,
 nested-lambda owners and macros changing the guard's insertion tokens fail the proof. Guard and helper
 publication remain one transaction. This feature is experimental; validate the generated code with
 your target toolchain.
+The type set proves the helper's Runtime status domain only; accepting `double`
+here does not assert support for double precision device arithmetic or collectives.
 
 With `--local-headers-recursive`, a selected leaf using a parent's helper may be converted jointly. This
 requires `--default-preprocessor` (or its skip-excluded synonym), no `--amap`, and

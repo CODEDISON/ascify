@@ -104,11 +104,12 @@ def main():
         if not args.binary:
             print("native template helper transformation gate not run (no binary supplied)")
             return
-        for mode in range(14):
+        domains = {0: ['float', 'int'], 1: ['float'], 14: ['double'], 15: ['double', 'float', 'int']}
+        for mode in range(16):
             output = work / (str(mode) + ".cpp")
             conflicting_macro = {6: "__is_same", 7: "static_assert", 8: "T"}.get(mode)
             result = run([
-                args.binary, str(POSITIVE if mode <= 1 else FIXTURE), "--target-policy=dav-c310-vec",
+                args.binary, str(POSITIVE if mode in domains else FIXTURE), "--target-policy=dav-c310-vec",
                 "--simt-math=fast", "--default-preprocessor",
                 "--cuda-path=" + args.cuda_path,
                 "--clang-resource-directory=" + args.resource_dir,
@@ -133,10 +134,7 @@ def main():
                       f"no output published after '{conflicting_macro}' macro collision")
                 continue
             text = output.read_text()
-            expected_guard = 'static_assert(__is_same(T, float)'
-            if mode == 0:
-                expected_guard += ' || __is_same(T, int)'
-            expected_guard += ', "' + MESSAGE + '");'
+            expected_guard = 'static_assert(' + ' || '.join('__is_same(T, '+value+')' for value in domains.get(mode, [])) + ', "' + MESSAGE + '");'
             if mode == 13:
                 # This original positive variant also contains an inactive
                 # helper call. Raw PP auditing must keep the whole transaction
@@ -163,7 +161,7 @@ def main():
                 assert "::ascify::sampleFindCudaDevice" not in text, text
                 assert "include kept" in result.stderr, result.stderr
                 assert "committed 1 explicit template" not in result.stderr
-                if mode <= 1:
+                if mode in domains:
                     planned = [line.split(PENDING, 1)[1] for line in
                                result.stderr.splitlines() if PENDING in line]
                     assert planned == [expected_guard], result.stderr
@@ -171,22 +169,23 @@ def main():
                     assert PENDING not in result.stderr, result.stderr
                     assert "status domain not proven" in result.stderr, result.stderr
                 print(f"native AST-planning-only case {mode}: "
-                      f"{'exact type guard proved' if mode <= 1 else 'type proof rejected'}; "
+                      f"{'exact type guard proved' if mode in domains else 'type proof rejected'}; "
                       "helper and guard retained by system pragma boundary")
                 continue
-            if mode <= 1:
+            if mode in domains:
                 assert "#include <helper_cuda.h>" not in text, result.stderr
                 assert MESSAGE in text, text
-                assert "__is_same(T, float)" in text, text
-                assert ("__is_same(T, int)" in text) == (mode == 0), text
+                assert expected_guard in text, text
+                for value in ('int', 'float', 'double'):
+                    assert ('__is_same(T, '+value+')' in text) == (value in domains[mode]), text
                 assert "::ascify::sampleFindCudaDevice" in text, text
                 assert "ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS" in text, text
                 assert "committed 1 explicit template type-domain guard(s)" in result.stderr
                 # Include the untouched generated source in a separate TU.
                 # In-domain reuse compiles; a new char instantiation must fail
                 # explicitly instead of relying on today's source call set.
-                for argument, good in [("float", True), ("int", mode == 0),
-                                       ("char", False)]:
+                for argument in ('float', 'int', 'double', 'char', 'long double'):
+                    good = argument in domains[mode]
                     harness = work / (str(mode) + "-" + argument + ".cpp")
                     harness.write_text('#include "' + output.name + '"\n'
                                        'void additional_use() { template_memory<' +
@@ -213,10 +212,10 @@ def main():
         assert {path: hashlib.sha256(path.read_bytes()).hexdigest()
                 for path in (FIXTURE, POSITIVE)} == before
         if args.expect_retained_closure:
-            print("native AST-planning-only: 2 positive proofs and 12 negative proofs passed; "
+            print("native AST-planning-only: 4 positive proofs and 12 negative proofs passed; "
                   "helper publication and target validation remain pending")
         else:
-            print("native template helper gate: 2 positive and 12 negative cases passed")
+            print("native template helper gate: 4 positive and 12 negative cases passed")
 
 
 if __name__ == "__main__":

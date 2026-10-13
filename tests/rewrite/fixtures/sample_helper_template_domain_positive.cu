@@ -19,8 +19,13 @@ void template_memory(T* destination, T* source, size_t bytes,
 }
 
 void instantiate_memory(int argc, const char** argv) {
+#if ASCIFY_TEMPLATE_CASE != 14
   template_memory<float>(nullptr, nullptr, 0, argc, argv);
-#if ASCIFY_TEMPLATE_CASE == 0
+#endif
+#if ASCIFY_TEMPLATE_CASE == 0 || ASCIFY_TEMPLATE_CASE == 15
   template_memory<int>(nullptr, nullptr, 0, argc, argv);
+#endif
+#if ASCIFY_TEMPLATE_CASE == 14 || ASCIFY_TEMPLATE_CASE == 15
+  template_memory<double>(nullptr, nullptr, 0, argc, argv);
 #endif
 }

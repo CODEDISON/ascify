@@ -3794,7 +3794,8 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
       // the exact insertion point, even if macros are undefined later.
       for (const std::string &token :
            {std::string("static_assert"), std::string("__is_same"),
-            parameterName, std::string("int"), std::string("float")}) {
+            parameterName, std::string("int"), std::string("float"),
+            std::string("double")}) {
         if (preprocessor.getMacroDefinitionAtLoc(
                 preprocessor.getIdentifierInfo(token), body->getLBracLoc()))
           return false;
@@ -3827,6 +3828,8 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
           types.insert("int");
         else if (astContext.hasSameType(type, astContext.FloatTy))
           types.insert("float");
+        else if (astContext.hasSameType(type, astContext.DoubleTy))
+          types.insert("double");
         else
           return false;
 
