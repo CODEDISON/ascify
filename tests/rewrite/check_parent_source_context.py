@@ -84,6 +84,28 @@ def main():
         success('function_macro', '#define COMBINE(x,y) ((x) * 3 + (y))\n#include "leaf.cuh"\n',
                 '__global__ void add(int *p) { p[threadIdx.x] = COMBINE(p[threadIdx.x], 5); }\n',
                 ('#define COMBINE(x,y) ((x) * 3 + (y))',))
+        # Real Samples also obtain signature types from an earlier sibling,
+        # rather than from text physically written in the root TU. Keep that
+        # sibling in the closure; inline only the dependent leaf in place.
+        sibling = inputs / 'types.cuh'
+        sibling_parent = '#include "types.cuh"\n#include "leaf.cuh"\n'
+        for label, definitions, use, needles in [
+            ('sibling_record', 'struct Value { int x; };\n',
+             '__device__ int read(Value const &v) { return v.x; }\n', ('Value const &v',)),
+            ('sibling_typedef', 'struct Value { int x; };\ntypedef Value Alias;\n',
+             '__device__ int read(Alias const &v) { return v.x; }\n', ('Alias const &v',)),
+            ('sibling_template', 'template<class T> struct Value { T x; };\n',
+             '__device__ int read(Value<int> const &v) { return v.x; }\n', ('Value<int> const &v',)),
+            ('sibling_constant', 'constexpr int bias = 7;\n',
+             '__global__ void add(int *p) { p[threadIdx.x] += bias; }\n', ('+= bias',)),
+            ('sibling_macro', '#define SIBLING_BIAS 13\n',
+             '__global__ void add(int *p) { p[threadIdx.x] += SIBLING_BIAS; }\n', ('+= SIBLING_BIAS',)),
+        ]:
+            sibling.write_text(definitions)
+            generated = success(label, sibling_parent, use, needles)
+            proof = marker.read_text()
+            assert f'context_input={sibling}\t{hashlib.sha256(sibling.read_bytes()).hexdigest()}\n' in proof
+            assert f'context_inline={sibling}\t' not in proof
         first_root = root
         for value in [3, 19]:
             root = inputs / f"parent_{value}.cu"
@@ -127,6 +149,12 @@ def main():
                reason='leaf without pragmas')
         (inputs / 'nested.h').write_text('constexpr int nested = 1;\n')
         reject('nested_include', '#include "nested.h"\n' + leaf, reason='leaf without pragmas')
+        sibling.write_text('struct Value { int x; };\n')
+        sibling_leaf = '__device__ int read(Value const &v) { return v.x; }\n'
+        reject('sibling_include_level', 'constexpr int level = __INCLUDE_LEVEL__;\n' + sibling_leaf,
+               parent_text=sibling_parent, reason='expanded tokens or final macro state differ')
+        reject('sibling_pragma', '#pragma pack(push, 1)\n' + sibling_leaf + '#pragma pack(pop)\n',
+               parent_text=sibling_parent, reason='leaf without pragmas')
         root.write_text(parent)
         child.write_text(leaf)
         plain = work / 'nonrecursive.cce'
@@ -144,7 +172,7 @@ def main():
         assert 'Proven contextual' not in result.stdout
         assert 'context_inline=' not in Path(str(normal) + '.headers/.ascify-local-closure').read_text()
         print('nonrecursive behavior and independent staged header unchanged')
-        print('parent source context: 10 successes, 7 atomic refusal pairs, 2 mode boundaries passed')
+        print('parent source context: 15 successes, 9 atomic refusal pairs, 2 mode boundaries passed')
 
 
 if __name__ == '__main__':

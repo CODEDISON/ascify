@@ -8022,16 +8022,19 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
         nvidiaSampleMacroObservationRanges.push_back(invocation);
     }
   }
-  // A local leaf can only be parsed with the root macro state that was active
-  // at this include. Record the dependency, not an instruction to copy a -D.
+  // A local leaf can depend on macros from the root or an earlier selected
+  // sibling. Record the dependency, not an instruction to copy a -D.
   // LocalHeader.cpp still proves a same-position expansion and exact inputs.
   if (macroInfo != nullptr && localHeaderContext != nullptr &&
       localHeaderContext->depth == 0 && localHeaderContext->plan != nullptr) {
     const auto definition = sourceManager.getSpellingLoc(macroInfo->getDefinitionLoc());
     const auto use = sourceManager.getExpansionLoc(MacroNameTok.getLocation());
     if (definition.isValid() && use.isValid() &&
-        sourceManager.isWrittenInMainFile(definition) &&
-        !sourceManager.isWrittenInMainFile(use))
+        !sourceManager.isWrittenInMainFile(use) &&
+        (sourceManager.isWrittenInMainFile(definition) ||
+         (sourceManager.getFileID(definition) != sourceManager.getFileID(use) &&
+          localHeaderContext->plan->isSelectedRootHeader(
+              sourceManager.getFilename(definition).str()))))
       localHeaderContext->plan->requireInheritedSourceContext(
           sourceManager.getFilename(use).str());
   }
@@ -9101,7 +9104,10 @@ void AscifyAction::EndSourceFileAction() {
       localHeaderContext->plan != nullptr) {
     // References include declarations in signatures and instantiated bodies.
     // Expansion locations keep a reference introduced by a header macro in
-    // that header; declarations must physically belong to the original root.
+    // that header. Declarations must physically belong to the original root
+    // or another selected direct header. A sibling declaration is available
+    // at this include only because the original parse resolved it; the same
+    // position/token/macro proof still governs the inline transaction.
     // No declaration text, initializer or type is synthesized here.
     class ParentSourceDependencies
         : public clang::RecursiveASTVisitor<ParentSourceDependencies> {
@@ -9114,7 +9120,9 @@ void AscifyAction::EndSourceFileAction() {
         const auto definition = source.getSpellingLoc(declaration->getLocation());
         if (use.isValid() && definition.isValid() &&
             !source.isWrittenInMainFile(use) &&
-            source.isWrittenInMainFile(definition))
+            (source.isWrittenInMainFile(definition) ||
+             (source.getFileID(definition) != source.getFileID(use) &&
+              plan.isSelectedRootHeader(source.getFilename(definition).str()))))
           plan.requireInheritedSourceContext(source.getFilename(use).str());
       }
      public:
