@@ -68,6 +68,7 @@ THE SOFTWARE.
 #include "DeviceMemoryLowering.h"
 #include "UniformBlockReduction.h"
 #include "CudaVec3AbiBoundary.h"
+#include "CudaTextureBoundary.h"
 
 using namespace ascify;
 
@@ -764,12 +765,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 65753)
+  if (contents.size() != 67401)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "1e7495d398dbb4eac3194c9ece12997c3737cd0484f533be65f080be9b23c4cd");
+      "9fcbbfbdb59ff1b3e997aba99c06ef9d4b49dde8f51a035182b7693e1b7faef8");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -796,12 +797,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 65753)
+  if (invalidBuffer || contents.size() != 67401)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "1e7495d398dbb4eac3194c9ece12997c3737cd0484f533be65f080be9b23c4cd");
+      "9fcbbfbdb59ff1b3e997aba99c06ef9d4b49dde8f51a035182b7693e1b7faef8");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -865,6 +866,9 @@ bool isAdmittedCudaRuntimeStatusCall(
   // generic checkCudaErrors macro.
   static const char *const admittedNames[] = {
       "cudaMalloc", "cudaFree", "cudaMemcpy", "cudaMemcpyAsync",
+      "cudaMallocPitch", "cudaMallocArray", "cudaMalloc3DArray", "cudaFreeArray",
+      "cudaMemcpy2D", "cudaMemset2D", "cudaMemcpyToArray", "cudaMemcpy3D",
+      "cudaCreateTextureObject", "cudaDestroyTextureObject",
       "cudaMemset", "cudaMemsetAsync", "cudaMallocHost",
       "cudaProfilerStart", "cudaProfilerStop",
       "cudaLaunchHostFunc",
@@ -1793,7 +1797,7 @@ static auto runtimeHeaderMemberClass(const Member *member, long)
 }
 
 static bool requiresCudaCompatHeader(llvm::StringRef name) {
-  return name == "__global__" ||
+  return ascify::IsCudaTextureName(name) || name == "__global__" ||
          name == "cudaMalloc" ||
          name == "cudaFree" ||
          name == "cudaMemcpy" ||
@@ -4128,6 +4132,19 @@ bool AscifyAction::RewriteToken(clang::Lexer &, clang::Token &tok) {
       return false;
   }
 
+  if (ascify::IsCudaTextureName(name)) {
+    const auto &source = getCompilerInstance().getSourceManager();
+    if (!source.isWrittenInMainFile(tok.getLocation()) ||
+        !cudaTextureLiteralOffsets.count(source.getFileOffset(tok.getLocation()))) {
+      const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error,
+          "CUDA texture boundary: raw texture name '%0' has no literal SDK proof");
+      getCompilerInstance().getDiagnostics().Report(tok.getLocation(),diagnostic) << name;
+      cudaRuntimeApiBoundaryFailed = true;
+      return false;
+    }
+    needsCudaTextureHeader = true;
+  }
   if (requiresCudaCompatHeader(name))
     needsCudaCompatHeader = true;
 
@@ -7972,13 +7989,52 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
       lexer.LexFromRawLexer(token);
     }
   }
+  return auditCudaRuntimeApiRecords(false);
+}
+
+bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  std::set<unsigned> auditedFiles, nativeFiles;
+  std::set<unsigned> frozenTextureUtilityFiles;
+  for (auto info = source.fileinfo_begin(); info != source.fileinfo_end(); ++info) {
+    const auto file = source.translateFile(info->first);
+    if (file.isInvalid() || cudaRuntimeApiSdkFileIds.count(file.getHashValue()) ||
+        isOwnedCudaCompilerInput(file, compiler, textureOnly)) continue;
+    auditedFiles.insert(file.getHashValue());
+    const auto begin = source.getLocForStartOfFile(file);
+    if (textureOnly) {
+      if (frozenNvidiaSampleHelperFileRole(source, begin) != 0)
+        frozenTextureUtilityFiles.insert(file.getHashValue());
+      // exception.h is the one templated dependency outside the five existing
+      // helper roles. Require its exact parsed bytes and the authenticated
+      // immediate helper_functions include instance; a basename is not proof.
+      const auto include = source.getIncludeLoc(file);
+      bool invalid = false;
+      const auto bytes = source.getBufferData(file, &invalid);
+      if (!invalid && llvm::sys::path::filename(source.getFilename(begin)) == "exception.h" &&
+          include.isValid() &&
+          frozenNvidiaSampleHelperFileRole(source, include) == FrozenOfficialNvidiaSampleHelperFunctions &&
+          bytes.size() == 6168 && sha256Equals(bytes,
+              "ad043023a652bf3610671aad88237383c7bf2e17c66f8da5830d1d668fe7bbe7"))
+        frozenTextureUtilityFiles.insert(file.getHashValue());
+    }
+    const auto *entry = source.getFileEntryForID(file);
+    if (source.isInSystemHeader(begin) && entry != nullptr &&
+        !source.isFileOverridden(entry) &&
+        physicalSourceFileMatches(source.getFilename(begin), *entry, source) &&
+        (pathIsWithinPhysicalDirectory(source.getFilename(begin), "/usr/include") ||
+         pathIsWithinPhysicalDirectory(source.getFilename(begin), "/usr/lib/gcc")))
+      nativeFiles.insert(file.getHashValue());
+  }
   class RecordAudit : public clang::RecursiveASTVisitor<RecordAudit> {
   public:
     RecordAudit(clang::ASTContext &context, clang::SourceManager &source,
                 const std::set<unsigned> &sdk,
                 const std::set<unsigned> &audited,
-                const std::set<unsigned> &native)
-        : context(context), source(source), sdk(sdk), audited(audited), native(native) {}
+                const std::set<unsigned> &native, const std::set<unsigned> &frozenTextureUtilityFiles, bool textureOnly)
+        : context(context), source(source), sdk(sdk), audited(audited), native(native), frozenTextureUtilityFiles(frozenTextureUtilityFiles),
+          textureOnly(textureOnly) {}
     bool shouldVisitTemplateInstantiations() const { return true; }
     bool shouldVisitImplicitCode() const { return true; }
     bool TraverseInitListExpr(clang::InitListExpr *expression) {
@@ -7997,9 +8053,14 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
         if (definition.isValid() &&
             sdk.count(source.getFileID(definition).getHashValue()) &&
             declaration->getDeclContext()->getRedeclContext()->isTranslationUnit() &&
-            (name == "cudaDeviceProp" || name == "cudaFuncAttributes")) {
-          if (syntax->getNumInits() == 0)
+            ((!textureOnly && (name == "cudaDeviceProp" || name == "cudaFuncAttributes")) ||
+             ascify::IsCudaTextureRecord(declaration))) {
+          if (ascify::IsCudaTextureRecord(declaration)) {
+            if (ascify::IsCudaTextureZeroInitializer(syntax,context,name == "cudaMemcpy3DParms"))
+              return true;
+          } else if (syntax->getNumInits() == 0) {
             return true;
+          }
           const auto location = source.getExpansionLoc(syntax->getBeginLoc());
           if (location.isValid() &&
               audited.count(source.getFileID(location).getHashValue())) {
@@ -8035,6 +8096,7 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
       return inspect(expression->getType(), expression->getExprLoc());
     }
     bool VisitFunctionDecl(clang::FunctionDecl *function) {
+      if (textureOnly) return true;
       const auto location = source.getExpansionLoc(function->getLocation());
       if (location.isInvalid() ||
           !audited.count(source.getFileID(location).getHashValue()) ||
@@ -8060,6 +8122,7 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
       return inspectEnumInterface(result, location);
     }
     bool VisitTypeDecl(clang::TypeDecl *declaration) {
+      if (textureOnly) return true;
       const auto location = source.getExpansionLoc(declaration->getLocation());
       if (location.isInvalid() ||
           !audited.count(source.getFileID(location).getHashValue()))
@@ -8084,6 +8147,14 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
       }
       return true;
     }
+    bool VisitDeclRefExpr(clang::DeclRefExpr *expression) {
+      if (!textureOnly || !expression->hasExplicitTemplateArgs()) return true;
+      for (const auto &argument : expression->template_arguments())
+        if (argument.getArgument().getKind() == clang::TemplateArgument::Type &&
+            !inspect(argument.getArgument().getAsType(), argument.getLocation(), false))
+          return false;
+      return true;
+    }
     bool VisitTypeTraitExpr(clang::TypeTraitExpr *expression) {
       for (unsigned i = 0; i < expression->getNumArgs(); ++i)
         if (!inspect(expression->getArg(i)->getType(), expression->getExprLoc(), false))
@@ -8091,6 +8162,7 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
       return true;
     }
     bool VisitUnaryExprOrTypeTraitExpr(clang::UnaryExprOrTypeTraitExpr *expression) {
+      if (ascify::IsCudaTextureZeroSize(expression,context,sdk,native)) return true;
       return inspect(expression->getTypeOfArgument(), expression->getExprLoc(), false);
     }
     bool VisitCXXTypeidExpr(clang::CXXTypeidExpr *expression) {
@@ -8111,6 +8183,7 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
       return true;
     }
     bool VisitCastExpr(clang::CastExpr *expression) {
+      if (textureOnly) return true;
       const auto location = source.getExpansionLoc(expression->getExprLoc());
       if (location.isInvalid() ||
           !audited.count(source.getFileID(location).getHashValue()))
@@ -8153,6 +8226,7 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
       return false;
     }
     bool VisitBinaryOperator(clang::BinaryOperator *expression) {
+      if (textureOnly) return true;
       const auto location = source.getExpansionLoc(expression->getExprLoc());
       if (location.isInvalid() ||
           !audited.count(source.getFileID(location).getHashValue()) ||
@@ -8218,6 +8292,7 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
     }
     bool inspectEnumNumericOperand(const clang::Expr *operand,
                                    clang::SourceLocation location) {
+      if (textureOnly) return true;
       location = source.getExpansionLoc(location);
       if (operand == nullptr || location.isInvalid() ||
           !audited.count(source.getFileID(location).getHashValue()))
@@ -8350,6 +8425,12 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
       // native implementation templates remain independently audited.
       if (type->isDependentType() &&
           !native.count(source.getFileID(location).getHashValue())) {
+        // Exact parsed bytes identify the already reviewed Sample helpers.
+        // Their uninstantiated generic utilities do not establish a texture
+        // layout; concrete instantiations still traverse the ordinary checks.
+        // User templates and the full Runtime removal gate remain unchanged.
+        if (textureOnly && frozenTextureUtilityFiles.count(source.getFileID(location).getHashValue()))
+          return true;
         badLocation = location;
         badName = "<dependent type>";
         badReason = "unproved retained dependent type observation";
@@ -8382,7 +8463,7 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
           if (!inspect(parameter, location, permitExplicitAdapters))
             return false;
       }
-      if (!permitExplicitAdapters)
+      if (!permitExplicitAdapters && !textureOnly)
         if (const auto *enumeration = type->getAs<clang::EnumType>()) {
           const auto *declaration = enumeration->getDecl();
           const auto definition = source.getSpellingLoc(declaration->getLocation());
@@ -8418,6 +8499,7 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
         }
         return true;
       }
+      if (textureOnly && !ascify::IsCudaTextureRecord(declaration)) return true;
       const auto name = declaration->getName();
       // Existing explicit runtime type adapters retain their published
       // contracts. dim3 retains the separately proven host-local initializer
@@ -8429,10 +8511,13 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
           declaration->getDeclContext()->getRedeclContext()->isTranslationUnit() &&
           name == "dim3")
         return true;
+      if (permitExplicitAdapters && ascify::IsCudaTextureRecord(declaration))
+        return true;
       const auto mapped = CUDA_RUNTIME_TYPE_NAME_MAP.find(name);
       if (permitExplicitAdapters &&
           declaration->getDeclContext()->getRedeclContext()->isTranslationUnit() &&
-          (name == "cudaDeviceProp" || name == "cudaFuncAttributes") &&
+          (name == "cudaDeviceProp" || name == "cudaFuncAttributes" ||
+           ascify::IsCudaTextureRecord(declaration)) &&
           mapped != CUDA_RUNTIME_TYPE_NAME_MAP.end() &&
           !Statistics::isUnsupported(mapped->second))
         return true;
@@ -8445,11 +8530,56 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
     const std::set<unsigned> &sdk;
     const std::set<unsigned> &audited;
     const std::set<unsigned> &native;
+    const std::set<unsigned> &frozenTextureUtilityFiles;
+    const bool textureOnly;
     std::set<const clang::RecordDecl *> reflectedRecords;
     std::set<const clang::VarDecl *> inquiryVariables;
-  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles);
+  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, textureOnly);
   if (!records.TraverseDecl(compiler.getASTContext().getTranslationUnitDecl()))
-    return reject(records.badLocation, records.badReason, records.badName);
+    {
+      const auto diagnostic = compiler.getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error,
+          "CUDA runtime-API header boundary: %0 '%1'");
+      compiler.getDiagnostics().Report(records.badLocation, diagnostic)
+          << records.badReason << records.badName;
+      return false;
+    }
+  return true;
+}
+
+bool AscifyAction::isAdmittedCudaTextureMacroUse(clang::SourceLocation location) {
+  auto &source=getCompilerInstance().getSourceManager();
+  const auto written=source.getSpellingLoc(location);
+  if (written.isInvalid() || !source.isWrittenInMainFile(written)) return false;
+  const auto file=source.getFileID(written);
+  const unsigned offset=source.getFileOffset(written);
+  clang::Token token;
+  if (clang::Lexer::getRawToken(written,token,source,getCompilerInstance().getLangOpts(),true))
+    return false;
+  const bool layeredFlag=clang::Lexer::getSpelling(token,source,
+      getCompilerInstance().getLangOpts())=="cudaArrayLayered";
+  const NvidiaSampleHelperMacroCandidate *helper=nullptr;
+  for (const auto &candidate:nvidiaSampleHelperMacroCandidates) {
+    const auto &range=candidate.invocationRange;
+    if (range.file==file && range.beginOffset<offset && offset<range.endOffset) {
+      if (helper || candidate.kind!=NvidiaSampleHelperMacroKind::CheckCudaErrors ||
+          !candidate.statusDomainProven) return false;
+      helper=&candidate;
+    }
+  }
+  // Completed callback history catches argument prescan before stringization
+  // or token-pasting. Only the exact authenticated helper invocation and the
+  // SDK flag's own single-token expansion may enclose this literal token.
+  for (const auto &range:cudaLaneIdMacroRanges) {
+    if (range.file!=file || offset<range.beginOffset || offset>=range.endOffset) continue;
+    if (layeredFlag && range.beginOffset==offset &&
+        range.endOffset==offset+token.getLength()) continue;
+    if (helper && range.beginOffset==helper->invocationRange.beginOffset &&
+        range.endOffset==helper->invocationRange.endOffset) continue;
+    return false;
+  }
+  if (location.isMacroID() && !helper) return false;
+  if (helper) cudaTextureRequiredHelperOffsets.insert(helper->invocationRange.beginOffset);
   return true;
 }
 
@@ -8463,6 +8593,21 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
   const clang::MacroInfo *macroInfo = MD.getMacroInfo();
+  if (MacroNameTok.getIdentifierInfo()->getName() == "cudaArrayLayered" && macroInfo != nullptr) {
+    const auto definition = sourceManager.getSpellingLoc(macroInfo->getDefinitionLoc());
+    const auto written = sourceManager.getSpellingLoc(MacroNameTok.getLocation());
+    if (definition.isValid() && written.isValid() &&
+        cudaRuntimeApiSdkFileIds.count(sourceManager.getFileID(definition).getHashValue()) &&
+        sourceManager.isWrittenInMainFile(written) && !macroInfo->isFunctionLike() &&
+        macroInfo->getNumTokens()==1 &&
+        macroInfo->tokens_begin()->is(clang::tok::numeric_constant) &&
+        getCompilerInstance().getPreprocessor().getSpelling(*macroInfo->tokens_begin())=="0x01") {
+      clang::Token token;
+      if (!clang::Lexer::getRawToken(written,token,sourceManager,getCompilerInstance().getLangOpts(),true) &&
+          clang::Lexer::getSpelling(token,sourceManager,getCompilerInstance().getLangOpts()) == "cudaArrayLayered")
+        cudaTextureLiteralOffsets.insert(sourceManager.getFileOffset(written));
+    }
+  }
   const auto macroBegin = sourceManager.getExpansionLoc(Range.getBegin());
   const auto macroLast = sourceManager.getExpansionLoc(Range.getEnd());
   if (macroBegin.isValid() && macroLast.isValid() &&
@@ -9704,6 +9849,21 @@ void AscifyAction::EndSourceFileAction() {
     return;
   }
   finalizeNvidiaSampleHelperClosure();
+  for (unsigned required:cudaTextureRequiredHelperOffsets) {
+    const bool committed=std::any_of(nvidiaSampleHelperMacroCandidates.begin(),
+        nvidiaSampleHelperMacroCandidates.end(),[&](const auto &candidate) {
+          return candidate.invocationRange.beginOffset==required &&
+              candidate.kind==NvidiaSampleHelperMacroKind::CheckCudaErrors &&
+              candidate.statusDomainProven && candidate.rewritten;
+        });
+    if (!committed) {
+      const auto diagnostic=getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error,
+          "CUDA texture boundary: required frozen helper transaction did not commit");
+      getCompilerInstance().getDiagnostics().Report(diagnostic);
+      return;
+    }
+  }
   if (localHeaderContext != nullptr &&
       localHeaderContext->requireHelperTransaction &&
       !localHeaderContext->helperTransactionCommitted) {
@@ -9716,6 +9876,8 @@ void AscifyAction::EndSourceFileAction() {
   std::string includes;
   if (needsCudaCompatHeader && !hasCudaCompatHeader)
     includes += "#include <ascify/ascify_cuda_compat.hpp>\n";
+  if (needsCudaTextureHeader)
+    includes += "#include <ascify/texture_compat.hpp>\n";
   const bool useSimdTargetRecipe =
       TargetRecipe == ascify::DavC310TargetRecipe::SimdRecipeName;
   const bool hasSelectedTargetHeader =
@@ -10155,6 +10317,41 @@ void AscifyAction::ExecuteAction() {
     nvidiaSampleHelperUnsupportedDeclarationUse =
         hasUnsupportedNvidiaSampleHelperDeclarationUse();
     rewriteProvenNvidiaSampleHelperMacros();
+  }
+  // Texture macro admission consumes the existing helper status proof.
+  // Keep it after that single proof pass and before the raw token rewrites.
+  std::string textureError;
+  clang::SourceLocation textureErrorLocation;
+  // SDK object-like flags have no DeclRefExpr. Prove their completed macro
+  // history here, using the same gate as the AST-bound literal identifiers.
+  for (unsigned offset:cudaTextureLiteralOffsets) {
+    const auto location=SM.getLocForStartOfFile(SM.getMainFileID()).getLocWithOffset(offset);
+    if (!isAdmittedCudaTextureMacroUse(location)) {
+      const auto diagnostic=getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error,"CUDA texture boundary: unproved macro observation of texture flag");
+      getCompilerInstance().getDiagnostics().Report(location,diagnostic);
+      cudaRuntimeApiBoundaryFailed=true;
+      return;
+    }
+  }
+  if (!ascify::ValidateCudaTextureBoundary(getCompilerInstance().getASTContext(),
+          cudaRuntimeApiSdkFileIds,cudaTextureLiteralOffsets,
+          [&](clang::SourceLocation location) {return isAdmittedCudaTextureMacroUse(location);},
+          textureErrorLocation,textureError)) {
+    const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error,"CUDA texture boundary: %0");
+    getCompilerInstance().getDiagnostics().Report(textureErrorLocation,diagnostic) << textureError;
+    cudaRuntimeApiBoundaryFailed = true;
+    return;
+  }
+  // cuda_runtime.h is also a texture entry point and does not set the
+  // separate cuda_runtime_api.h admission flag. Its texture records still
+  // require the same ABI/reflection proof, without broadening the old raw-PP
+  // Runtime boundary to this other entry point.
+  if (!cudaRuntimeApiHeaderAdmitted && !cudaTextureLiteralOffsets.empty() &&
+      !auditCudaRuntimeApiRecords(true)) {
+    cudaRuntimeApiBoundaryFailed = true;
+    return;
   }
   if (TargetPolicy == "dav-c310-vec" && SimtMathMode == "fast") {
     if (TargetRecipe == ascify::DavC310TargetRecipe::SimdRecipeName) {

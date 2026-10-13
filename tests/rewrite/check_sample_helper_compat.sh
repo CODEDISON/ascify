@@ -111,7 +111,7 @@ require_fixed 'auditRawPublishedCompatTokensInFile' "$action_cpp"
 require_fixed 'isAscifyCudaCompatReservedMacro' "$action_cpp"
 require_fixed 'isAscifyCudaCompatPublishedMacro' "$action_cpp"
 require_fixed 'RuntimeLock' "$compat_identifiers"
-require_fixed '1e7495d398dbb4eac3194c9ece12997c3737cd0484f533be65f080be9b23c4cd' \
+require_fixed '9fcbbfbdb59ff1b3e997aba99c06ef9d4b49dde8f51a035182b7693e1b7faef8' \
   "$action_cpp"
 require_fixed '#include <helper_string.h>' "$action_cpp"
 require_fixed 'surface retained' "$action_cpp"
@@ -126,14 +126,14 @@ require_fixed 'const aclError status = cudaGetLastError();' "$compat_header"
 require_fixed '#expression, __FILE__, __LINE__' "$compat_header"
 forbid_fixed 'gpuGetMaxGflopsDeviceId' "$compat_header"
 
-[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 65753 ]
+[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 67401 ]
 if command -v sha256sum >/dev/null 2>&1; then
   compat_header_sha=$(sha256sum "$compat_header" | awk '{print $1}')
 else
   compat_header_sha=$(shasum -a 256 "$compat_header" | awk '{print $1}')
 fi
 [ "$compat_header_sha" = \
-  1e7495d398dbb4eac3194c9ece12997c3737cd0484f533be65f080be9b23c4cd ]
+  9fcbbfbdb59ff1b3e997aba99c06ef9d4b49dde8f51a035182b7693e1b7faef8 ]
 
 official_helper_functions="$fixtures/nvidia_samples/Common/helper_functions.h"
 [ "$(wc -c <"$official_helper_functions" | tr -d ' ')" -eq 2358 ]
@@ -175,6 +175,9 @@ if command -v "$raw_token_clang" >/dev/null 2>&1; then
     "$repo_root/include/ascify/device_contract_reject.hpp" \
     "$repo_root/include/ascify/device_memory_compat.hpp" \
     "$repo_root/include/ascify/cooperative_groups_compat.hpp" \
+    "$repo_root/include/ascify/texture_types.hpp" \
+    "$repo_root/include/ascify/texture_sampling.hpp" \
+    "$repo_root/include/ascify/texture_compat.hpp" \
     "$repo_root/include/ascify/uniform_block_reduction_compat.hpp" 2>&1 | \
     sed -n "s/^raw_identifier[[:space:]][[:space:]]*'\([^']*\)'.*/\1/p" | \
     LC_ALL=C sort -u >"$test_tmp/compat-identifiers.expected"

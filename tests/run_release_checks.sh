@@ -191,6 +191,13 @@ run_check "CUDA device-helper generic integer atomicAdd boundaries" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
     --evidence-dir "$work_dir/generic_atomic"
 
+run_check "CUDA bounded texture SDK ownership and descriptor boundaries" \
+  "$python" -B "$rewrite_dir/check_texture_conversion.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --evidence-dir "$work_dir/texture_conversion"
+
 run_check "CUDA kernel max-only attribute proof boundaries" \
   "$python" -B "$rewrite_dir/check_kernel_attribute_conversion.py" \
     --binary "$ASCIFY_BINARY" \

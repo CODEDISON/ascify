@@ -1,0 +1,33 @@
+# Bounded float texture conversion
+
+The texture adapter is under validation. Native engineering probes have passed on Ascend950DT with CANN 9.1; no original CUDA Sample success is claimed by this document.
+
+## Accepted surface
+
+The frontend requires physical CUDA SDK declarations and direct literal references. The SDK `cudaArrayLayered` macro is materialized as its exact `0x01` literal, retaining its int prvalue type; unproved enclosing macro observers are rejected. Texture calls inside `checkCudaErrors` require the authenticated frozen helper and its successfully committed rewrite transaction. It maps float32 single-component arrays, layered 2D arrays, owned pitched allocations, and float `tex2D`/`tex2DLayered` calls. Descriptor fields retain their CUDA meanings; descriptor binary layout is private. User declarations, indirect function calls, macro-generated names, general layout/reflection, and dependent texture fetches are rejected. Literal zero initialization and a narrowly proved native `memset` of exactly the same whole descriptor are admitted.
+
+The public APIs include array/pitch allocation and free, 2D row copies and memset, copies to an array, array/pointer `cudaMemcpy3D`, texture creation/destruction, and the associated descriptors. Width/height/layer extents are positive and at most 2^20. Pitches and pointer offsets are bytes; an array endpoint makes the copy extent width count float elements. Bounds and multiplication overflow are checked. Arrays support float32 with no flags except the layered flag for layered allocation. Resource views, mipmaps, normalized integer reads, sRGB, mirror/border addressing, and other unsupported descriptor settings return an explicit error.
+
+## Sampling and numerical limits
+
+Point filtering uses floor coordinates. Normalized wrap/clamp and unnormalized clamp are supported; unnormalized wrap is converted to clamp as specified by CUDA. Linear filtering applies the half-texel offset and accepts only weights exactly on the 1/256 grid. Other fractional coordinates, nonfinite coordinates, out-of-range layers, and a nonfinite texel actually loaded by the sampler set a sticky GM error. A blocking public synchronization or copy reports that error. A failed copy leaves the host destination unchanged when failure is detected before copying.
+
+Interpolation uses float arithmetic over finite participating texels. The adapter does not promise bitwise equivalence to all hardware texture interpolation or an undocumented FMA/rounding rule. Engineering probes compare independently listed values; original Samples must separately pass their complete, unchanged CPU acceptance criteria. Hardware texture-cache performance and unrestricted asynchronous equivalence are not claimed.
+
+## Ownership and lifetime
+
+Allocations, device descriptors and sticky words use real ACL memory. The registry is process-wide across translation units and records device/context ownership. API operations propagate actual allocation, copy, synchronization and free errors. Copies preserve row padding and expose backing updates to later fetches. Non-host-to-host copies and row memset wait for the real default stream before issuing immediate ACL operations, even before a texture object is created; synchronization errors are returned before writing destination data.
+
+Freeing an array or an owned pitched allocation synchronizes pending device work, invalidates every referring device descriptor, and frees the backing GM allocation. It does not silently destroy the separately owned texture objects or defer the backing free. A retired registry slot remains reserved while its texture objects exist. A later destroy frees that object's descriptor and recycles the retired slot after the final reference. Using a texture after its backing has been freed is outside the valid CUDA resource precondition; this adapter detects it before reading backing memory and reports a sticky error. No claim is made that CUDA itself defines such a fetch.
+
+If any descriptor invalidation fails, the backing allocation is retained and the ACL error is returned. If backing free fails, the allocation record remains live. Some descriptors may already have been invalidated in either failure case; no rollback is promised. A successful device reset discards corresponding live and retired registry entries only after the real reset succeeds. Concurrent reset while other threads use the device is outside the CUDA reset precondition.
+
+The registry currently bounds simultaneously retained allocations and texture objects to 128 each; capacity exhaustion is an explicit allocation error. Blocking APIs may synchronize the entire device while texture objects exist. Invalid arbitrary raw device tokens remain outside the valid handle precondition.
+
+## Validation status
+
+The native v2 registry probe passed real two-TU compilation, library/ELF checks and NPU execution: 32 listed fetch values, 36 array readbacks, padding, nine initial host rejections, three released-storage rejections, three nonfinite-texel rejections, 130 retirement cycles, sticky propagation and two resets. Earlier v1 evidence remains preserved with its superseded lifetime restriction.
+
+Native product v9 built, installed and passed CTest. Its actual frontend matrix passed all 57 cases: 17 admitted and 40 rejected with normal failure receipts. This includes the independent record/reflection gate for cuda_runtime.h, exact frozen helper dependencies, macro observers and type aliases. Earlier failing roles remain preserved. A separate native default-stream probe passed 73,728 CPU values across six copy/memset paths and three rounds without any texture objects; it also verified that an unrelated nonblocking stream remained pending until explicitly released. No original texture Sample has yet been accepted.
+
+Sources: [CUDA Runtime memory API](https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__MEMORY.html), [CUDA texture objects](https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__TEXTURE__OBJECT.html), and [CUDA 13.0.1 Programming Guide](https://docs.nvidia.com/cuda/archive/13.0.1/cuda-c-programming-guide/index.html). Actual CANN signatures and engineering evidence are archived by the sample-conversion task; they do not replace public CUDA numerical requirements.

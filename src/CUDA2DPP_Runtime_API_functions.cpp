@@ -48,6 +48,23 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   m["cudaProfilerStop"] = {"ascify::cudaProfilerStop", CONV_PROFILER, API_RUNTIME, 0};
   m["cudaLaunchHostFunc"] = {"ascify::cudaLaunchHostFunc", CONV_EXECUTION, API_RUNTIME, 0};
   m["cudaFreeHost"]                                            = {"ascify::cudaFreeHost",                                   CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  // Bounded texture/storage surface, guarded by CudaTextureBoundary.
+  m["cudaMallocPitch"] = {"ascify::cudaMallocPitch", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaMallocArray"] = {"ascify::cudaMallocArray", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaMalloc3DArray"] = {"ascify::cudaMalloc3DArray", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaFreeArray"] = {"ascify::cudaFreeArray", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaMemcpy2D"] = {"ascify::cudaMemcpy2D", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaMemset2D"] = {"ascify::cudaMemset2D", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaMemcpyToArray"] = {"ascify::cudaMemcpyToArray", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaMemcpy3D"] = {"ascify::cudaMemcpy3D", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaCreateTextureObject"] = {"ascify::cudaCreateTextureObject", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaDestroyTextureObject"] = {"ascify::cudaDestroyTextureObject", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaCreateChannelDesc"] = {"ascify::cudaCreateChannelDesc", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["make_cudaExtent"] = {"ascify::make_cudaExtent", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["make_cudaPos"] = {"ascify::make_cudaPos", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["make_cudaPitchedPtr"] = {"ascify::make_cudaPitchedPtr", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["tex2D"] = {"ascify::tex2D", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["tex2DLayered"] = {"ascify::tex2DLayered", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   // Device management
   // CUDA owns lazy runtime/context creation. Route all lifecycle-sensitive
   // calls through the compatibility manager instead of assuming an ACL

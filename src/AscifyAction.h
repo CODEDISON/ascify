@@ -177,6 +177,10 @@ private:
   ascify::DavC310TargetRecipe davC310TargetRecipe;
   bool firstHeader = false;
   bool needsCudaCompatHeader = false;
+  bool needsCudaTextureHeader = false;
+  std::set<unsigned> cudaTextureLiteralOffsets;
+  std::set<unsigned> cudaTextureRequiredHelperOffsets;
+  bool isAdmittedCudaTextureMacroUse(clang::SourceLocation location);
   bool cudaRuntimeApiHeaderAdmitted = false;
   bool cudaProfilerApiHeaderAdmitted = false;
   bool cudaRuntimeApiBoundaryFailed = false;
@@ -245,6 +249,7 @@ private:
   void auditActiveAscifyCudaCompatMacrosAtInsertion();
   void observeCudaRuntimeApiMacroUse(const clang::Token &token);
   bool auditCudaRuntimeApiSurface();
+  bool auditCudaRuntimeApiRecords(bool textureOnly);
   bool auditCudaProfilerApiSurface();
   bool rewriteUnsupportedCudaSmAttribute(const mat::MatchFinder::MatchResult &Result);
   void auditExternalNvidiaSampleHelperPreprocessorUse(

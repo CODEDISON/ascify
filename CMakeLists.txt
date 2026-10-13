@@ -52,6 +52,7 @@ if(NOT ASCIFY_CLANG_TESTS_ONLY)
     src/CUDA2DPP_Runtime_API_functions.cpp
     src/CUDA2DPP_Runtime_API_types.cpp
     src/CudaVec3AbiBoundary.cpp
+    src/CudaTextureBoundary.cpp
     src/DavC310TargetRecipe.cpp
     src/DeviceMemoryLowering.cpp
     src/FrontendCompatibility.cpp

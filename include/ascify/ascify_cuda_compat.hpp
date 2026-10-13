@@ -372,6 +372,16 @@ inline const aclrtDevAttr cudaDevAttrMaxThreadsPerBlock =
 
 namespace detail {
 
+// Optional bounded texture adapter. It installs one immutable callback table
+// only after texture allocation is requested. Existing programs incur no ACL
+// calls or texture-state creation through these hooks.
+struct RuntimeTextureHooks {
+  aclError (*checkPending)();
+  aclError (*freeAllocation)(void *, bool *);
+  void (*afterReset)(int32_t);
+};
+inline std::atomic<const RuntimeTextureHooks *> runtimeTextureHooks{nullptr};
+
 // CUDA initializes its runtime and a device's primary context lazily. ACL has
 // two separate process/device operations instead: aclInit is process-wide and
 // aclrtSetDevice creates the calling thread's default context. Keep that state
@@ -796,7 +806,10 @@ inline aclError cudaGetDeviceCount(int* count) {
 inline aclError cudaDeviceSynchronize() {
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
-  return aclrtSynchronizeDevice();
+  const aclError status = aclrtSynchronizeDevice();
+  if (status != ACL_SUCCESS) return status;
+  const auto *hooks = detail::runtimeTextureHooks.load(std::memory_order_acquire);
+  return hooks ? hooks->checkPending() : ACL_SUCCESS;
 }
 
 inline aclError cudaDeviceReset() {
@@ -810,6 +823,10 @@ inline aclError cudaDeviceReset() {
   }
   detail::selectedDeviceForThread() = current;
   status = detail::runtime_manager.resetDevice(current);
+  if (status == ACL_SUCCESS) {
+    const auto *hooks = detail::runtimeTextureHooks.load(std::memory_order_acquire);
+    if (hooks) hooks->afterReset(current);
+  }
   return detail::rememberLifecycleError(status);
 }
 
@@ -841,6 +858,12 @@ inline aclError cudaFree(void* device_pointer) {
   if (device_pointer == nullptr) { return ACL_SUCCESS; }
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
+  const auto *hooks = detail::runtimeTextureHooks.load(std::memory_order_acquire);
+  if (hooks) {
+    bool handled = false;
+    const aclError status = hooks->freeAllocation(device_pointer, &handled);
+    if (handled || status != ACL_SUCCESS) return status;
+  }
   return aclrtFree(device_pointer);
 }
 
@@ -925,6 +948,11 @@ inline aclError cudaMemcpy(void* destination, const void* source, size_t bytes,
     const aclError status = aclrtSynchronizeStream(nullptr);
     if (status != ACL_SUCCESS) { return status; }
   }
+  const auto *hooks = detail::runtimeTextureHooks.load(std::memory_order_acquire);
+  if (hooks) {
+    const aclError status = hooks->checkPending();
+    if (status != ACL_SUCCESS) return status;
+  }
   return aclrtMemcpy(destination, bytes, source, bytes, kind);
 }
 
@@ -1006,7 +1034,10 @@ inline aclError cudaStreamDestroy(aclrtStream stream) {
 inline aclError cudaStreamSynchronize(aclrtStream stream) {
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
-  return aclrtSynchronizeStream(stream);
+  const aclError status = aclrtSynchronizeStream(stream);
+  if (status != ACL_SUCCESS) return status;
+  const auto *hooks = detail::runtimeTextureHooks.load(std::memory_order_acquire);
+  return hooks ? hooks->checkPending() : ACL_SUCCESS;
 }
 
 using cudaHostFn_t = void (*)(void*);
@@ -1080,7 +1111,10 @@ inline aclError cudaEventRecord(
 inline aclError cudaEventSynchronize(aclrtEvent event) {
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
-  return aclrtSynchronizeEvent(event);
+  const aclError status = aclrtSynchronizeEvent(event);
+  if (status != ACL_SUCCESS) return status;
+  const auto *hooks = detail::runtimeTextureHooks.load(std::memory_order_acquire);
+  return hooks ? hooks->checkPending() : ACL_SUCCESS;
 }
 
 inline aclError cudaEventQuery(aclrtEvent event) {
