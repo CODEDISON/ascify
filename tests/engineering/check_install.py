@@ -35,17 +35,59 @@ def run(command):
                     "stderr_sha256": hashlib.sha256(result.stderr.encode()).hexdigest()}
 
 
+def check_installed_wrappers(binary, reference, installed=None):
+    # Compare real installation artifacts with the selected toolchain, rather
+    # than duplicating CMake's filename filters. Extensionless wrappers and
+    # implementation fragments must retain the same bytes as their headers.
+    reference = reference.resolve()
+    reference_wrapper = reference / "include/__clang_cuda_runtime_wrapper.h"
+    require(reference_wrapper.is_file(), "Reference resource directory lacks the CUDA runtime wrapper")
+    candidates = ([installed.resolve() / "include/__clang_cuda_runtime_wrapper.h"] if installed else
+                  (binary.parent.parent / "libexec/ascify/clang").glob("*/include/__clang_cuda_runtime_wrapper.h"))
+    matches = [path.parent.parent for path in candidates
+               if path.is_file() and digest(path) == digest(reference_wrapper)]
+    require(len(matches) == 1, "Cannot identify one installed resource tree matching the selected toolchain")
+    installed = matches[0]
+    wrappers = reference / "include/cuda_wrappers"
+    require(wrappers.is_dir(), "Reference resource directory lacks cuda_wrappers")
+    files = {}
+    missing = []
+    different = []
+    for path in sorted(wrappers.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(reference)
+        destination = installed / relative
+        if not destination.is_file():
+            missing.append(str(relative))
+            continue
+        checksum = digest(path)
+        if digest(destination) != checksum:
+            different.append(str(relative))
+        files[str(relative)] = checksum
+    require(not missing, "Installed compiler resources are missing: " + ", ".join(missing))
+    require(not different, "Installed compiler resources differ: " + ", ".join(different))
+    require(files, "Reference cuda_wrappers directory is empty")
+    return {"installed_resource_dir": str(installed), "reference_resource_dir": str(reference),
+            "files_sha256": files}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
     parser.add_argument("--cuda-path", required=True, type=Path)
     parser.add_argument("--resource-dir", type=Path)
+    parser.add_argument("--installed-resource-dir", type=Path,
+                        help="Installed resource tree when using non-default GNUInstallDirs")
     args = parser.parse_args()
     binary = args.binary.resolve()
     require(binary.is_file() and os.access(binary, os.X_OK), "--binary must be executable")
     require((args.cuda_path / "include/cuda_runtime.h").is_file(), "CUDA parsing root lacks cuda_runtime.h")
     source = REPO / "examples/vector_add.cu"
-    identity = {"binary_sha256": digest(binary), "source_sha256": digest(source)}
+    runtime_source = REPO / "tests/rewrite/fixtures/runtime_api_header/direct.cu"
+    identity = {"binary_sha256": digest(binary), "source_sha256": digest(source),
+                "runtime_source_sha256": digest(runtime_source)}
+    installed_wrappers = check_installed_wrappers(binary, args.resource_dir, args.installed_resource_dir) if args.resource_dir else None
     require(not re.search(r"\bdouble\b", source.read_text()), "Public example must use the supported FP32 domain")
     with tempfile.TemporaryDirectory(prefix="ascify-install-check-") as directory:
         work = Path(directory)
@@ -73,6 +115,26 @@ def main():
         conversion["output_sha256"] = digest(output)
         conversion["receipt_sha256"] = digest(receipt)
 
+        # Runtime header projection authenticates every compiler-wrapper
+        # ancestor against the installation, even with an explicit SDK/resource
+        # search path. A usable public example alone does not exercise it.
+        runtime_output = work / "runtime_api.cce"
+        runtime_receipt = work / "runtime_api.receipt.json"
+        runtime_command = [str(binary), str(runtime_source), "--default-preprocessor",
+                           "--cuda-path=" + str(args.cuda_path.resolve()),
+                           "--target-policy=dav-c310-vec", "--simt-math=fast",
+                           "--migration-receipt=" + str(runtime_receipt), "-o", str(runtime_output)]
+        if args.resource_dir:
+            runtime_command.append("--clang-resource-directory=" + str(args.resource_dir.resolve()))
+        runtime_result, runtime_conversion = run(runtime_command + ["--", "-x", "cuda", "-std=c++17"])
+        require(runtime_result.returncode == 0, "Runtime API installation conversion failed:\n" + runtime_result.stderr[-8000:])
+        runtime_text = runtime_output.read_text()
+        require("cuda_runtime_api.h" not in runtime_text and "ascify/ascify_cuda_compat.hpp" in runtime_text,
+                "Runtime API installation conversion did not adapt its include")
+        require(json.loads(runtime_receipt.read_text())["status"] == "succeeded",
+                "Runtime API installation receipt did not report success")
+        runtime_conversion.update(output_sha256=digest(runtime_output), receipt_sha256=digest(runtime_receipt))
+
         # An explicit invalid resource path must not silently use the installation.
         sentinel = b"previous output must survive a failed conversion\n"
         output.write_bytes(sentinel)
@@ -85,11 +147,14 @@ def main():
         require(rejected.returncode != 0 and "resource" in rejected.stderr.lower(),
                 "Explicit invalid resource directory was not diagnosed")
         require(output.read_bytes() == sentinel, "Failed conversion replaced existing output")
-        require(identity["binary_sha256"] == digest(binary) and identity["source_sha256"] == digest(source),
+        require(identity["binary_sha256"] == digest(binary) and identity["source_sha256"] == digest(source)
+                and identity["runtime_source_sha256"] == digest(runtime_source),
                 "Binary or source changed while checking installation")
         print(json.dumps({"schema": "ascify.install-check.v1", "passed": True,
                           **identity, "resource_discovery": "explicit" if args.resource_dir else "automatic",
                           "example_conversion": conversion, "invalid_resource_rejection": invalid_record,
+                          "installed_cuda_wrappers": installed_wrappers,
+                          "runtime_api_conversion": runtime_conversion,
                           "input_and_binary_unchanged": True,
                           "target_compilation": "not_run", "device_execution": "not_run"}, indent=2))
     return 0

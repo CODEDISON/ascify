@@ -146,6 +146,8 @@ if(NOT ASCIFY_CLANG_TESTS_ONLY)
       FILES_MATCHING
       PATTERN "*.h" PATTERN "*.modulemap"
       PATTERN "algorithm" PATTERN "complex" PATTERN "new"
+      PATTERN "cuda_wrappers/cmath"
+      PATTERN "cuda_wrappers/bits/basic_string.tcc"
       PATTERN "ppc_wrappers" EXCLUDE
       PATTERN "omp-tools.h" EXCLUDE PATTERN "omp.h" EXCLUDE
       PATTERN "ompt.h" EXCLUDE PATTERN "openmp_wrappers" EXCLUDE)
