@@ -4882,10 +4882,12 @@ bool AscifyAction::rewriteFrontendHostMath(
     return false;
   const bool isMaximum = callee->getName() == "max";
   const llvm::StringRef sourceName = isMaximum ? "max" : "min";
-  const auto argumentType = isMaximum ? clang::BuiltinType::Float
-                                      : clang::BuiltinType::Int;
-  const llvm::StringRef targetName = isMaximum ? "__builtin_fmaxf"
-                                              : "__builtin_elementwise_min";
+  const bool isFloatMaximum = isMaximum &&
+      callee->getReturnType()->isSpecificBuiltinType(clang::BuiltinType::Float);
+  const auto argumentType = isFloatMaximum ? clang::BuiltinType::Float
+                                           : clang::BuiltinType::Int;
+  const llvm::StringRef targetName = isFloatMaximum ? "__builtin_fmaxf"
+      : isMaximum ? "__builtin_elementwise_max" : "__builtin_elementwise_min";
   auto &sourceManager = *Result.SourceManager;
   const std::string expectedHeader =
       frontendCompatibility.canonicalRoot + "/host_math.h";
@@ -4900,7 +4902,7 @@ bool AscifyAction::rewriteFrontendHostMath(
         "call with no qualifier or global :: in a non-template host function; "
         "this use is not admitted");
     diagnostics.Report(reference->getLocation(), id)
-        << sourceName << (isMaximum ? "float/float" : "int/int");
+        << sourceName << (isFloatMaximum ? "float/float" : "int/int");
     return false;
   };
   // A using-declaration can expose the same product function as ns::max.
@@ -7566,7 +7568,8 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
     cudaRuntimeApiMvsControlModified = true;
   // Rewritten builtin tokens are preprocessed again by the target compiler.
   // Refuse a translation unit that gives that output name macro semantics.
-  if (name == "__builtin_fmaxf" || name == "__builtin_elementwise_min")
+  if (name == "__builtin_fmaxf" || name == "__builtin_elementwise_min" ||
+      name == "__builtin_elementwise_max")
     frontendHostMathBuiltinMacroDefined = true;
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();

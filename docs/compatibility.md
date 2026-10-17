@@ -51,7 +51,7 @@ ownership, rebinding, callback ordering, rollback, and normal process exit.
 | Profiling | An explicit `ASCIFY_PROFILE_DIR` opts into owned CANN collection; link `msprofiler`; unsupported configurations return an error, as described in the [runtime contract](runtime-profiling-and-host-functions.md) |
 | Stream flags | Default creation uses the runtime adapter; nonblocking creation is admitted on the reviewed legacy SIMT / ACL 1.17.0 surface and remains unsupported elsewhere; unknown bits return invalid-parameter status |
 | Device properties | Report the actual SoC name and vector-core count without changing the current binding; publish output only after successful queries; do not invent CUDA compute capability or SM counts |
-| Host math profile | Admit exact `max(float, float)` with `fmaxf` semantics and `min(int, int)`; mixed-type and double max are outside this admission |
+| Host math profile | Admit exact `max(float, float)` with `fmaxf` semantics and `min(int, int)` / `max(int, int)`; mixed-type and double max are outside this admission |
 | Half2 | Proven device-local construction and arithmetic use target constructors/intrinsics, preserving separate half multiplication and addition rounding; unsupported macros, effects, and template contexts do not receive a broad rewrite |
 
 On CANN 9.1, an ordinary ACL stream has no implicit synchronization with the

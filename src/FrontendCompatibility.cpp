@@ -161,13 +161,15 @@ constexpr char kHostMathHeader[] = R"ASCIFY(#ifndef ASCIFY_FRONTEND_COMPAT_ADMIT
 
 // CUDA's float max(a, b) returns fmaxf(a, b), including its NaN behavior.
 // Clang's CUDA wrapper exposes only the device overload. This opt-in parser
-// templates admit float/float max and int/int min; no argument is narrowed.
+// templates admit float/float max and int/int min/max; no argument is narrowed.
 // Ascify rewrites references proven to use this declaration to the builtin.
 namespace ascify_frontend_compat_detail {
 template <bool> struct host_float_max_enabled {};
 template <> struct host_float_max_enabled<true> { using type = int; };
 template <bool> struct host_int_min_enabled {};
 template <> struct host_int_min_enabled<true> { using type = int; };
+template <bool> struct host_int_max_enabled {};
+template <> struct host_int_max_enabled<true> { using type = int; };
 }
 
 template <class A, class B,
@@ -192,6 +194,16 @@ inline int min(A a, B b) {
   return a < b ? a : b;
 }
 
+template <class A, class B,
+          typename ascify_frontend_compat_detail::host_int_max_enabled<
+              __is_same(A, int) && __is_same(B, int)>::type = 0>
+#if defined(__CUDACC__) || defined(__CUDA__)
+__attribute__((host))
+#endif
+inline int max(A a, B b) {
+  return a > b ? a : b;
+}
+
 #endif
 )ASCIFY";
 
@@ -200,13 +212,13 @@ constexpr char kProfileManifest[] =
     "profile=ascify-admitted-v1\n"
     "file=cooperative_groups.h;bytes=5100;sha256=fb1d10ab43fbe45211cd23b879abb03bfdd056430c2d92498f4405ae8c6d2130\n"
     "file=cooperative_groups/reduce.h;bytes=1612;sha256=bc6f9130deaa55a786df70d127a118ecf57b1014dddbb0700a45ef05f597c928\n"
-    "file=host_math.h;bytes=1458;sha256=a151400e55d4f484f8321b5d98384f3585fed01678cda680354cd331a664558d\n";
+    "file=host_math.h;bytes=1872;sha256=c73958a48fb55cd8f05a45e9455ce45f8660273863b17c070f5d1081a396106f\n";
 
 static_assert(sizeof(kAdmissionHeader) - 1 == 5100,
               "admission header identity drifted");
 static_assert(sizeof(kReductionHeader) - 1 == 1612,
               "reduction header identity drifted");
-static_assert(sizeof(kHostMathHeader) - 1 == 1458,
+static_assert(sizeof(kHostMathHeader) - 1 == 1872,
               "host math header identity drifted");
 static_assert(sizeof(kProfileManifest) - 1 == 393,
               "frontend profile manifest identity drifted");
@@ -221,7 +233,7 @@ constexpr RequiredProfileFile kRequiredProfileFiles[] = {
     {"profile.manifest", 393, kProfileManifest},
     {"cooperative_groups.h", 5100, kAdmissionHeader},
     {"cooperative_groups/reduce.h", 1612, kReductionHeader},
-    {"host_math.h", 1458, kHostMathHeader},
+    {"host_math.h", 1872, kHostMathHeader},
 };
 
 std::string pathString(const fs::path& path) {

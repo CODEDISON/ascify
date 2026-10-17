@@ -38,7 +38,9 @@ template<class A, class B> struct admitted<A, B,
 static_assert(admitted<float,float>::value);
 static_assert(!admitted<double,double>::value);
 static_assert(!admitted<float,double>::value);
-static_assert(!admitted<int,int>::value);
+static_assert(admitted<int,int>::value);
+static_assert(!admitted<unsigned,unsigned>::value);
+static_assert(!admitted<int,unsigned>::value);
 static_assert(!admitted<float,int>::value);
 template<class A, class B, class = void> struct min_admitted : std::false_type {};
 template<class A, class B> struct min_admitted<A, B,
@@ -67,9 +69,11 @@ int main() {
   const int integers[] = {0, 1, -1, std::numeric_limits<int>::min(),
                          std::numeric_limits<int>::max()};
   for (int a : integers) for (int b : integers)
-    if (::min(a,b) != (a < b ? a : b)) return 4;
+    if (::min(a,b) != (a < b ? a : b) || ::max(a,b) != (a > b ? a : b)) return 4;
   calls = 0;
   if (::min(once_int(1), once_int(2)) != 1 || calls != 2) return 5;
+  calls = 0;
+  if (::max(once_int(1), once_int(2)) != 2 || calls != 2) return 6;
 }
 '''.replace("HEADER", str(HEADER))
         executable = work / "host-check"
@@ -83,7 +87,7 @@ int main() {
         run(cxx + ["-std=c++17", "-x", "c++", "-", "-o", str(executable)],
             source=user)
         run([str(executable)])
-        print("host math: exact argument domains, 49 floating/25 integer pairs, "
+        print("host math: exact argument domains, 49 floating/50 integer pairs, "
               "single evaluation and user overload passed")
 
         binary = os.environ.get("ASCIFY_BINARY")
@@ -133,6 +137,21 @@ int main() {
             "lambda": ("float choose(float a,float b) { "
                        "return [=] { return max(a,b); }(); }", False),
         }
+        cases.update({
+            "max_int": ("int choose(int a,int b) { return max(a,b); }", True),
+            "max_int_initializer": ("int choose(int a,int b) { int result = ::max(a,b); return result; }", True),
+            "max_int_custom": ("int max(int a,int b) { return a-b; }\nint choose(int a,int b) { return max(a,b); }", True),
+            "max_int_member_builtin": ("struct Own { int __builtin_elementwise_max(int a,int b) { return a-b; } int choose(int a,int b) { return max(a,b); } };", True),
+            "max_int_unsigned": ("unsigned choose(unsigned a,unsigned b) { return max(a,b); }", False),
+            "max_int_mixed": ("unsigned choose(int a,unsigned b) { return max(a,b); }", False),
+            "max_int_macro": ("#define SELECT(a,b) max(a,b)\nint choose(int a,int b) { return SELECT(a,b); }", False),
+            "max_int_builtin_macro": ("#define __builtin_elementwise_max(a,b) ((a)+(b))\nint choose(int a,int b) { return max(a,b); }", False),
+            "max_int_address": ("int choose(int a,int b) { auto p = &max<int,int>; return p(a,b); }", False),
+            "max_int_template": ("template<class T> T choose(T a,T b) { return max(a,b); }\nint instantiate() { return choose(1,2); }", False),
+            "max_int_namespace_using": ("namespace named { using ::max; }\nint choose(int a,int b) { return named::max(a,b); }", False),
+            "max_int_global_initializer": ("int result = max(1,2);", False),
+            "max_int_lambda": ("int choose(int a,int b) { return [=] { return max(a,b); }(); }", False),
+        })
         for name, (text, accepted) in cases.items():
             input_path, output = work / (name + ".cu"), work / (name + ".cce")
             input_path.write_text(text + "\n")
@@ -144,14 +163,18 @@ int main() {
                 generated = output.read_text()
                 expected_builtin = ("__builtin_elementwise_min" if name in
                                     {"int_min", "min_initializer", "min_custom", "min_member_builtin"}
+                                    else "__builtin_elementwise_max" if name.startswith("max_int")
                                     else "__builtin_fmaxf")
-                assert (expected_builtin in generated) == (name not in {"custom", "min_custom"}), generated
+                assert (expected_builtin in generated) == (name not in {"custom", "min_custom", "max_int_custom"}), generated
                 assert "host_math.h" not in generated and "host_float_max_enabled" not in generated
-                if name not in {"custom", "min_custom"}:
+                if name not in {"custom", "min_custom", "max_int_custom"}:
                     assert "::" + expected_builtin + "(a,b)" in generated, generated
                     assert "::::" not in generated, generated
             elif name in {"macro", "address", "template", "namespace_using", "builtin_macro",
-                          "global_initializer", "lambda", "min_macro", "min_builtin_macro"}:
+                          "global_initializer", "lambda", "min_macro", "min_builtin_macro",
+                          "max_int_macro", "max_int_builtin_macro", "max_int_address",
+                          "max_int_template", "max_int_namespace_using",
+                          "max_int_global_initializer", "max_int_lambda"}:
                 which = "min" if name.startswith("min_") else "max"
                 assert f"Ascify frontend host {which} requires" in result.stderr, result.stderr
             if not accepted:
