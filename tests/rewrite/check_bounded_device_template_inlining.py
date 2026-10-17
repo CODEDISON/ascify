@@ -49,6 +49,8 @@ __global__ void kernel(float*p,cudaTextureObject_t t){p[0]=filter<8>(.5f,.5f,t);
     ('host_device', BASE.replace('__device__', '__host__ __device__'), 0),
     ('qualifier_macro', '#define DEVICE __device__\n'+BASE.replace('__device__', 'DEVICE'), 0),
     ('callee_macro', '#define NEXT chain\n'+BASE.replace('x+chain<n-1>', 'x+NEXT<n-1>'), 0),
+    ('nttp_operator_macro', '#define STEP(q) ((q)-1)\n'+BASE.replace('<n-1>', '<STEP(n)>'), 0),
+    ('nttp_parameter_macro', '#define INDEX n\n'+BASE.replace('<n-1>', '<INDEX-1>'), 0),
     ('arithmetic_macro', '#define ADD(a,b) ((a)+(b))\n'+BASE.replace('x+chain<n-1>(x)', 'ADD(x,chain<n-1>(x))'), 0),
     ('hidden_body', '#define BODY return x+chain<n-1>(x);\n'+BASE.replace('return x+chain<n-1>(x);', 'BODY'), 0),
     ('attribute_macro_history', '#define always_inline noinline\n#undef always_inline\n'+BASE, 0),

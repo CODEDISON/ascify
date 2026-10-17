@@ -148,15 +148,21 @@ class FamilyProof {
   bool integerArgument(const Expr *expression, unsigned depth = 0) const {
     if (expression == nullptr || expression->getType().isNull() || depth > MaxDepth ||
         !context.hasSameType(expression->getType(), context.IntTy)) return false;
-    expression = expression->IgnoreParenImpCasts();
+    if (const auto *paren = dyn_cast<ParenExpr>(expression))
+      return literal(paren->getLParen()) && literal(paren->getRParen()) &&
+             integerArgument(paren->getSubExpr(), depth + 1);
+    if (const auto *cast = dyn_cast<ImplicitCastExpr>(expression))
+      return integerArgument(cast->getSubExpr(), depth + 1);
     if (isa<IntegerLiteral>(expression)) return true;
     if (const auto *reference = dyn_cast<DeclRefExpr>(expression))
-      return reference->getDecl() == parameter;
+      return literal(reference->getLocation()) && reference->getDecl() == parameter;
     if (const auto *unary = dyn_cast<UnaryOperator>(expression))
-      return (unary->getOpcode() == UO_Plus || unary->getOpcode() == UO_Minus) &&
+      return literal(unary->getOperatorLoc()) &&
+             (unary->getOpcode() == UO_Plus || unary->getOpcode() == UO_Minus) &&
              integerArgument(unary->getSubExpr(), depth + 1);
     if (const auto *binary = dyn_cast<BinaryOperator>(expression))
-      return (binary->getOpcode() == BO_Add || binary->getOpcode() == BO_Sub) &&
+      return literal(binary->getOperatorLoc()) &&
+             (binary->getOpcode() == BO_Add || binary->getOpcode() == BO_Sub) &&
              integerArgument(binary->getLHS(), depth + 1) &&
              integerArgument(binary->getRHS(), depth + 1);
     return false;
