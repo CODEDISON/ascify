@@ -227,7 +227,7 @@ do not provide those operations.
 | Operation | Admitted domain |
 |---|---|
 | Thread-block synchronization | The exact block operation uses a real block barrier; generic group synchronization is not substituted with a block barrier |
-| Ordinary tiles | Size 32, partitioned from a thread block; preserve typed/erased metadata and rank/size signatures; tile synchronization is not a general collective barrier |
+| Ordinary tiles | Size 32, partitioned from a thread block; preserve typed/erased metadata and rank/size signatures; member/free synchronization requires all 32 lanes at the same call; typed and erased tiles share this restriction |
 | Register shuffles | Exact int32, uint32, and float types; `uint4` XOR shuffle transfers all four 32-bit components |
 | Tile reduction | `plus<int>` and `plus<float>` across 32 participating lanes; a down-shuffle tree followed by broadcast gives every lane the same result bits |
 | Legacy masked ballot/down-shuffle | Every active lane supplies the same mask, equal to the complete currently active cohort; partial down-shuffle supports int32/uint32/float and widths 1, 2, 4, 8, 16, 32 |
@@ -238,6 +238,17 @@ preserved; results from a source outside the participating mask are unspecified
 and are not replaced with zero. Existing full-mask int64/uint64 shuffle paths
 retain their separate domain. Other SDK header families do not inherit these
 legacy extensions merely because a similarly named primitive exists.
+
+Tile synchronization orders shared/global memory publication and consumption
+within one complete warp. On the verified 950 legacy SDK, the native tile sync
+provides only a memory fence, so this facade uses a block-scope fence, a full-warp
+ballot rendezvous, and a second fence. Another warp may bypass the call or use a
+different iteration count. A partial active mask traps; lanes arriving from
+different divergent branches and multi-warp tiles are not admitted. Device
+producer/consumer tests cover both memory spaces, repeated reuse, bypassing
+warps, and typed/erased member/free forms. The available target disassembler
+does not decode the SIMT instructions; no instruction-level observation is
+claimed.
 
 Single-warp reduction requires every lane in that tile to participate; another
 warp may bypass it. Floating-point tree order is not sequential summation, and

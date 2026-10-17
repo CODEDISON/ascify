@@ -4,5 +4,6 @@
 #include <simt_api/device_types.h>
 
 unsigned int asc_activemask();
+unsigned int asc_ballot(int);
 
 #endif

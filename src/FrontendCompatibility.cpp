@@ -42,7 +42,7 @@ ASCIFY_FRONTEND_COMPAT_DEVICE_ inline void sync(const thread_block& group) {
 
 template <unsigned int Size, typename ParentT = void> class thread_block_tile;
 namespace ascify_detail {
-// Register collectives only. A native tile fence is not a collective barrier.
+// Full-warp register collectives and synchronization with runtime participation checks.
 template <unsigned int Size> class tile_register_operations {
   static_assert(Size == 32, "Ascify admits only full-warp tile size 32; multi-warp subgroup synchronization is not implemented");
  protected:
@@ -50,6 +50,7 @@ template <unsigned int Size> class tile_register_operations {
  public:
   ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int thread_rank();
   ASCIFY_FRONTEND_COMPAT_DEVICE_ static constexpr unsigned int size() { return Size; }
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync() const;
   template <typename T> ASCIFY_FRONTEND_COMPAT_DEVICE_
   typename std::enable_if<std::is_same<T, int>::value ||
       std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
@@ -93,6 +94,12 @@ class thread_block_tile<Size, void> : public ascify_detail::tile_register_operat
 template <unsigned int Size>
 ASCIFY_FRONTEND_COMPAT_DEVICE_ thread_block_tile<Size, thread_block>
 tiled_partition(const thread_block& parent);
+
+template <unsigned int Size, typename ParentT>
+ASCIFY_FRONTEND_COMPAT_DEVICE_ inline void
+sync(const thread_block_tile<Size, ParentT>& group) {
+  group.sync();
+}
 
 // A parsing projection for a separately proven whole-block scratch domain.
 // Ordinary thread_block_tile still rejects sizes above 32. Ascify's mandatory
@@ -210,7 +217,7 @@ inline int max(A a, B b) {
 constexpr char kProfileManifest[] =
     "schema=ascify.frontend-compat-profile.v1\n"
     "profile=ascify-admitted-v1\n"
-    "file=cooperative_groups.h;bytes=5100;sha256=fb1d10ab43fbe45211cd23b879abb03bfdd056430c2d92498f4405ae8c6d2130\n"
+    "file=cooperative_groups.h;bytes=5325;sha256=1b4482129c22ca214b2a11e7df532a5c29c3bb9b622348ae28391d714c83d301\n"
     "file=cooperative_groups/reduce.h;bytes=1612;sha256=bc6f9130deaa55a786df70d127a118ecf57b1014dddbb0700a45ef05f597c928\n"
     "file=host_math.h;bytes=1872;sha256=c73958a48fb55cd8f05a45e9455ce45f8660273863b17c070f5d1081a396106f\n";
 
@@ -231,7 +238,7 @@ struct RequiredProfileFile {
 
 constexpr RequiredProfileFile kRequiredProfileFiles[] = {
     {"profile.manifest", 393, kProfileManifest},
-    {"cooperative_groups.h", 5100, kAdmissionHeader},
+    {"cooperative_groups.h", 5325, kAdmissionHeader},
     {"cooperative_groups/reduce.h", 1612, kReductionHeader},
     {"host_math.h", 1872, kHostMathHeader},
 };

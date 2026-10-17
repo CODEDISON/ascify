@@ -24,7 +24,7 @@ ASCIFY_FRONTEND_COMPAT_DEVICE_ inline void sync(const thread_block& group) {
 
 template <unsigned int Size, typename ParentT = void> class thread_block_tile;
 namespace ascify_detail {
-// Register collectives only. A native tile fence is not a collective barrier.
+// Full-warp register collectives and synchronization with runtime participation checks.
 template <unsigned int Size> class tile_register_operations {
   static_assert(Size == 32, "Ascify admits only full-warp tile size 32; multi-warp subgroup synchronization is not implemented");
  protected:
@@ -32,6 +32,7 @@ template <unsigned int Size> class tile_register_operations {
  public:
   ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int thread_rank();
   ASCIFY_FRONTEND_COMPAT_DEVICE_ static constexpr unsigned int size() { return Size; }
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync() const;
   template <typename T> ASCIFY_FRONTEND_COMPAT_DEVICE_
   typename std::enable_if<std::is_same<T, int>::value ||
       std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
@@ -75,6 +76,12 @@ class thread_block_tile<Size, void> : public ascify_detail::tile_register_operat
 template <unsigned int Size>
 ASCIFY_FRONTEND_COMPAT_DEVICE_ thread_block_tile<Size, thread_block>
 tiled_partition(const thread_block& parent);
+
+template <unsigned int Size, typename ParentT>
+ASCIFY_FRONTEND_COMPAT_DEVICE_ inline void
+sync(const thread_block_tile<Size, ParentT>& group) {
+  group.sync();
+}
 
 // A parsing projection for a separately proven whole-block scratch domain.
 // Ordinary thread_block_tile still rejects sizes above 32. Ascify's mandatory

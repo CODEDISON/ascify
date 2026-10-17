@@ -54,7 +54,8 @@ check_static_contract() {
   require_fixed 'Size == 32' "$header"
   forbid_fixed 'coalesced_group' "$header"
   require_fixed 'reduce(const thread_block_tile<Size, ParentT>&' "$header"
-  forbid_fixed 'ballot' "$header"
+  require_fixed 'asc_ballot(1)' "$header"
+  forbid_fixed 'unsigned int ballot(' "$header"
   forbid_fixed '__shared__' "$header"
 }
 

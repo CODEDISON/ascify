@@ -30,4 +30,10 @@ void ConvertedParentTile(cooperative_groups::thread_block block) {
   (void)erased.meta_group_size();
   (void)erased.shfl_down(2.0f, 1);
   (void)erased.shfl(2, 0);
+  typed.sync();
+  cooperative_groups::sync(typed);
+  erased.sync();
+  cooperative_groups::sync(erased);
+  static_assert(std::is_same<decltype(typed.sync()), void>::value);
+  static_assert(std::is_same<decltype(cooperative_groups::sync(erased)), void>::value);
 }

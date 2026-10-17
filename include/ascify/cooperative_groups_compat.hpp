@@ -64,6 +64,20 @@ template <unsigned int Size> class tile_register_operations {
     return static_cast<unsigned int>(native_tile::thread_rank());
   }
   __SIMT_DEVICE_FUNCTIONS_DECL__ static constexpr unsigned int size() { return Size; }
+  __SIMT_DEVICE_FUNCTIONS_DECL__ void sync() const {
+    // The verified 950 native tile sync is only a block-scope memory fence.
+    // Fence publication, rendezvous of every active warp lane, then fence
+    // subsequent memory access. A complete tile must reach this call together;
+    // never substitute a block barrier when another warp bypasses this call.
+    if (asc_activemask() != 0xffffffffu) {
+      ::ascify::detail::reject_device_contract();
+    }
+    asc_threadfence_block();
+    if (asc_ballot(1) != 0xffffffffu) {
+      ::ascify::detail::reject_device_contract();
+    }
+    asc_threadfence_block();
+  }
   template <typename T> __SIMT_DEVICE_FUNCTIONS_DECL__
   typename std::enable_if<std::is_same<T, int>::value ||
       std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
@@ -134,6 +148,12 @@ __SIMT_DEVICE_FUNCTIONS_DECL__ inline thread_block_tile<Size, thread_block>
 tiled_partition(const thread_block& parent) {
   return thread_block_tile<Size, thread_block>(
       ::cooperative_groups::tiled_partition<Size>(parent));
+}
+
+template <unsigned int Size, typename ParentT>
+__SIMT_DEVICE_FUNCTIONS_DECL__ inline void
+sync(const thread_block_tile<Size, ParentT>& group) {
+  group.sync();
 }
 
 template <typename T> struct plus {

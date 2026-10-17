@@ -1,0 +1,146 @@
+#include <ascify/ascify_cuda_compat.hpp>
+#include <ascify/cooperative_groups_compat.hpp>
+#include <cstdio>
+#include <vector>
+
+#define CHECK(call) do { aclError rc = (call); if (rc != ACL_SUCCESS) { \
+  std::printf("api_failure line=%d rc=%d\n", __LINE__, int(rc)); return 2; } } while (false)
+constexpr unsigned GUARD = 16;
+constexpr unsigned MAX_ROUNDS = 19;
+
+// Exercise actual product interfaces, including erased parent metadata.
+template<class Tile> __aicore__ __attribute__((always_inline)) inline
+void probeSync(const Tile& tile, unsigned kind) {
+  ascify_cg::thread_block_tile<32> erased = tile;
+  switch (kind) {
+    case 0: tile.sync(); break;
+    case 1: ascify_cg::sync(tile); break;
+    case 2: erased.sync(); break;
+    default: ascify_cg::sync(erased); break;
+  }
+}
+
+ASCIFY_GLOBAL void tileSyncRejectProbe(unsigned kind) {
+  auto block = ascify_cg::this_thread_block();
+  auto tile = ascify_cg::tiled_partition<32>(block);
+  if (threadIdx.x < 16) probeSync(tile, kind);
+}
+
+ASCIFY_GLOBAL void tileSyncProbe(const unsigned* input, unsigned* scratch,
+                                 unsigned* output, unsigned seed,
+                                 unsigned kind, unsigned even_only) {
+  __attribute__((shared)) unsigned shared_values[256];
+  unsigned linear = threadIdx.x + blockDim.x * threadIdx.y;
+  unsigned threads = blockDim.x * blockDim.y;
+  unsigned index = blockIdx.x * threads + linear;
+  unsigned lane = linear & 31u;
+  unsigned warp = linear / 32u;
+  auto block = ascify_cg::this_thread_block();
+  auto tile = ascify_cg::tiled_partition<32>(block);
+  // Other warps bypass every sync, and participating warps use different
+  // iteration counts. A block-wide rendezvous is not a legal replacement.
+  if (even_only != 0 && (warp & 1u)) return;
+  for (unsigned round = 0; round < 11u + warp; ++round) {
+    unsigned value = input[index] ^ (seed + 0x9e3779b9u * (round + 1));
+    // Lane-dependent control flow reconverges before the collective. The
+    // calculation affects the oracle and cannot be discarded as idle work.
+    for (unsigned delay = 0; delay < lane % 7u; ++delay)
+      value = value * 1664525u + 1013904223u;
+    shared_values[linear] = value;
+    scratch[index] = value;
+    probeSync(tile, kind);
+    output[(index * MAX_ROUNDS + round) * 2] =
+        shared_values[(linear & ~31u) + ((lane + 17u) & 31u)];
+    output[(index * MAX_ROUNDS + round) * 2 + 1] =
+        scratch[(index & ~31u) + (31u - lane)];
+    // Consumers must finish before producers reuse the same memory slots.
+    probeSync(tile, kind);
+  }
+}
+
+static unsigned host_value(unsigned index, unsigned lane, unsigned seed, unsigned round) {
+  unsigned value = (0x1234567u + index * 2654435761u + seed * 8191u) ^
+                   (seed + 0x9e3779b9u * (round + 1));
+  for (unsigned delay = 0; delay < lane % 7u; ++delay)
+    value = value * 1664525u + 1013904223u;
+  return value;
+}
+
+int main(int argc, char** argv) {
+  CHECK(ascify::cudaSetDevice(0));
+  if (argc == 2 && argv[1][0] >= '0' && argv[1][0] <= '3' && argv[1][1] == 0) {
+    unsigned kind = unsigned(argv[1][0] - '0');
+    tileSyncRejectProbe<<<1,32>>>(kind);
+    aclError rc = ascify::cudaDeviceSynchronize();
+    std::printf("tile_sync_reject kind=%u rc=%d\n", kind, int(rc));
+    return rc == ACL_SUCCESS ? 1 : 2;
+  }
+  if (argc != 1) return 3;
+  FILE* raw = std::fopen("output.bin", "wb");
+  if (!raw) return 3;
+  const unsigned dims[4][3] = {{1,32,1}, {3,16,4}, {3,8,16}, {2,16,16}};
+  std::vector<unsigned*> allocations;
+  unsigned launches = 0, checked = 0, wrong = 0;
+  for (unsigned repeat = 0; repeat < 3; ++repeat) {
+    unsigned seed = 104729u * repeat + 17u;
+    for (unsigned shape = 0; shape < 4; ++shape) {
+      unsigned blocks = dims[shape][0], x = dims[shape][1], y = dims[shape][2];
+      unsigned threads = x * y, lanes = blocks * threads;
+      for (unsigned even_only = 0; even_only < 2; ++even_only) {
+        for (unsigned kind = 0; kind < 4; ++kind) {
+          unsigned tag = repeat * 64u + shape * 8u + even_only * 4u + kind;
+          unsigned guard = 0xa5a50000u ^ tag;
+          std::vector<unsigned> host_input(lanes + 2*GUARD, guard);
+          std::vector<unsigned> host_scratch(lanes + 2*GUARD, guard);
+          std::vector<unsigned> host_output(lanes*MAX_ROUNDS*2 + 2*GUARD, guard);
+          for (unsigned i = 0; i < lanes; ++i)
+            host_input[GUARD+i] = 0x1234567u + i*2654435761u + seed*8191u;
+          std::vector<unsigned> expected_input = host_input;
+          std::vector<unsigned> expected_scratch = host_scratch;
+          std::vector<unsigned> expected_output = host_output;
+          for (unsigned i = 0; i < lanes; ++i) {
+            unsigned warp = (i % threads) / 32u, lane = i & 31u;
+            if (even_only && (warp & 1u)) continue;
+            for (unsigned round = 0; round < 11u + warp; ++round) {
+              unsigned p = (i & ~31u) + ((lane + 17u) & 31u);
+              unsigned q = (i & ~31u) + 31u - lane;
+              expected_output[GUARD+(i*MAX_ROUNDS+round)*2] = host_value(p, p&31u, seed, round);
+              expected_output[GUARD+(i*MAX_ROUNDS+round)*2+1] = host_value(q, q&31u, seed, round);
+            }
+            expected_scratch[GUARD+i] = host_value(i, lane, seed, 10u+warp);
+          }
+          unsigned *d_input=nullptr, *d_scratch=nullptr, *d_output=nullptr;
+          CHECK(ascify::cudaMalloc(reinterpret_cast<void**>(&d_input), host_input.size()*sizeof(unsigned)));
+          CHECK(ascify::cudaMalloc(reinterpret_cast<void**>(&d_scratch), host_scratch.size()*sizeof(unsigned)));
+          CHECK(ascify::cudaMalloc(reinterpret_cast<void**>(&d_output), host_output.size()*sizeof(unsigned)));
+          allocations.insert(allocations.end(), {d_input,d_scratch,d_output});
+          CHECK(ascify::cudaMemcpy(d_input,host_input.data(),host_input.size()*sizeof(unsigned),ACL_MEMCPY_HOST_TO_DEVICE));
+          CHECK(ascify::cudaMemcpy(d_scratch,host_scratch.data(),host_scratch.size()*sizeof(unsigned),ACL_MEMCPY_HOST_TO_DEVICE));
+          CHECK(ascify::cudaMemcpy(d_output,host_output.data(),host_output.size()*sizeof(unsigned),ACL_MEMCPY_HOST_TO_DEVICE));
+          tileSyncProbe<<<blocks,dim3(x,y,1)>>>(d_input+GUARD,d_scratch+GUARD,d_output+GUARD,seed,kind,even_only);
+          CHECK(ascify::cudaDeviceSynchronize());
+          CHECK(ascify::cudaMemcpy(host_output.data(),d_output,host_output.size()*sizeof(unsigned),ACL_MEMCPY_DEVICE_TO_HOST));
+          CHECK(ascify::cudaMemcpy(host_input.data(),d_input,host_input.size()*sizeof(unsigned),ACL_MEMCPY_DEVICE_TO_HOST));
+          CHECK(ascify::cudaMemcpy(host_scratch.data(),d_scratch,host_scratch.size()*sizeof(unsigned),ACL_MEMCPY_DEVICE_TO_HOST));
+          const std::vector<unsigned>* actual[] = {&host_output,&host_input,&host_scratch};
+          const std::vector<unsigned>* expected[] = {&expected_output,&expected_input,&expected_scratch};
+          for (unsigned part=0;part<3;++part) {
+            if (std::fwrite(actual[part]->data(),sizeof(unsigned),actual[part]->size(),raw)!=actual[part]->size()) return 3;
+            for (unsigned i=0;i<actual[part]->size();++i) {
+              ++checked;
+              if ((*actual[part])[i]!=(*expected[part])[i]) {
+                if (wrong<8) std::printf("mismatch tag=%u part=%u index=%u actual=%08x expected=%08x\n",tag,part,i,(*actual[part])[i],(*expected[part])[i]);
+                ++wrong;
+              }
+            }
+          }
+          ++launches;
+        }
+      }
+    }
+  }
+  for (auto p:allocations) CHECK(ascify::cudaFree(p));
+  if (std::fclose(raw)) return 3;
+  std::printf("tile_sync_probe launches=%u checked=%u wrong=%u\n",launches,checked,wrong);
+  return launches==96 && wrong==0 ? 0 : 1;
+}

@@ -4,5 +4,9 @@
 +namespace cg = ascify_cg;
 +cg::thread_block block = cg::this_thread_block()
 +cg::sync(block)
++typed.sync()
++cg::sync(typed)
++erased.sync()
++cg::sync(erased)
 -#include <cooperative_groups.h>
 -#include <cooperative_groups/reduce.h>
