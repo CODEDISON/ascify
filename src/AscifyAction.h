@@ -313,6 +313,7 @@ public:
                                 const clang::MacroDefinition &definition);
   void proveCudaAttributeGuard(const mat::MatchFinder::MatchResult &result);
   void finalizeCudaAttributeGuards();
+  void specializeGridConstantParameters(const clang::FunctionDecl *function);
   bool rewriteCudaSmDiagnostic(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCanonicalWarpAddReduction(
       const mat::MatchFinder::MatchResult &Result);

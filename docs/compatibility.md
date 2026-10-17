@@ -46,6 +46,7 @@ ownership, rebinding, callback ordering, rollback, and normal process exit.
 | Allocation, copies, and streams | Preserve admitted CUDA call shapes through typed ACL adapters and propagate errors; this is not the entire CUDA Runtime API |
 | Vector constructors | Use the target's vector types and constructors; the reviewed CUDA `float3`/`uint3` record ABI is rejected before publication as described below |
 | Default `dim3` | Only proven, direct, host-local declarations of CUDA's uninitialized type gain explicit `(1,1,1)` initialization; global, device, array, macro, and user-defined cases remain unchanged |
+| Grid-constant value parameters | A bounded const int-array record may lose `__grid_constant__` only after every use and declaration proves value-only behavior; address, reference, copy and reflection observations are rejected; see the [parameter contract](grid-constant-parameters.md) |
 | Event recording | Explicit streams are preserved; the omitted-stream form queries the current default stream only on the admitted legacy/ACL 1.17+ surface, otherwise returns unsupported |
 | Event queries and host functions | On the reviewed legacy/ACL 1.17.0 surface, use real Ex-event completion state and ordered callbacks on explicit streams; see the [runtime contract](runtime-profiling-and-host-functions.md) |
 | Profiling | An explicit `ASCIFY_PROFILE_DIR` opts into owned CANN collection; link `msprofiler`; unsupported configurations return an error, as described in the [runtime contract](runtime-profiling-and-host-functions.md) |

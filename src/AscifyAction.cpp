@@ -85,6 +85,7 @@ const StringRef sFrontendHostMath = "frontendHostMath";
 const StringRef sProvenGlobalAtomicCall = "provenGlobalAtomicCall";
 const StringRef sCudaLaneIdAsm = "cudaLaneIdAsm";
 const StringRef sCudaAttributeGuard = "cudaAttributeGuard";
+const StringRef sGridConstantParameterGuard = "gridConstantParameterGuard";
 const StringRef sCanonicalWarpAddReduction = "canonicalWarpAddReduction";
 const StringRef sCanonicalBinaryReducer = "canonicalBinaryReducer";
 
@@ -7289,6 +7290,9 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
   Finder->addMatcher(
       mat::functionDecl(mat::isExpansionInMainFile()).bind(sCudaAttributeGuard),
       this);
+  Finder->addMatcher(mat::functionDecl(mat::hasAnyParameter(
+      mat::parmVarDecl(mat::hasAttr(clang::attr::CUDAGridConstant))))
+      .bind(sGridConstantParameterGuard), this);
   if (TargetPolicy == "dav-c310-vec" && SimtMathMode == "fast") {
     // Keep the matcher broad and perform the semantic proof in the callback.
     // This prevents source-name coupling and makes every failed proof a
@@ -7454,6 +7458,251 @@ void AscifyAction::proveCudaAttributeGuard(
         !ownedAttribute("__device__", guard.device)) continue;
     guard.functionProven = true;
   }
+}
+
+// This is a value-only specialization, not an implementation of CUDA's
+// per-grid parameter-object address/lifetime contract. Every use and every
+// declaration must be proved before any qualifier belonging to a kernel moves.
+void AscifyAction::specializeGridConstantParameters(
+    const clang::FunctionDecl *function) {
+  if (function == nullptr) return;
+  bool hasGridConstant = false;
+  for (const auto *p : function->parameters())
+    hasGridConstant |= p->hasAttr<clang::CUDAGridConstantAttr>();
+  if (!hasGridConstant) return;
+  // A declaration with a definition is checked by that definition's callback.
+  if (function->getDefinition() != nullptr &&
+      function != function->getDefinition()) return;
+  auto &compiler = getCompilerInstance();
+  auto &context = compiler.getASTContext();
+  auto &source = compiler.getSourceManager();
+  auto &preprocessor = compiler.getPreprocessor();
+  auto reject = [&]() {
+    auto &diagnostics = compiler.getDiagnostics();
+    const auto id = diagnostics.getCustomDiagID(clang::DiagnosticsEngine::Error,
+        "Ascify grid-constant boundary: requires an owned, non-template kernel "
+        "definition with const int-array value parameters and direct scalar "
+        "reads only; no parameter address, reference, copy or reflection");
+    diagnostics.Report(function->getLocation(), id);
+  };
+  if (TargetPolicy != "dav-c310-vec" ||
+      (localHeaderContext != nullptr && localHeaderContext->depth != 0) ||
+      !function->hasBody() ||
+      !function->hasAttr<clang::CUDAGlobalAttr>() ||
+      llvm::isa<clang::CXXMethodDecl>(function) ||
+      function->getLexicalDeclContext()->isRecord() ||
+      function->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      function->isDependentContext() || function->isVariadic()) {
+    reject(); return;
+  }
+  auto ownedAttribute = [&](clang::SourceLocation location) {
+    std::set<const clang::IdentifierInfo *> seen;
+    std::vector<const clang::IdentifierInfo *> pending = {
+        preprocessor.getIdentifierInfo("__grid_constant__")};
+    while (!pending.empty()) {
+      const auto *identifier = pending.back(); pending.pop_back();
+      if (!seen.insert(identifier).second) continue;
+      if (seen.size() > 16) return false;
+      const auto *info = preprocessor.getMacroDefinitionAtLoc(
+          identifier, location).getMacroInfo();
+      if (info == nullptr) return false;
+      const auto file = source.getFileID(source.getSpellingLoc(info->getDefinitionLoc()));
+      if (!file.isValid() ||
+          (!cudaRuntimeApiSdkFileIds.count(file.getHashValue()) &&
+           !isOwnedCudaCompilerInput(file, compiler))) return false;
+      for (const auto &token : info->tokens()) {
+        if (token.is(clang::tok::hash) || token.is(clang::tok::hashhash)) return false;
+        const auto *dependency = token.getIdentifierInfo();
+        if (dependency == nullptr) continue;
+        bool parameter = false;
+        if (info->isFunctionLike())
+          for (const auto *argument : info->params()) parameter |= argument == dependency;
+        if (!parameter && preprocessor.getMacroDefinitionAtLoc(dependency, location).getMacroInfo())
+          pending.push_back(dependency);
+      }
+    }
+    return true;
+  };
+  std::map<const clang::ParmVarDecl *, const clang::FieldDecl *> parameters;
+  for (const auto *p : function->parameters()) {
+    if (!p->hasAttr<clang::CUDAGridConstantAttr>()) continue;
+    const auto type = p->getType().getCanonicalType();
+    const auto *record = type->getAsCXXRecordDecl();
+    if (!type.getQualifiers().hasOnlyConst() ||
+        type->isReferenceType() || record == nullptr || !record->isCompleteDefinition() ||
+        record->isUnion() || !record->isTrivial() || !record->isStandardLayout() ||
+        !record->isAggregate() || record->getNumBases() != 0 || record->hasAttrs() ||
+        record->getLocation().isMacroID() || record->getBeginLoc().isMacroID() ||
+        !source.isWrittenInMainFile(record->getLocation())) {
+      reject(); return;
+    }
+    const clang::FieldDecl *field = nullptr;
+    for (const auto *member : record->decls()) {
+      if (member->isImplicit()) continue;
+      const auto *candidate = llvm::dyn_cast<clang::FieldDecl>(member);
+      if (candidate == nullptr || field != nullptr) { reject(); return; }
+      field = candidate;
+    }
+    const auto *array = field == nullptr ? nullptr : context.getAsConstantArrayType(field->getType());
+    if (array == nullptr || array->getSize().isZero() || field->isMutable() ||
+        field->getLocation().isMacroID() || field->getBeginLoc().isMacroID() ||
+        !source.isWrittenInMainFile(field->getLocation()) ||
+        field->getAccess() != clang::AS_public ||
+        field->isBitField() || field->hasAttrs() || field->hasInClassInitializer() ||
+        field->getType().isVolatileQualified() ||
+        array->getElementType().isVolatileQualified() ||
+        !array->getElementType()->isSpecificBuiltinType(clang::BuiltinType::Int) ||
+        context.getTypeSize(array->getElementType()) != 32 ||
+        context.getTypeSize(type) > 32000 * 8 ||
+        context.getTypeSize(type) != context.getTypeSize(field->getType()) ||
+        context.getTypeAlign(type) != context.getTypeAlign(context.IntTy)) {
+      reject(); return;
+    }
+    parameters.emplace(p, field);
+  }
+  // Bound the entire signature, not just one record. These shapes have been
+  // exercised on the target: one int-array value with up to three 32-bit
+  // integral / 64-bit int-pointer arguments. This conservative source-layout
+  // envelope is not a model of the complete CCEC kernel calling convention.
+  if (parameters.size() != 1 || function->getNumParams() > 4) { reject(); return; }
+  uint64_t signatureBytes = 0, signatureAlignment = 1;
+  unsigned pointerArguments = 0, integerArguments = 0;
+  for (const auto *p : function->parameters()) {
+    const auto type = p->getType().getCanonicalType();
+    const auto int32 = [&](clang::QualType value) {
+      return !value.isNull() &&
+          (value.getQualifiers().empty() || value.getQualifiers().hasOnlyConst()) &&
+          (value->isSpecificBuiltinType(clang::BuiltinType::Int) ||
+           value->isSpecificBuiltinType(clang::BuiltinType::UInt)) &&
+          context.getTypeSize(value) == 32;
+    };
+    if (!parameters.count(p) &&
+        !int32(type) &&
+        !(type->isPointerType() &&
+          (type.getQualifiers().empty() || type.getQualifiers().hasOnlyConst()) &&
+          context.getTypeSize(type) == 64 && int32(type->getPointeeType()))) {
+      reject(); return;
+    }
+    if (!parameters.count(p)) {
+      if (type->isPointerType()) ++pointerArguments;
+      else ++integerArguments;
+    }
+    const uint64_t alignment = context.getTypeAlignInChars(type).getQuantity();
+    const uint64_t bytes = context.getTypeSizeInChars(type).getQuantity();
+    if (!alignment || alignment > 8 || bytes > 32000) { reject(); return; }
+    signatureBytes = ((signatureBytes + alignment - 1) / alignment) * alignment + bytes;
+    signatureAlignment = std::max(signatureAlignment, alignment);
+  }
+  signatureBytes = ((signatureBytes + signatureAlignment - 1) / signatureAlignment) * signatureAlignment;
+  if (signatureBytes > 32024 || pointerArguments > 1 || integerArguments > 2 ||
+      (!parameters.count(function->getParamDecl(0)) &&
+       !parameters.count(function->getParamDecl(function->getNumParams() - 1)))) {
+    reject(); return;
+  }
+  class Uses : public clang::RecursiveASTVisitor<Uses> {
+    clang::ASTContext &context;
+    const std::map<const clang::ParmVarDecl *, const clang::FieldDecl *> &parameters;
+    const clang::FunctionDecl *function;
+    const clang::Stmt *parent(const clang::Stmt *node) {
+      auto p = context.getParents(*node);
+      return p.size() == 1 ? p[0].get<clang::Stmt>() : nullptr;
+    }
+    const clang::Stmt *pastParens(const clang::Stmt *node) {
+      while (const auto *p = llvm::dyn_cast_or_null<clang::ParenExpr>(parent(node))) node = p;
+      return node;
+    }
+  public:
+    bool valid = true;
+    Uses(clang::ASTContext &c, decltype(parameters) p, const clang::FunctionDecl *f)
+        : context(c), parameters(p), function(f) {}
+    bool shouldVisitImplicitCode() const { return true; }
+    bool VisitDeclRefExpr(clang::DeclRefExpr *reference) {
+      const auto *parameter = llvm::dyn_cast<clang::ParmVarDecl>(reference->getDecl());
+      const auto found = parameters.find(parameter);
+      if (found == parameters.end()) return true;
+      const auto *base = pastParens(reference);
+      const auto *member = llvm::dyn_cast_or_null<clang::MemberExpr>(parent(base));
+      if (member == nullptr || member->isArrow() || member->getBase() != base ||
+          member->getMemberDecl() != found->second) { valid = false; return true; }
+      const auto *decay = llvm::dyn_cast_or_null<clang::ImplicitCastExpr>(parent(pastParens(member)));
+      if (decay == nullptr || decay->getCastKind() != clang::CK_ArrayToPointerDecay) {
+        valid = false; return true;
+      }
+      const auto *array = llvm::dyn_cast_or_null<clang::ArraySubscriptExpr>(parent(pastParens(decay)));
+      if (array == nullptr || array->getBase()->IgnoreParens() != decay) {
+        valid = false; return true;
+      }
+      const auto *read = llvm::dyn_cast_or_null<clang::ImplicitCastExpr>(parent(pastParens(array)));
+      if (read == nullptr || read->getCastKind() != clang::CK_LValueToRValue) {
+        valid = false; return true;
+      }
+      // A scalar read still cannot hide inside a lambda capture or an
+      // unevaluated/type-observation context. Walk declarations as well as
+      // statements, since local initializers insert VarDecl parents.
+      auto node = clang::DynTypedNode::create(*read);
+      for (unsigned depth = 0; depth != 256; ++depth) {
+        const auto parents = context.getParents(node);
+        if (parents.size() != 1) { valid = false; return true; }
+        node = parents[0];
+        if (const auto *f = node.get<clang::FunctionDecl>()) {
+          valid &= f == function; return true;
+        }
+        const auto *stmt = node.get<clang::Stmt>();
+        if (stmt == nullptr && node.get<clang::VarDecl>() == nullptr) {
+          valid = false; return true;
+        }
+        if (stmt && llvm::isa<clang::LambdaExpr, clang::UnaryExprOrTypeTraitExpr,
+                             clang::CXXNoexceptExpr, clang::CXXTypeidExpr>(stmt)) {
+          valid = false; return true;
+        }
+      }
+      valid = false; return true;
+    }
+  } uses(context, parameters, function);
+  uses.TraverseStmt(function->getBody());
+  if (!uses.valid) { reject(); return; }
+  ct::Replacements staged = *replacements;
+  std::vector<SemanticRewriteRange> admitted;
+  for (const auto *declaration : function->redecls()) {
+    if (declaration->getLocation().isMacroID() ||
+        !source.isWrittenInMainFile(declaration->getLocation()) ||
+        declaration->getNumParams() != function->getNumParams()) { reject(); return; }
+    for (unsigned i = 0; i != declaration->getNumParams(); ++i) {
+      const auto *p = declaration->getParamDecl(i);
+      if (p->hasDefaultArg() || !context.hasSameType(
+              p->getType(), function->getParamDecl(i)->getType())) { reject(); return; }
+      const bool expected = parameters.count(function->getParamDecl(i));
+      if (expected != p->hasAttr<clang::CUDAGridConstantAttr>()) { reject(); return; }
+      if (!expected) {
+        if (p->hasAttrs()) { reject(); return; }
+        continue;
+      }
+      unsigned attributes = 0;
+      for (const auto *attribute : p->attrs()) {
+        const auto *grid = llvm::dyn_cast<clang::CUDAGridConstantAttr>(attribute);
+        if (grid == nullptr || grid->isInherited() || ++attributes != 1) { reject(); return; }
+        const auto location = source.getExpansionLoc(grid->getLocation());
+        if (!grid->getLocation().isMacroID() || !location.isFileID() ||
+            !source.isWrittenInMainFile(location) || !ownedAttribute(location)) { reject(); return; }
+        const auto token = clang::Lexer::getSourceText(
+            clang::CharSourceRange::getTokenRange(location, location), source, compiler.getLangOpts());
+        if (token != "__grid_constant__") { reject(); return; }
+        const auto file = source.getFileID(location);
+        const unsigned begin = source.getFileOffset(location), end = begin + token.size();
+        for (const auto &range : SemanticRewriteRanges)
+          if (range.file == file && begin < range.endOffset && range.beginOffset < end) { reject(); return; }
+        std::string error;
+        if (!llcompat::insertReplacement(staged, ct::Replacement(source, location, token.size(), ""), &error)) {
+          reject(); return;
+        }
+        admitted.push_back({file, begin, end});
+      }
+    }
+  }
+  *replacements = std::move(staged);
+  SemanticRewriteRanges.insert(SemanticRewriteRanges.end(), admitted.begin(), admitted.end());
+  llvm::errs() << "Ascify grid-constant value-only specialization: " << admitted.size()
+               << " qualifier tokens; const parameters, body and launch preserved\n";
 }
 
 void AscifyAction::finalizeCudaAttributeGuards() {
@@ -10725,6 +10974,10 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
     return;
   if (Result.Nodes.getNodeAs<clang::FunctionDecl>(sCudaAttributeGuard) != nullptr) {
     proveCudaAttributeGuard(Result);
+    return;
+  }
+  if (const auto *function = Result.Nodes.getNodeAs<clang::FunctionDecl>(sGridConstantParameterGuard)) {
+    specializeGridConstantParameters(function);
     return;
   }
   if (Result.Nodes.getNodeAs<clang::GCCAsmStmt>(sCudaLaneIdAsm) != nullptr) {
