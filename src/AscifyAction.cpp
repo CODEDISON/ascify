@@ -8154,7 +8154,9 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       // overload resolution, even though no SDK record can enter its type.
       // Prove only this expression; normal traversal still visits its body,
       // template arguments, reflection operands and concrete instantiations.
-      if (textureOnly && expression->getType()->isDependentType()) {
+      // Static-assert diagnostic strings can have a null QualType.
+      if (textureOnly && !expression->getType().isNull() &&
+          expression->getType()->isDependentType()) {
         if (!provedNttpScalarType(expression).isNull())
           return true;
         if (const auto *lookup = llvm::dyn_cast<clang::UnresolvedLookupExpr>(expression)) {
@@ -8372,7 +8374,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     }
     clang::QualType provedNttpScalarType(const clang::Expr *expression,
                                         unsigned depth = 0) const {
-      if (expression == nullptr || depth > 32) return {};
+      if (expression == nullptr || expression->getType().isNull() || depth > 32) return {};
       if (!expression->getType()->isDependentType())
         return fixedArithmeticType(expression->getType());
       if (const auto *paren = llvm::dyn_cast<clang::ParenExpr>(expression))
