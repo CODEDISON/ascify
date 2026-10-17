@@ -72,6 +72,7 @@ __aicore__ ASCIFY_FORCEINLINE float textureCoordinate(
   return coordinate < 0.0f ? 0.0f : coordinate > bound ? bound : coordinate;
 }
 
+template<bool Approximate = false>
 __aicore__ ASCIFY_FORCEINLINE float textureSampleFloat(
     unsigned long long token, float x, float y, int layer, bool layered) {
   const auto *descriptor = reinterpret_cast<const TextureSamplingDescriptor *>(token);
@@ -94,7 +95,9 @@ __aicore__ ASCIFY_FORCEINLINE float textureSampleFloat(
   const float aq = a * 256.0f, bq = b * 256.0f;
   // Admit exactly representable 8-fraction-bit weights. No rounding tie or
   // undocumented coordinate quantization is guessed for other inputs.
-  if (aq != floorf(aq) || bq != floorf(bq))
+  // The separately named fast wrappers opt into FP32 bilinear filtering.
+  // They do not emulate CUDA's fixed-point coordinate quantization or ties.
+  if (!Approximate && (aq != floorf(aq) || bq != floorf(bq)))
     return textureSamplingReject(descriptor);
   const int ix = static_cast<int>(xf), iy = static_cast<int>(yf);
   const float t00 = textureLoadFloat(descriptor, ix, iy, layer);

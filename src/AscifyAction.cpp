@@ -1383,6 +1383,15 @@ void AscifyAction::FindAndReplace(StringRef name,
     return;
   }
   StringRef repName = found->second.dppName;
+  // The final texture boundary still authenticates the original SDK call.
+  // Only an explicit fast policy selects unquantized FP32 interpolation;
+  // precise output retains the bounded 1/256-weight sampler.
+  if (TargetPolicy == "dav-c310-vec" && SimtMathMode == "fast") {
+    if (name == "tex2D" && repName == "ascify::tex2D")
+      repName = "ascify::tex2DFast";
+    else if (name == "tex2DLayered" && repName == "ascify::tex2DLayered")
+      repName = "ascify::tex2DLayeredFast";
+  }
   auto &SM = getCompilerInstance().getSourceManager();
   ct::Replacement Rep(SM, sl, name.size(), repName.str());
   clang::FullSourceLoc fullSL(sl, SM);

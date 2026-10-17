@@ -11,6 +11,10 @@ import subprocess
 CASES = [
     ('float_fetch','__global__ void k(float*p,cudaTextureObject_t t){p[0]=tex2D<float>(t,.5f,.5f);}', ['ascify::tex2D<float>']),
     ('layered_fetch','__global__ void k(float*p,cudaTextureObject_t t){p[0]=tex2DLayered<float>(t,.5f,.5f,1);}', ['ascify::tex2DLayered<float>']),
+    ('fractional_fetch','__global__ void k(float*p,cudaTextureObject_t t){p[0]=tex2D<float>(t,.501f,.333f);}', ['ascify::tex2D<float>']),
+    ('fast_name_macro','#define tex2DFast user_fetch\n__global__ void k(float*p,cudaTextureObject_t t){p[0]=tex2D<float>(t,.5f,.5f);}', None),
+    ('fast_layered_name_macro','#define tex2DLayeredFast user_fetch\n__global__ void k(float*p,cudaTextureObject_t t){p[0]=tex2DLayered<float>(t,.5f,.5f,0);}', None),
+    ('fast_policy_macro','#define Approximate false\n__global__ void k(float*p,cudaTextureObject_t t){p[0]=tex2D<float>(t,.5f,.5f);}', None),
     ('array_allocate','void f(){cudaArray*a=nullptr;auto c=cudaCreateChannelDesc<float>();auto s=cudaMallocArray(&a,&c,4,3);}', ['ascify::cudaMallocArray','ascify::cudaCreateChannelDesc<float>']),
     ('typed_pitch','void f(){float*p=nullptr;size_t pitch=0;auto s=cudaMallocPitch(&p,&pitch,16,3);}', ['ascify::cudaMallocPitch']),
     ('empty_descriptor','void f(){cudaResourceDesc r{};cudaTextureDesc d={};r.resType=cudaResourceTypeArray;d.filterMode=cudaFilterModeLinear;}', ['ascify::cudaResourceDesc','ascify::cudaTextureDesc']),
@@ -85,6 +89,8 @@ def main():
     p.add_argument('--clang',type=Path)
     p.add_argument('--profile-host-math',type=Path)
     p.add_argument('--frontend-compat',choices=('none','ascify-admitted-v1'),default='none')
+    p.add_argument('--simt-math',choices=('precise','fast'),default='fast')
+    p.add_argument('--target-policy',choices=('portable','dav-c310-vec'),default='dav-c310-vec')
     a=p.parse_args()
     a.binary,a.cuda_path,a.resource_dir,a.evidence_dir=(q.resolve() for q in (a.binary,a.cuda_path,a.resource_dir,a.evidence_dir))
     choices=[a.clang] if a.clang else [a.binary.parent/'clang++',a.resource_dir.parents[2]/'bin/clang++',Path(shutil.which('clang++') or '/missing')]
@@ -97,7 +103,7 @@ def main():
     helper_identity={str(q):sha(q) for q in sorted(helpers.iterdir()) if q.is_file()}
     a.evidence_dir.mkdir(parents=True,exist_ok=False)
     summary={'passed':False,'binary_sha256':sha(a.binary),'clang_sha256':sha(a.clang),
-             'runner_sha256':sha(Path(__file__)),'helper_identity':helper_identity,'frontend_compatibility':a.frontend_compat,'cases':[],'device_executed':False}
+             'runner_sha256':sha(Path(__file__)),'helper_identity':helper_identity,'frontend_compatibility':a.frontend_compat,'simt_math':a.simt_math,'target_policy':a.target_policy,'cases':[],'device_executed':False}
     def save():(a.evidence_dir/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
     def run(directory,role,argv):
         argv=list(map(str,argv));(directory/(role+'.argv.json')).write_text(json.dumps(argv,indent=2)+'\n')
@@ -131,6 +137,8 @@ def main():
                 cases.append((name,code,None,['-I'+str(profile_host_math.parent)],{}))
                 recursive_cases[name]=recursive
     for name,code,expected,extra,headers in cases:
+        if expected is not None and a.simt_math=='fast' and a.target_policy=='dav-c310-vec':
+            expected=[fragment.replace('ascify::tex2D<','ascify::tex2DFast<').replace('ascify::tex2DLayered<','ascify::tex2DLayeredFast<') for fragment in expected]
         directory=a.evidence_dir/name;directory.mkdir()
         for filename,contents in headers.items():
             path=directory/filename;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(contents)
@@ -145,7 +153,7 @@ def main():
             z=run(directory,'syntax',[a.clang,source,'-x','cuda','-std=c++17','--cuda-host-only','-fsyntax-only','-nocudalib','--cuda-path='+str(a.cuda_path),'-resource-dir='+str(a.resource_dir),'-Wno-unknown-cuda-version','-I'+str(helpers),*extra])
             row['syntax_returncode']=z.returncode;save();assert z.returncode==0,(name,z.stderr)
             projection=['--local-headers-recursive'] if row['recursive'] else []
-            z=run(directory,'convert',[a.binary,source,'--target-policy=dav-c310-vec','--simt-math=fast','--target-recipe=none','--default-preprocessor','--frontend-compat='+a.frontend_compat,'--cuda-path='+str(a.cuda_path),'--clang-resource-directory='+str(a.resource_dir),'--migration-receipt='+str(receipt),'-o',output,*projection,'--','-x','cuda','-std=c++17','-I'+str(helpers),*extra])
+            z=run(directory,'convert',[a.binary,source,'--target-policy='+a.target_policy,'--simt-math='+a.simt_math,'--target-recipe=none','--default-preprocessor','--frontend-compat='+a.frontend_compat,'--cuda-path='+str(a.cuda_path),'--clang-resource-directory='+str(a.resource_dir),'--migration-receipt='+str(receipt),'-o',output,*projection,'--','-x','cuda','-std=c++17','-I'+str(helpers),*extra])
             row['conversion_returncode']=z.returncode;save()
             if expected is None:
                 output_headers=directory/'output.cce.headers'
