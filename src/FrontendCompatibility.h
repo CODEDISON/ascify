@@ -39,4 +39,12 @@ bool ValidateFrontendCompatibilityInclude(
     const std::string& resolvedPath,
     std::string& error);
 
+// Recognizes only the active product host-math header and its exact parsed
+// bytes. Callers must additionally prove physical SourceManager ownership and
+// the forced-include instance; this does not admit a copied caller header.
+bool IsVerifiedFrontendHostMathInput(
+    const FrontendCompatibilityConfig& config,
+    const std::string& path,
+    const std::string& parsedContents);
+
 }  // namespace ascify

@@ -436,6 +436,16 @@ CooperativeGroupsIncludeKind classifyCooperativeGroupsInclude(
 
 namespace ascify {
 
+bool IsVerifiedFrontendHostMathInput(
+    const FrontendCompatibilityConfig& config,
+    const std::string& path,
+    const std::string& parsedContents) {
+  return config.enabled() &&
+         config.profile == kAdmittedFrontendCompatibilityV1 &&
+         path == config.canonicalRoot + "/host_math.h" &&
+         parsedContents == kHostMathHeader;
+}
+
 bool ConfigureFrontendCompatibility(
     clang::tooling::RefactoringTool& tool,
     const std::string& profile,

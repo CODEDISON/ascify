@@ -8047,6 +8047,20 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       const auto include = source.getIncludeLoc(file);
       bool invalid = false;
       const auto bytes = source.getBufferData(file, &invalid);
+      const auto *profileEntry = source.getFileEntryForID(file);
+      // The explicitly selected parser profile force-includes its own
+      // type-constrained host max/min templates. These exact templates do not
+      // observe texture layout. Keep the exception restricted to their actual
+      // product file and forced include, with unchanged preprocessed tokens.
+      // Concrete instantiations still traverse the ordinary record checks.
+      if (!invalid && profileEntry != nullptr && include.isValid() &&
+          source.getFileID(source.getSpellingLoc(include)) ==
+              compiler.getPreprocessor().getPredefinesFileID() &&
+          !macroAlteredFrontendHostMathFileIds.count(file.getHashValue()) &&
+          physicalSourceFileMatches(source.getFilename(begin), *profileEntry, source) &&
+          ascify::IsVerifiedFrontendHostMathInput(
+              frontendCompatibility, source.getFilename(begin).str(), bytes.str()))
+        frozenTextureUtilityFiles.insert(file.getHashValue());
       if (!invalid && llvm::sys::path::filename(source.getFilename(begin)) == "exception.h" &&
           include.isValid() &&
           frozenNvidiaSampleHelperFileRole(source, include) == FrozenOfficialNvidiaSampleHelperFunctions &&
@@ -8628,6 +8642,12 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
   const clang::MacroInfo *macroInfo = MD.getMacroInfo();
+  const auto profileUse = sourceManager.getExpansionLoc(MacroNameTok.getLocation());
+  if (frontendCompatibility.enabled() && profileUse.isValid() &&
+      sourceManager.getFilename(profileUse) ==
+          frontendCompatibility.canonicalRoot + "/host_math.h")
+    macroAlteredFrontendHostMathFileIds.insert(
+        sourceManager.getFileID(profileUse).getHashValue());
   if (MacroNameTok.getIdentifierInfo()->getName() == "cudaArrayLayered" && macroInfo != nullptr) {
     const auto definition = sourceManager.getSpellingLoc(macroInfo->getDefinitionLoc());
     const auto written = sourceManager.getSpellingLoc(MacroNameTok.getLocation());

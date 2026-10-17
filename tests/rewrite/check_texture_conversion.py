@@ -74,6 +74,7 @@ def main():
     for name in ('binary','cuda-path','resource-dir','evidence-dir'):
         p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--clang',type=Path)
+    p.add_argument('--frontend-compat',choices=('none','ascify-admitted-v1'),default='none')
     a=p.parse_args()
     a.binary,a.cuda_path,a.resource_dir,a.evidence_dir=(q.resolve() for q in (a.binary,a.cuda_path,a.resource_dir,a.evidence_dir))
     choices=[a.clang] if a.clang else [a.binary.parent/'clang++',a.resource_dir.parents[2]/'bin/clang++',Path(shutil.which('clang++') or '/missing')]
@@ -86,7 +87,7 @@ def main():
     helper_identity={str(q):sha(q) for q in sorted(helpers.iterdir()) if q.is_file()}
     a.evidence_dir.mkdir(parents=True,exist_ok=False)
     summary={'passed':False,'binary_sha256':sha(a.binary),'clang_sha256':sha(a.clang),
-             'runner_sha256':sha(Path(__file__)),'helper_identity':helper_identity,'cases':[],'device_executed':False}
+             'runner_sha256':sha(Path(__file__)),'helper_identity':helper_identity,'frontend_compatibility':a.frontend_compat,'cases':[],'device_executed':False}
     def save():(a.evidence_dir/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
     def run(directory,role,argv):
         argv=list(map(str,argv));(directory/(role+'.argv.json')).write_text(json.dumps(argv,indent=2)+'\n')
@@ -94,16 +95,30 @@ def main():
         (directory/(role+'.stdout.log')).write_text(z.stdout);(directory/(role+'.stderr.log')).write_text(z.stderr)
         return z
     save()
-    for name,code,expected in CASES:
+    cases=[(name,code,expected,[],{}) for name,code,expected in CASES]
+    if a.frontend_compat=='ascify-admitted-v1':
+        cases += [
+            ('profile_fake_host_math','#include "host_math.h"\ncudaTextureDesc descriptor{};',None,[],{'host_math.h':'template<class T>T caller_identity(T x){return x;}\n'}),
+            ('profile_macro_template_parameter','cudaTextureDesc descriptor{};',None,['-DA=CallerType'],{}),
+            ('profile_macro_template_owner','cudaTextureDesc descriptor{};',None,['-Dhost_float_max_enabled=CallerEnabled'],{}),
+            ('profile_empty_macro_expansion','cudaTextureDesc descriptor{};',None,['-Dinline='],{}),
+            ('profile_preinclude_macro_then_undef','#undef A\ncudaTextureDesc descriptor{};',None,['-include','{case}/caller_macros.h'],{'caller_macros.h':'#define A CallerType\n'}),
+            ('profile_late_unused_macro','#define host_float_max_enabled CallerEnabled\n#undef host_float_max_enabled\ncudaTextureDesc descriptor{};',['ascify::cudaTextureDesc descriptor'],[],{}),
+        ]
+    for name,code,expected,extra,headers in cases:
         directory=a.evidence_dir/name;directory.mkdir()
+        for filename,contents in headers.items():(directory/filename).write_text(contents)
+        extra=[value.replace('{case}',str(directory)) for value in extra]
         source=directory/'input.cu';output=directory/'output.cce';receipt=directory/'receipt.json'
         source.write_text('#include <cuda_runtime.h>\n#include <string.h>\n'+code+'\n')
-        row={'name':name,'expected_fragments':expected,'passed':False,'source_sha256':sha(source)}
+        row={'name':name,'expected_fragments':expected,'passed':False,'source_sha256':sha(source),
+             'extra_arguments':extra,'local_header_identity':{filename:sha(directory/filename) for filename in headers}}
         summary['cases'].append(row);save()
         try:
-            z=run(directory,'syntax',[a.clang,source,'-x','cuda','-std=c++17','--cuda-host-only','-fsyntax-only','-nocudalib','--cuda-path='+str(a.cuda_path),'-resource-dir='+str(a.resource_dir),'-Wno-unknown-cuda-version','-I'+str(helpers)])
+            z=run(directory,'syntax',[a.clang,source,'-x','cuda','-std=c++17','--cuda-host-only','-fsyntax-only','-nocudalib','--cuda-path='+str(a.cuda_path),'-resource-dir='+str(a.resource_dir),'-Wno-unknown-cuda-version','-I'+str(helpers),*extra])
             row['syntax_returncode']=z.returncode;save();assert z.returncode==0,(name,z.stderr)
-            z=run(directory,'convert',[a.binary,source,'--target-policy=dav-c310-vec','--simt-math=fast','--target-recipe=none','--default-preprocessor','--cuda-path='+str(a.cuda_path),'--clang-resource-directory='+str(a.resource_dir),'--migration-receipt='+str(receipt),'-o',output,'--','-x','cuda','-std=c++17','-I'+str(helpers)])
+            projection=['--local-headers-recursive'] if a.frontend_compat=='ascify-admitted-v1' else []
+            z=run(directory,'convert',[a.binary,source,'--target-policy=dav-c310-vec','--simt-math=fast','--target-recipe=none','--default-preprocessor','--frontend-compat='+a.frontend_compat,'--cuda-path='+str(a.cuda_path),'--clang-resource-directory='+str(a.resource_dir),'--migration-receipt='+str(receipt),'-o',output,*projection,'--','-x','cuda','-std=c++17','-I'+str(helpers),*extra])
             row['conversion_returncode']=z.returncode;save()
             if expected is None:
                 assert z.returncode>0 and not output.exists() and json.loads(receipt.read_text())['status']=='failed',(name,z.stderr)
@@ -113,12 +128,14 @@ def main():
                 text=output.read_text();assert '#include <ascify/texture_compat.hpp>' in text,(name,text)
                 assert all(fragment in text for fragment in expected),(name,expected,text)
                 row['output_sha256']=sha(output)
-            assert sha(source)==row['source_sha256'];row['passed']=True
+            assert sha(source)==row['source_sha256']
+            assert all(sha(directory/q)==digest for q,digest in row['local_header_identity'].items())
+            row['passed']=True
         except (AssertionError, subprocess.TimeoutExpired) as exc:
             row['error']={'type':type(exc).__name__,'message':str(exc)}
         save();print(name,'passed' if row['passed'] else 'FAILED',flush=True)
     assert sha(a.binary)==summary['binary_sha256'] and sha(a.clang)==summary['clang_sha256']
     assert all(sha(Path(q))==digest for q,digest in helper_identity.items())
-    summary.update(passed=all(row['passed'] for row in summary['cases']),total=len(CASES));save()
+    summary.update(passed=all(row['passed'] for row in summary['cases']),total=len(cases));save()
     assert summary['passed'], 'texture boundary matrix contains failures'
 if __name__=='__main__':main()
