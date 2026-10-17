@@ -263,7 +263,10 @@ public:
     const auto *pattern = family->getTemplatedDecl();
     const auto insertion = qualifier(pattern);
     std::vector<const FunctionDecl *> ignored;
-    if (insertion.isInvalid() || !body(pattern, ignored) || patternCalls == 0) return false;
+    // A node/depth cap alone does not bound expansion: two identical child
+    // calls can double the inlined body at every level. Version 1 proves a
+    // chain, with exactly one recursive call in the pattern and each instance.
+    if (insertion.isInvalid() || !body(pattern, ignored) || patternCalls != 1) return false;
     locations.push_back(insertion);
     unsigned terminalCount = 0, implicitCount = 0;
     for (const auto *instance : family->specializations()) {
@@ -283,7 +286,7 @@ public:
         if (terminal.isInvalid() || !edges.empty()) return false;
         locations.push_back(terminal); ++terminalCount;
       } else {
-        if (edges.empty()) return false;
+        if (edges.size() != 1) return false;
         ++implicitCount;
       }
     }

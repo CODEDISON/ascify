@@ -19,6 +19,7 @@ __global__ void kernel(float*p){p[0]=chain<4>(1.0f);}
 '''
 CASES = [
     ('finite_chain', BASE, 2),
+    ('precise_mode', BASE, 0),
     ('renamed_depth', BASE.replace('chain', 'arbitrary_family').replace('<4>', '<11>'), 2),
     ('step_two_terminal_three', BASE.replace('n-1', 'n-2').replace('<0>', '<3>').replace('<4>', '<9>'), 2),
     ('increasing_chain', BASE.replace('n-1', 'n+2').replace('<0>', '<9>').replace('<4>', '<3>'), 2),
@@ -32,6 +33,9 @@ __global__ void kernel(float*p,cudaTextureObject_t t){p[0]=filter<8>(.5f,.5f,t);
 ''', 2),
     ('two_families', BASE+BASE.replace('chain', 'other').replace('kernel', 'second'), 4),
     ('cycle', BASE.replace('n-1', 'n'), 0),
+    ('repeated_edge', BASE.replace('x+chain<n-1>(x)', 'chain<n-1>(x)+chain<n-1>(x)'), 0),
+    ('diamond', BASE.replace('x+chain<n-1>(x)', 'chain<n-1>(x)+chain<n-2>(x)').replace(
+        '__global__ void kernel', 'template<> __device__ float chain<1>(float x){return x;}\n__global__ void kernel'), 0),
     ('budget_depth', BASE.replace('<4>', '<70>'), 0),
     ('function_pointer', BASE+'__device__ auto escaped=&chain<2>;\n', 0),
     ('address_in_uninstantiated_body', BASE+'template<int q> __device__ void unused(){auto p=&chain<q>; (void)p;}\n', 0),
@@ -104,7 +108,8 @@ def main():
             row['syntax_returncode'] = syntax.returncode
             require(syntax.returncode == 0, 'original CUDA syntax failed: '+syntax.stderr)
             converted = run(directory, 'convert', [args.binary, source, '--target-policy=dav-c310-vec',
-                '--simt-math=fast', '--target-recipe=none', '--default-preprocessor',
+                '--simt-math='+('precise' if name == 'precise_mode' else 'fast'),
+                '--target-recipe=none', '--default-preprocessor',
                 '--frontend-compat='+args.frontend_compat, '--cuda-path='+str(args.cuda_path),
                 '--clang-resource-directory='+str(args.resource_dir), '--migration-receipt='+str(receipt),
                 '-o', output, '--', '-x', 'cuda', '-std=c++17'])
@@ -135,7 +140,8 @@ def main():
             row['error'] = str(error)
         save()
         print(name, 'passed' if row['passed'] else 'FAILED', flush=True)
-    require(sha(args.binary) == summary['binary_sha256'] and sha(args.clang) == summary['clang_sha256'],
+    require(sha(Path(__file__)) == summary['runner_sha256'] and
+            sha(args.binary) == summary['binary_sha256'] and sha(args.clang) == summary['clang_sha256'],
             'binary changed during run')
     summary['passed'] = all(row['passed'] for row in summary['cases'])
     save()

@@ -10634,7 +10634,7 @@ void AscifyAction::ExecuteAction() {
   // acquire this main-file-only transformation.
   const bool rootInput = localHeaderContext == nullptr || localHeaderContext->depth == 0;
   if (rootInput) Statistics::current().boundedDeviceTemplateDefinitions = 0;
-  if (rootInput && TargetPolicy == "dav-c310-vec" &&
+  if (rootInput && TargetPolicy == "dav-c310-vec" && SimtMathMode == "fast" &&
       TargetRecipe != ascify::DavC310TargetRecipe::SimdRecipeName &&
       !cudaAttributeControlModified && !deviceTemplateAttributeMacroConflict &&
       !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks) {
