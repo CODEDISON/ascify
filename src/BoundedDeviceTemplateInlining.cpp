@@ -99,13 +99,44 @@ class FamilyProof {
       if (!isa<CUDADeviceAttr>(attribute)) return false;
     return function->hasAttr<CUDADeviceAttr>();
   }
+  bool declarations(const FunctionDecl *function) const {
+    if (function->getMostRecentDecl() != function) return false;
+    unsigned clones = 0;
+    const auto *pattern = family->getTemplatedDecl();
+    const auto *patternDevice = pattern->getAttr<CUDADeviceAttr>();
+    for (const auto *declaration : function->redecls()) {
+      if (declaration == function) continue;
+      // Clang builds one no-body specialization clone while selecting an
+      // explicit specialization. It has the pattern's exact range/attributes
+      // but the explicit declaration's name location; isImplicit() is false.
+      // A real forward declaration has its own range and must still opt out.
+      if (++clones != 1 || function->getTemplateSpecializationKind() != TSK_ExplicitSpecialization ||
+          declaration->isThisDeclarationADefinition() || declaration->getPreviousDecl() != nullptr ||
+          declaration->getLocation() != function->getLocation() ||
+          declaration->getSourceRange() != pattern->getSourceRange() ||
+          declaration->getTemplateInstantiationPattern(false) != pattern ||
+          familyOf(declaration) != family || patternDevice == nullptr ||
+          !signature(declaration) || declaration->getNumParams() != pattern->getNumParams())
+        return false;
+      for (const auto *attribute : declaration->attrs())
+        if (attribute->getLocation() != patternDevice->getLocation()) return false;
+      for (unsigned i = 0; i < declaration->getNumParams(); ++i)
+        if (declaration->getParamDecl(i)->getSourceRange() != pattern->getParamDecl(i)->getSourceRange())
+          return false;
+    }
+    return true;
+  }
   SourceLocation qualifier(const FunctionDecl *function) const {
     if (!literal(function->getLocation()) || !signature(function) ||
-        function->getPreviousDecl() != nullptr ||
-        function->getMostRecentDecl() != function ||
+        !declarations(function) ||
         !function->isThisDeclarationADefinition()) return {};
-    const auto *device = function->getAttr<CUDADeviceAttr>();
-    if (device == nullptr || device->isInherited()) return {};
+    const CUDADeviceAttr *device = nullptr;
+    for (const auto *attribute : function->specific_attrs<CUDADeviceAttr>()) {
+      if (attribute->isInherited()) continue;
+      if (device != nullptr) return {};
+      device = attribute;
+    }
+    if (device == nullptr) return {};
     const auto location = source.getExpansionLoc(device->getLocation());
     Token token;
     if (!literal(location) ||
@@ -115,7 +146,7 @@ class FamilyProof {
     return location;
   }
   bool integerArgument(const Expr *expression, unsigned depth = 0) const {
-    if (expression == nullptr || depth > MaxDepth ||
+    if (expression == nullptr || expression->getType().isNull() || depth > MaxDepth ||
         !context.hasSameType(expression->getType(), context.IntTy)) return false;
     expression = expression->IgnoreParenImpCasts();
     if (isa<IntegerLiteral>(expression)) return true;
@@ -214,7 +245,8 @@ class FamilyProof {
       const auto *target = family->getTemplatedDecl();
       if (call->getNumArgs() != target->getNumParams()) return false;
       for (unsigned i = 0; i < call->getNumArgs(); ++i)
-        if (!context.hasSameType(call->getArg(i)->getType().getCanonicalType().getUnqualifiedType(),
+        if (!scalar(call->getArg(i)->getType()) ||
+            !context.hasSameType(call->getArg(i)->getType().getCanonicalType().getUnqualifiedType(),
                                 target->getParamDecl(i)->getType().getCanonicalType().getUnqualifiedType()))
           return false;
       if (callee == nullptr) {
@@ -276,8 +308,7 @@ public:
       if (arguments == nullptr || arguments->size() != 1 ||
           arguments->get(0).getKind() != TemplateArgument::Integral ||
           !context.hasSameType(arguments->get(0).getIntegralType(), context.IntTy) ||
-          !instance->isThisDeclarationADefinition() || !signature(instance) ||
-          instance->getPreviousDecl() != nullptr || instance->getMostRecentDecl() != instance)
+          !instance->isThisDeclarationADefinition() || !signature(instance) || !declarations(instance))
         return false;
       auto &edges = graph[instance->getCanonicalDecl()];
       if (graph.size() > MaxNodes || !body(instance, edges)) return false;

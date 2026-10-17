@@ -42,6 +42,8 @@ __global__ void kernel(float*p,cudaTextureObject_t t){p[0]=filter<8>(.5f,.5f,t);
     ('forward_declaration', 'template<int n> __device__ float chain(float);\n'+BASE, 0),
     ('terminal_forward', BASE.replace('template<> __device__ float chain<0>(float x){return x;}',
         'template<> __device__ float chain<0>(float);\ntemplate<> __device__ float chain<0>(float x){return x;}'), 0),
+    ('terminal_inherited_qualifier', BASE.replace('template<> __device__', 'template<>'), 0),
+    ('terminal_raw_attribute', BASE.replace('template<> __device__', 'template<> __attribute__((device))'), 0),
     ('extern_template', BASE+'extern template __device__ float chain<8>(float);\n', 0),
     ('noinline', BASE.replace('__device__ float chain', '__device__ __attribute__((noinline)) float chain'), 0),
     ('host_device', BASE.replace('__device__', '__host__ __device__'), 0),
