@@ -221,7 +221,7 @@ constexpr char kProfileManifest[] =
     "file=cooperative_groups/reduce.h;bytes=1612;sha256=bc6f9130deaa55a786df70d127a118ecf57b1014dddbb0700a45ef05f597c928\n"
     "file=host_math.h;bytes=1872;sha256=c73958a48fb55cd8f05a45e9455ce45f8660273863b17c070f5d1081a396106f\n";
 
-static_assert(sizeof(kAdmissionHeader) - 1 == 5100,
+static_assert(sizeof(kAdmissionHeader) - 1 == 5325,
               "admission header identity drifted");
 static_assert(sizeof(kReductionHeader) - 1 == 1612,
               "reduction header identity drifted");
