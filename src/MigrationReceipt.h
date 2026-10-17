@@ -56,6 +56,7 @@ struct MigrationReceiptInput {
   MigrationReceiptStatus status = MigrationReceiptStatus::Failed;
   MigrationReceiptStage stage = MigrationReceiptStage::InputResolution;
   std::string diagnosticSummary;
+  unsigned boundedDeviceTemplateDefinitions = 0;
 };
 
 class MigrationReceipt {

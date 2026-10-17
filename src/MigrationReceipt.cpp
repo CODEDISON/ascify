@@ -124,9 +124,9 @@ std::string MigrationReceipt::toJson() const {
       sortedInputs.begin(), sortedInputs.end(),
       [](const MigrationReceiptInput &lhs, const MigrationReceiptInput &rhs) {
         return std::tie(lhs.input, lhs.resolvedInput, lhs.output, lhs.status,
-                        lhs.stage, lhs.diagnosticSummary) <
+                        lhs.stage, lhs.diagnosticSummary, lhs.boundedDeviceTemplateDefinitions) <
                std::tie(rhs.input, rhs.resolvedInput, rhs.output, rhs.status,
-                        rhs.stage, rhs.diagnosticSummary);
+                        rhs.stage, rhs.diagnosticSummary, rhs.boundedDeviceTemplateDefinitions);
       });
 
   std::ostringstream out;
@@ -174,6 +174,9 @@ std::string MigrationReceipt::toJson() const {
         << "\",\n";
     out << "      \"diagnostic_summary\": ";
     writeJsonString(out, input.diagnosticSummary);
+    out << ",\n      \"bounded_device_template_inlining\": {\"rule\": "
+           "\"int-nttp-scalar-dag-v1\", \"definitions\": "
+        << input.boundedDeviceTemplateDefinitions << '}';
     out << "\n    }";
     if (index + 1 != sortedInputs.size())
       out << ',';

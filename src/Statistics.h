@@ -483,6 +483,8 @@ class Statistics {
 
 public:
   Statistics(const std::string &name);
+  // Latest root-source transaction only; header proof passes do not add counts.
+  unsigned boundedDeviceTemplateDefinitions = 0;
   void incrementCounter(const dppCounter &counter, const std::string &name);
   // Add the counters from `other` onto the counters of this object.
   void add(const Statistics &other);

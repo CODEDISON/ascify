@@ -776,6 +776,8 @@ int main(int argc, const char **argv) {
                               ? ascify::MigrationReceiptStatus::Succeeded
                               : ascify::MigrationReceiptStatus::Failed;
     receiptInput.stage = ascify::MigrationReceiptStage::SourceConversion;
+    receiptInput.boundedDeviceTemplateDefinitions = conversionOk
+        ? Statistics::current().boundedDeviceTemplateDefinitions : 0;
     receiptInput.diagnosticSummary =
         conversionOk
             ? "source conversion completed; later pipeline stages are outside this receipt"

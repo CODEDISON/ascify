@@ -36,6 +36,7 @@ ascify::MigrationReceipt makeSuccessReceipt(bool reverseInputs) {
       ascify::MigrationReceiptStage::SourceConversion,
       "source conversion completed",
   };
+  first.boundedDeviceTemplateDefinitions = 2;
   if (reverseInputs) {
     receipt.addInputResult(first);
     receipt.addInputResult(second);
@@ -58,6 +59,7 @@ int main() {
   assert(forward.find("a-input.cu") < forward.find("b\\\\input.cu"));
   assert(forward.find("b\\\\input.cu") != std::string::npos);
   assert(forward.find("b\\ninput.cu.dpp") != std::string::npos);
+  assert(forward.find("\"rule\": \"int-nttp-scalar-dag-v1\", \"definitions\": 2") != std::string::npos);
 
   ascify::MigrationReceipt failed({
       "portable", "precise", "none", "none", "disabled", "side_by_side",

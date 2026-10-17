@@ -122,6 +122,7 @@ private:
   };
   std::vector<CudaAttributeGuard> cudaAttributeGuards;
   bool cudaAttributeControlModified = false;
+  bool deviceTemplateAttributeMacroConflict = false;
   std::vector<SemanticRewriteRange> nvidiaSampleHelperMacroRanges;
   std::vector<NvidiaSampleHelperMacroCandidate>
       nvidiaSampleHelperMacroCandidates;

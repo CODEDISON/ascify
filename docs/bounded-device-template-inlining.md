@@ -1,0 +1,26 @@
+# Bounded device template inlining
+
+The `dav-c310-vec` frontend can add `__attribute__((always_inline))` to a narrowly proved family of scalar CUDA device templates. This removes deep finite device call chains without adding the C++ `inline` specifier or changing the global `__device__` mapping. It is an optional optimization after the ordinary CUDA ownership, record, texture and reflection audits; it does not extend their accepted language surface.
+
+The first rule, `int-nttp-scalar-dag-v1`, requires standard preprocessing (`--default-preprocessor`) and a root source file. It is disabled for the row-wise SIMD recipe and for projected headers. Every participating definition has a direct, authenticated CUDA SDK `__device__` token in the real main FileID. Inherited attributes, caller macro aliases, separate forward declarations, explicit instantiation directives, cross-file definitions, host/device dual functions and other user attributes exclude the entire family. A definition of either output token `__attribute__` or `always_inline`, even if later undefined, disables this optimization for the translation unit.
+
+A family has exactly one `int` non-type template parameter without defaults, packs or constraints. Returns and function parameters have fixed builtin arithmetic types; references, pointers, records, variadics, default function arguments and exception specifications are excluded. Each definition is a single return expression drawn from literals, scalar parameters, the integer template parameter, primitive casts, unary signs, `+`, `-`, `*`, reads of main-file CUDA constant scalars or arrays, authenticated float texture fetches, and direct calls to the same family. Numeric macros can supply literal values, such as a filter radius; macros cannot manufacture an operator, callee, return statement or definition. Other calls, local variables, mutation, volatile access, reflection, asm, lambdas and stack observations do not qualify.
+
+The pattern must contain its own direct template call. All observed concrete specializations must have bodies. Their actual direct call graph must be an acyclic graph with at most 256 nodes and maximum path length 64, including the explicit terminal specializations. Each implicit instance must have a successor; each explicit specialization must be a leaf. The rule uses actual Clang instances, not a function-name convention, a particular template value, a dimension or a source hash. Every visible reference to the family, including references in uninstantiated bodies, must be a direct callee. Address escape, unresolved overload sets, qualified or macro-generated references exclude the whole family.
+
+All selected insertions are staged together against existing semantic rewrites. If any insertion conflicts, none of these attributes are published. A failed proof leaves the original family unchanged; an existing conversion boundary can still reject the source normally. Successful input receipts expose `bounded_device_template_inlining` with the rule name and number of root-source definitions actually selected. This is a source transformation count, not a guarantee of backend inlining or runtime correctness. Failed conversion receipts report zero published definitions.
+
+The attribute-only choice follows separate CANN 9.1 / Ascend950DT diagnostics: four generated definitions lost a 34-relocation device call chain and the complete unchanged convolution CPU oracle passed. The terminal specialization symbols remained externally defined. A separate two-TU direct-call comparison also passed with byte-identical definition objects before and after adding the attribute. These observations apply to those tested programs and toolchain. Both baseline and attribute variants of an indirect-call probe crashed the backend, so function-pointer behavior is not claimed. The main-file rule cannot see other translation units; preserving language linkage and external definitions remains necessary even after excluding visible escapes.
+
+Run the real frontend regression matrix with a matching Clang/resource directory and physical CUDA SDK:
+
+```sh
+python3 tests/rewrite/check_bounded_device_template_inlining.py \
+  --binary /path/to/install/bin/ascify-clang \
+  --clang /path/to/llvm/bin/clang++ \
+  --resource-dir /path/to/llvm/lib/clang/23 \
+  --cuda-path /path/to/cuda \
+  --evidence-dir /new/evidence/directory
+```
+
+Every case must first pass original CUDA syntax. Positive cases require exact attribute and receipt counts. Excluded cases require zero inserted attributes, or a normal existing-boundary failure receipt with no published files. Source and binary identities are checked. This test does not invoke CCEC or an NPU. Full original Sample builds and unchanged default-workload CPU oracles remain separate acceptance requirements.

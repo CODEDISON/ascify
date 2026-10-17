@@ -47,6 +47,7 @@ if(NOT ASCIFY_CLANG_TESTS_ONLY)
   add_llvm_executable(ascify-clang
     src/ArgParse.cpp
     src/AscifyAction.cpp
+    src/BoundedDeviceTemplateInlining.cpp
     src/CUDA2DPP.cpp
     src/CUDA2DPP_Device_API.cpp
     src/CUDA2DPP_Runtime_API_functions.cpp

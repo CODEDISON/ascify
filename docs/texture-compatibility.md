@@ -14,6 +14,8 @@ The texture audit also proves a narrow class of scalar non-type-template calls, 
 
 ## Sampling and numerical limits
 
+Finite scalar `int` template call chains can additionally qualify for [bounded attribute-only device template inlining](bounded-device-template-inlining.md). That optional rule preserves language linkage and the existing texture/reflection gates; it is not general template support or a runtime acceptance claim.
+
 Point filtering uses floor coordinates. Normalized wrap/clamp and unnormalized clamp are supported; unnormalized wrap is converted to clamp as specified by CUDA. Linear filtering applies the half-texel offset and accepts only weights exactly on the 1/256 grid. Other fractional coordinates, nonfinite coordinates, out-of-range layers, and a nonfinite texel actually loaded by the sampler set a sticky GM error. A blocking public synchronization or copy reports that error. A failed copy leaves the host destination unchanged when failure is detected before copying.
 
 Interpolation uses float arithmetic over finite participating texels. The adapter does not promise bitwise equivalence to all hardware texture interpolation or an undocumented FMA/rounding rule. Engineering probes compare independently listed values; original Samples must separately pass their complete, unchanged CPU acceptance criteria. Hardware texture-cache performance and unrestricted asynchronous equivalence are not claimed.

@@ -69,6 +69,7 @@ THE SOFTWARE.
 #include "UniformBlockReduction.h"
 #include "CudaVec3AbiBoundary.h"
 #include "CudaTextureBoundary.h"
+#include "BoundedDeviceTemplateInlining.h"
 
 using namespace ascify;
 
@@ -7564,6 +7565,8 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
     return;
   const llvm::StringRef name =
       MacroNameTok.getIdentifierInfo()->getName();
+  if (name == "__attribute__" || name == "always_inline")
+    deviceTemplateAttributeMacroConflict = true;
   if (name == "__MVS__")
     cudaRuntimeApiMvsControlModified = true;
   // Rewritten builtin tokens are preprocessed again by the target compiler.
@@ -10624,6 +10627,68 @@ void AscifyAction::ExecuteAction() {
   if (!nvidiaSampleHelperIncludes.empty()) {
     for (clang::FileID file : nvidiaSampleRetainedFileIds)
       auditRawPublishedCompatTokensInFile(file);
+  }
+  // Attribute-only is intentionally separate from the global __device__ map.
+  // Run after all ordinary AST gates and the raw pass; a failed optimization
+  // proof cannot change their acceptance decision. Header projections do not
+  // acquire this main-file-only transformation.
+  const bool rootInput = localHeaderContext == nullptr || localHeaderContext->depth == 0;
+  if (rootInput) Statistics::current().boundedDeviceTemplateDefinitions = 0;
+  if (rootInput && TargetPolicy == "dav-c310-vec" &&
+      TargetRecipe != ascify::DavC310TargetRecipe::SimdRecipeName &&
+      !cudaAttributeControlModified && !deviceTemplateAttributeMacroConflict &&
+      !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks) {
+    const auto ownedQualifier = [&](llvm::StringRef name, clang::SourceLocation location) {
+      std::set<const clang::IdentifierInfo *> seen;
+      std::vector<const clang::IdentifierInfo *> pending = {PP.getIdentifierInfo(name)};
+      while (!pending.empty()) {
+        const auto *identifier = pending.back(); pending.pop_back();
+        if (!seen.insert(identifier).second) continue;
+        if (seen.size() > 16) return false;
+        const auto *info = PP.getMacroDefinitionAtLoc(identifier, location).getMacroInfo();
+        if (info == nullptr) return false;
+        const auto file = SM.getFileID(SM.getSpellingLoc(info->getDefinitionLoc()));
+        if (file.isInvalid() || (!cudaRuntimeApiSdkFileIds.count(file.getHashValue()) &&
+                                !isOwnedCudaCompilerInput(file, getCompilerInstance())))
+          return false;
+        for (const auto &token : info->tokens()) {
+          if (token.is(clang::tok::hash) || token.is(clang::tok::hashhash)) return false;
+          const auto *dependency = token.getIdentifierInfo();
+          if (dependency == nullptr) continue;
+          bool parameter = false;
+          if (info->isFunctionLike())
+            for (const auto *argument : info->params()) parameter |= argument == dependency;
+          if (!parameter && PP.getMacroDefinitionAtLoc(dependency, location).getMacroInfo())
+            pending.push_back(dependency);
+        }
+      }
+      return true;
+    };
+    const auto edits = ascify::ProveBoundedDeviceTemplateInlining(
+        getCompilerInstance().getASTContext(), cudaTextureLiteralOffsets, ownedQualifier);
+    ct::Replacements staged(*replacements);
+    bool committed = true;
+    for (const auto qualifier : edits.qualifiers) {
+      const auto location = clang::Lexer::getLocForEndOfToken(qualifier, 0, SM, PP.getLangOpts());
+      if (location.isInvalid()) { committed = false; break; }
+      const unsigned offset = SM.getFileOffset(location);
+      for (const auto &range : SemanticRewriteRanges)
+        if (range.file == SM.getFileID(location) && range.beginOffset <= offset &&
+            offset <= range.endOffset) committed = false;
+      if (!committed) break;
+      std::string error;
+      if (!llcompat::insertReplacement(staged, ct::Replacement(SM, location, 0,
+              " __attribute__((always_inline))"), &error)) {
+        committed = false; break;
+      }
+    }
+    if (committed && !edits.qualifiers.empty()) {
+      *replacements = std::move(staged);
+      Statistics::current().boundedDeviceTemplateDefinitions = edits.qualifiers.size();
+      llvm::errs() << "Ascify bounded device-template inlining v1: families=" << edits.families
+                   << ", definitions=" << edits.qualifiers.size()
+                   << ", instances=" << edits.instances << ", max_depth=64, max_nodes=256\n";
+    }
   }
   // Every helper edit remains staged until the raw pass reaches EOF. Any
   // earlier target-recipe return leaves this false, so EndSourceFileAction
