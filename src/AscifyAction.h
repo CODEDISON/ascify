@@ -107,6 +107,7 @@ private:
   std::set<unsigned> preservedHostMathCalleeOffsets;
   bool frontendHostMathBuiltinMacroDefined = false;
   std::set<unsigned> macroAlteredFrontendHostMathFileIds;
+  std::set<clang::FileID> enteredSourceFileIds;
   std::map<std::string, clang::SourceLocation> Ifndefs;
   std::vector<clang::SourceRange> SkippedSourceRanges;
   std::vector<SemanticRewriteRange> SemanticRewriteRanges;

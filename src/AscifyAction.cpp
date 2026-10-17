@@ -4180,6 +4180,7 @@ void AscifyAction::FileChanged(
         nvidiaSampleHelperCudaFileStack.back());
     return;
   }
+  enteredSourceFileIds.insert(file);
   if (localHeaderContext != nullptr &&
       localHeaderContext->inputEvidence != nullptr) {
     auto &evidence = *localHeaderContext->inputEvidence;
@@ -8032,9 +8033,16 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
   auto &source = compiler.getSourceManager();
   std::set<unsigned> auditedFiles, nativeFiles;
   std::set<unsigned> frozenTextureUtilityFiles;
+  // A physical file may be entered more than once with different include
+  // parents or macro contexts. translateFile returns only its first FileID;
+  // retain that inventory, but audit every observed inclusion independently.
+  std::set<clang::FileID> inputFiles = enteredSourceFileIds;
   for (auto info = source.fileinfo_begin(); info != source.fileinfo_end(); ++info) {
-    const auto file = source.translateFile(info->first);
-    if (file.isInvalid() || cudaRuntimeApiSdkFileIds.count(file.getHashValue()) ||
+    inputFiles.insert(source.translateFile(info->first));
+  }
+  for (const auto file : inputFiles) {
+    if (file.isInvalid() || source.getFileEntryForID(file) == nullptr ||
+        cudaRuntimeApiSdkFileIds.count(file.getHashValue()) ||
         isOwnedCudaCompilerInput(file, compiler, textureOnly)) continue;
     auditedFiles.insert(file.getHashValue());
     const auto begin = source.getLocForStartOfFile(file);
@@ -8142,6 +8150,22 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       // reflection operands remain audited.
       if (llvm::isa<clang::ImplicitValueInitExpr>(expression))
         return true;
+      // A fixed scalar NTTP call can retain a dependent Expr type until
+      // overload resolution, even though no SDK record can enter its type.
+      // Prove only this expression; normal traversal still visits its body,
+      // template arguments, reflection operands and concrete instantiations.
+      if (textureOnly && expression->getType()->isDependentType()) {
+        if (!provedNttpScalarType(expression).isNull())
+          return true;
+        if (const auto *lookup = llvm::dyn_cast<clang::UnresolvedLookupExpr>(expression)) {
+          const auto parents = context.getParents(*lookup);
+          if (parents.size() == 1)
+            if (const auto *call = parents[0].get<clang::CallExpr>())
+              if (call->getCallee() == lookup &&
+                  !provedNttpScalarType(call).isNull())
+                return true;
+        }
+      }
       return inspect(expression->getType(), expression->getExprLoc());
     }
     bool VisitFunctionDecl(clang::FunctionDecl *function) {
@@ -8320,6 +8344,91 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     std::string badName;
     std::string badReason = "unproved SDK record ABI";
   private:
+    clang::QualType fixedArithmeticType(clang::QualType type) const {
+      if (type.isNull() || type->isDependentType()) return {};
+      type = type.getCanonicalType().getUnqualifiedType();
+      return type->isBuiltinType() && type->isArithmeticType() ? type : clang::QualType{};
+    }
+    bool provedIntNttpArgument(const clang::Expr *expression,
+                               const clang::TemplateParameterList *parameters,
+                               unsigned depth = 0) const {
+      if (expression == nullptr || depth > 32 ||
+          !context.hasSameType(expression->getType(), context.IntTy)) return false;
+      expression = expression->IgnoreParenImpCasts();
+      if (llvm::isa<clang::IntegerLiteral>(expression)) return true;
+      if (const auto *reference = llvm::dyn_cast<clang::DeclRefExpr>(expression)) {
+        for (const auto *parameter : *parameters)
+          if (reference->getDecl() == parameter) return true;
+        return false;
+      }
+      if (const auto *unary = llvm::dyn_cast<clang::UnaryOperator>(expression))
+        return (unary->getOpcode() == clang::UO_Plus || unary->getOpcode() == clang::UO_Minus) &&
+            provedIntNttpArgument(unary->getSubExpr(), parameters, depth + 1);
+      if (const auto *binary = llvm::dyn_cast<clang::BinaryOperator>(expression))
+        return (binary->getOpcode() == clang::BO_Add || binary->getOpcode() == clang::BO_Sub) &&
+            provedIntNttpArgument(binary->getLHS(), parameters, depth + 1) &&
+            provedIntNttpArgument(binary->getRHS(), parameters, depth + 1);
+      return false;
+    }
+    clang::QualType provedNttpScalarType(const clang::Expr *expression,
+                                        unsigned depth = 0) const {
+      if (expression == nullptr || depth > 32) return {};
+      if (!expression->getType()->isDependentType())
+        return fixedArithmeticType(expression->getType());
+      if (const auto *paren = llvm::dyn_cast<clang::ParenExpr>(expression))
+        return provedNttpScalarType(paren->getSubExpr(), depth + 1);
+      if (const auto *binary = llvm::dyn_cast<clang::BinaryOperator>(expression)) {
+        if (binary->getOpcode() != clang::BO_Add && binary->getOpcode() != clang::BO_Sub &&
+            binary->getOpcode() != clang::BO_Mul) return {};
+        auto left = provedNttpScalarType(binary->getLHS(), depth + 1);
+        const auto right = provedNttpScalarType(binary->getRHS(), depth + 1);
+        if (left.isNull() || right.isNull() || !context.hasSameType(left, right)) return {};
+        if (context.isPromotableIntegerType(left)) left = context.getPromotedIntegerType(left);
+        return left;
+      }
+      // Do not admit operators, members, function pointers or a bare overload
+      // address. The unresolved lookup must belong to this exact plain call.
+      if (expression->getStmtClass() != clang::Stmt::CallExprClass) return {};
+      const auto *call = llvm::cast<clang::CallExpr>(expression);
+      const auto *lookup = llvm::dyn_cast<clang::UnresolvedLookupExpr>(call->getCallee());
+      if (lookup == nullptr || lookup->getQualifier() ||
+          !lookup->hasExplicitTemplateArgs()) return {};
+      auto candidate = lookup->decls_begin();
+      if (candidate == lookup->decls_end()) return {};
+      const auto *functionTemplate = llvm::dyn_cast<clang::FunctionTemplateDecl>(*candidate++);
+      if (candidate != lookup->decls_end() || functionTemplate == nullptr) return {};
+      const auto *function = functionTemplate->getTemplatedDecl();
+      if (llvm::isa<clang::CXXMethodDecl>(function) ||
+          !function->getDeclContext()->isFileContext() || function->isVariadic() ||
+          function->getDefinition() == nullptr ||
+          call->getNumArgs() != function->getNumParams()) return {};
+      const auto result = fixedArithmeticType(function->getReturnType());
+      if (result.isNull()) return {};
+      const auto *parameters = functionTemplate->getTemplateParameters();
+      if (parameters->size() == 0 || parameters->size() != lookup->getNumTemplateArgs() ||
+          parameters->getRequiresClause() != nullptr || function->getTrailingRequiresClause())
+        return {};
+      for (const auto *parameter : *parameters) {
+        const auto *integer = llvm::dyn_cast<clang::NonTypeTemplateParmDecl>(parameter);
+        if (integer == nullptr || integer->isParameterPack() || integer->hasDefaultArgument() ||
+            !context.hasSameType(integer->getType(), context.IntTy)) return {};
+      }
+      for (const auto &argument : lookup->template_arguments()) {
+        const auto &value = argument.getArgument();
+        if (value.getKind() == clang::TemplateArgument::Integral) {
+          if (!context.hasSameType(value.getIntegralType(), context.IntTy)) return {};
+        } else if (value.getKind() != clang::TemplateArgument::Expression ||
+                   !provedIntNttpArgument(value.getAsExpr(), parameters)) return {};
+      }
+      for (unsigned i = 0; i < call->getNumArgs(); ++i) {
+        const auto actual = fixedArithmeticType(call->getArg(i)->getType());
+        const auto formal = fixedArithmeticType(function->getParamDecl(i)->getType());
+        if (actual.isNull() || formal.isNull() || !context.hasSameType(actual, formal)) return {};
+      }
+      // Clang marks this lookup ADL-dependent. Builtin arithmetic actual
+      // arguments have no associated classes/namespaces, so ADL adds nothing.
+      return result;
+    }
     bool provedSdkEnumEquality(const clang::BinaryOperator *comparison,
                               const clang::EnumDecl *enumeration) const {
       // The supported error symbols and memcpy directions have distinct target

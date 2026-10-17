@@ -21,6 +21,14 @@ CASES = [
     ('layered_flag','void f(){cudaArray*a=nullptr;auto c=cudaCreateChannelDesc<float>();auto s=cudaMalloc3DArray(&a,&c,make_cudaExtent(4,3,2),cudaArrayLayered);}', ['make_cudaExtent(4,3,2),0x01)']),
     ('layered_flag_int_type', 'auto flag=cudaArrayLayered;static_assert(__is_same(decltype(flag),int),"int prvalue");static_assert(__is_same(decltype((cudaArrayLayered)),int),"int expression");', ['auto flag=0x01', 'decltype((0x01))']),
     ('fixed_template_fetch', 'template<int i> __device__ float f(cudaTextureObject_t t){return tex2D<float>(t,i+.5f,.5f);}\n__global__ void k(float*p,cudaTextureObject_t t){p[0]=f<1>(t);}', ['ascify::tex2D<float>']),
+    ('fixed_recursive_nttp', 'template<int n> __device__ float recursive_nttp(float x,float y,cudaTextureObject_t t){return tex2D<float>(t,x,y)+recursive_nttp<n-1>(x,y,t);}\ntemplate<> __device__ float recursive_nttp<-1>(float,float,cudaTextureObject_t){return 0;}\n__global__ void k(float*p,cudaTextureObject_t t){p[0]=recursive_nttp<2>(.5f,.5f,t);}', ['ascify::tex2D<float>', 'recursive_nttp<n-1>']),
+    ('nttp_dependent_return', 'template<int n>struct Result{using type=float;};template<int n>typename Result<n>::type recurse(float x){return recurse<n-1>(x);}\ncudaTextureDesc descriptor{};', None),
+    ('nttp_record_argument', 'struct Argument{float x;};template<int n>float recurse(Argument x){return recurse<n-1>(x);}\ncudaTextureDesc descriptor{};', None),
+    ('nttp_body_reflection', 'template<int n>float recurse(float x){return float(sizeof(cudaTextureDesc))+recurse<n-1>(x);}\ncudaTextureDesc descriptor{};', None),
+    ('nttp_multiple_candidates', 'template<int n>float recurse(float x){return x;}template<int n>float recurse(double x){return float(x);}template<int n>float caller(float x){return recurse<n>(x);}\ncudaTextureDesc descriptor{};', None),
+    ('nttp_function_address', 'template<int n>float recurse(float x){return x;}template<int n>void caller(){auto p=&recurse<n>; (void)p;}\ncudaTextureDesc descriptor{};', None),
+    ('nttp_argument_reflection', 'template<int n>float recurse(float x){return recurse<n+sizeof(cudaTextureDesc)>(x);}\ncudaTextureDesc descriptor{};', None),
+    ('nttp_parameter_pack', 'template<int...n>float recurse(float x){return x;}template<int n>float caller(float x){return recurse<n>(x);}\ncudaTextureDesc descriptor{};', None),
     ('frozen_helper_call', '#include <helper_cuda.h>\nvoid f(cudaTextureObject_t t){checkCudaErrors(cudaDestroyTextureObject(t));}', ['ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaDestroyTextureObject(t))']),
     ('frozen_helper_layered', '#include <helper_cuda.h>\nvoid f(){cudaArray*a=nullptr;auto c=cudaCreateChannelDesc<float>();checkCudaErrors(cudaMalloc3DArray(&a,&c,make_cudaExtent(4,3,2),cudaArrayLayered));}', ['ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaMalloc3DArray', 'make_cudaExtent(4,3,2),0x01)']),
     ('frozen_full_helpers', '#include <helper_functions.h>\n#include <helper_cuda.h>\nvoid f(cudaTextureObject_t t){checkCudaErrors(cudaDestroyTextureObject(t));}', ['ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaDestroyTextureObject(t))']),
@@ -74,6 +82,7 @@ def main():
     for name in ('binary','cuda-path','resource-dir','evidence-dir'):
         p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--clang',type=Path)
+    p.add_argument('--profile-host-math',type=Path)
     p.add_argument('--frontend-compat',choices=('none','ascify-admitted-v1'),default='none')
     a=p.parse_args()
     a.binary,a.cuda_path,a.resource_dir,a.evidence_dir=(q.resolve() for q in (a.binary,a.cuda_path,a.resource_dir,a.evidence_dir))
@@ -96,33 +105,52 @@ def main():
         return z
     save()
     cases=[(name,code,expected,[],{}) for name,code,expected in CASES]
+    recursive_cases={}
     if a.frontend_compat=='ascify-admitted-v1':
+        installed_host_math=a.binary.parent.parent/'libexec/ascify/frontend-compat/ascify-admitted-v1/host_math.h'
+        profile_host_math=(a.profile_host_math or (installed_host_math if installed_host_math.is_file() else
+                          Path(__file__).resolve().parents[2]/'frontend_compat/ascify-admitted-v1/host_math.h')).resolve(strict=True)
+        summary['profile_host_math']={'path':str(profile_host_math),'sha256':sha(profile_host_math)}
         cases += [
-            ('profile_fake_host_math','#include "host_math.h"\ncudaTextureDesc descriptor{};',None,[],{'host_math.h':'template<class T>T caller_identity(T x){return x;}\n'}),
+            ('profile_fake_host_math','#include <fake/host_math.h>\ncudaTextureDesc descriptor{};',None,['-I{case}'],{'fake/host_math.h':'template<class T>T caller_identity(T x){return x;}\n'}),
             ('profile_macro_template_parameter','cudaTextureDesc descriptor{};',None,['-DA=CallerType'],{}),
             ('profile_macro_template_owner','cudaTextureDesc descriptor{};',None,['-Dhost_float_max_enabled=CallerEnabled'],{}),
             ('profile_empty_macro_expansion','cudaTextureDesc descriptor{};',None,['-Dinline='],{}),
             ('profile_preinclude_macro_then_undef','#undef A\ncudaTextureDesc descriptor{};',None,['-include','{case}/caller_macros.h'],{'caller_macros.h':'#define A CallerType\n'}),
             ('profile_late_unused_macro','#define host_float_max_enabled CallerEnabled\n#undef host_float_max_enabled\ncudaTextureDesc descriptor{};',['ascify::cudaTextureDesc descriptor'],[],{}),
         ]
+        for altered in (False,True):
+            code=('#undef ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_HOST_MATH_H_\n'
+                  'namespace repeated_profile {\n'+('#define A CallerType\n' if altered else '')+
+                  '#include <host_math.h>\n'+('#undef A\n' if altered else '')+
+                  '}\ncudaTextureDesc descriptor{};\n'
+                  'float f(){return repeated_profile::max(1.0f,2.0f);}')
+            for recursive in (False,True):
+                name=('profile_reinclude_macro_parameter' if altered else 'profile_reinclude_namespace')+('_recursive' if recursive else '_plain')
+                cases.append((name,code,None,['-I'+str(profile_host_math.parent)],{}))
+                recursive_cases[name]=recursive
     for name,code,expected,extra,headers in cases:
         directory=a.evidence_dir/name;directory.mkdir()
-        for filename,contents in headers.items():(directory/filename).write_text(contents)
+        for filename,contents in headers.items():
+            path=directory/filename;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(contents)
         extra=[value.replace('{case}',str(directory)) for value in extra]
         source=directory/'input.cu';output=directory/'output.cce';receipt=directory/'receipt.json'
         source.write_text('#include <cuda_runtime.h>\n#include <string.h>\n'+code+'\n')
         row={'name':name,'expected_fragments':expected,'passed':False,'source_sha256':sha(source),
-             'extra_arguments':extra,'local_header_identity':{filename:sha(directory/filename) for filename in headers}}
+             'extra_arguments':extra,'local_header_identity':{filename:sha(directory/filename) for filename in headers},
+             'recursive':recursive_cases.get(name,a.frontend_compat=='ascify-admitted-v1')}
         summary['cases'].append(row);save()
         try:
             z=run(directory,'syntax',[a.clang,source,'-x','cuda','-std=c++17','--cuda-host-only','-fsyntax-only','-nocudalib','--cuda-path='+str(a.cuda_path),'-resource-dir='+str(a.resource_dir),'-Wno-unknown-cuda-version','-I'+str(helpers),*extra])
             row['syntax_returncode']=z.returncode;save();assert z.returncode==0,(name,z.stderr)
-            projection=['--local-headers-recursive'] if a.frontend_compat=='ascify-admitted-v1' else []
+            projection=['--local-headers-recursive'] if row['recursive'] else []
             z=run(directory,'convert',[a.binary,source,'--target-policy=dav-c310-vec','--simt-math=fast','--target-recipe=none','--default-preprocessor','--frontend-compat='+a.frontend_compat,'--cuda-path='+str(a.cuda_path),'--clang-resource-directory='+str(a.resource_dir),'--migration-receipt='+str(receipt),'-o',output,*projection,'--','-x','cuda','-std=c++17','-I'+str(helpers),*extra])
             row['conversion_returncode']=z.returncode;save()
             if expected is None:
-                assert z.returncode>0 and not output.exists() and json.loads(receipt.read_text())['status']=='failed',(name,z.stderr)
+                output_headers=directory/'output.cce.headers'
+                assert z.returncode>0 and not output.exists() and not output.is_symlink() and not output_headers.exists() and not output_headers.is_symlink() and json.loads(receipt.read_text())['status']=='failed',(name,z.stderr)
                 assert any(marker in z.stderr for marker in ('CUDA texture boundary','CUDA runtime-API header boundary','Ascify cannot publish CUDA compatibility output')),(name,z.stderr)
+                assert 'fatal error:' not in z.stderr,(name,z.stderr)
             else:
                 assert z.returncode==0 and json.loads(receipt.read_text())['status']=='succeeded',(name,z.stderr)
                 text=output.read_text();assert '#include <ascify/texture_compat.hpp>' in text,(name,text)
@@ -136,6 +164,8 @@ def main():
         save();print(name,'passed' if row['passed'] else 'FAILED',flush=True)
     assert sha(a.binary)==summary['binary_sha256'] and sha(a.clang)==summary['clang_sha256']
     assert all(sha(Path(q))==digest for q,digest in helper_identity.items())
+    if 'profile_host_math' in summary:
+        assert sha(profile_host_math)==summary['profile_host_math']['sha256']
     summary.update(passed=all(row['passed'] for row in summary['cases']),total=len(cases));save()
     assert summary['passed'], 'texture boundary matrix contains failures'
 if __name__=='__main__':main()
