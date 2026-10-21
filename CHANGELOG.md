@@ -14,6 +14,9 @@ for supported domains and experimental paths.
   this proof; target compilation and complete sample validation are required.
   Inactive push-prefix recognition preserves intervening blank lines. Plain-char
   signedness must match the source toolchain and is checked by target witnesses.
+  Selected child headers are proved during discovery; their guards and witnesses
+  are emitted by the translation that owns their source, avoiding cross-file
+  replacement conflicts while retaining complete-closure publication checks.
 
 - Contextual local headers can retain literal unroll pragmas and normalize a
   single pragma once after physical include-entry proof. Ordered payload and

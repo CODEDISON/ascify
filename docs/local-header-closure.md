@@ -195,9 +195,18 @@ The final replacement set, including helper edits, token rewrites and generated
 includes, is checked against the complete protected interval and its insertion
 boundaries. Only the proof-owned guard and post-region witnesses may be added.
 Physical path aliases cannot bypass this check. Publication is transactional.
+Discovery still proves every selected packed child, but emits replacements
+only for the current main file. A separate child translation or an authenticated
+contextual reparse must emit that child's configuration guards and layout
+witnesses before the complete closure can publish. This keeps replacements in
+their owning file without skipping child record or macro checks. The focused
+matrix checks witnesses in both flattened output and a separately published
+child, and rejects an invalid packed child during discovery.
 When such a header also requires inherited context, only region-owned raw pack
 lines join the literal once/unroll context proof; complete ordered pragma,
 token, macro, input and skipped-edge checks still apply.
+Combining a packed region with helper macro expansion outside the current
+main file remains conservatively rejected by the helper transaction proof.
 
 The [focused matrix](../tests/rewrite/check_packed_record_conversion.py) validates
 original source syntax before every conversion, preserves old outputs on

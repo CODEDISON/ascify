@@ -50,7 +50,18 @@ def main():
         ('conditional_no_gap', True, HELPER+PREFIX.rstrip('\n')+'\n'+OPEN+BODY+FOOTER+TAIL, None, []),
         ('conditional_two_gaps', True, HELPER+PREFIX+'\n'+OPEN+BODY+FOOTER+TAIL, None, []),
         ('conditional_whitespace_crlf', True, HELPER+PREFIX.replace('\n','\r\n')+' \t\r\n'+OPEN+BODY+FOOTER+TAIL, None, []),
-        ('context_once', True, HELPER+'#include "record.cuh"\nint main(){checked();return sizeof(FileRecord)==14?0:1;}\n',
+        # Parent declaration forces contextual replay of the child; helper
+        # macro expansion stays in the main TU's existing supported domain.
+        ('context_once', True, HELPER+'constexpr int parent_context_value=7;\n#include "record.cuh"\n'+
+            TAIL.replace('sizeof(FileRecord)==14','sizeof(FileRecord)==14 && context_value()==7'),
+            '#pragma once\n'+PREFIX+OPEN+BODY+FOOTER+'inline int context_value(){return parent_context_value;}\n', []),
+        ('standalone_header', True, HELPER+'#include "record.cuh"\n'+TAIL,
+            PREFIX+OPEN+BODY+FOOTER, []),
+        ('standalone_header_badfield', False, HELPER+'#include "record.cuh"\n'+TAIL,
+            PREFIX+OPEN+BODY.replace('DWord length','float length')+FOOTER, []),
+        # Preserve the previous complete fixture as an explicit conservative
+        # refusal: pack plus a non-main helper expansion is not yet admitted.
+        ('context_helper_outside_main', False, HELPER+'#include "record.cuh"\nint main(){checked();return sizeof(FileRecord)==14?0:1;}\n',
             '#pragma once\n'+PREFIX+OPEN+BODY+FOOTER+'inline void checked(){getLastCudaError("context packed");}\n', []),
         ('direct_char', True, HELPER+OPEN+'struct FileRecord { char x; unsigned char y; signed char z; };\n'+RESET+TAIL, None, []),
         ('unmatched', False, HELPER+OPEN+BODY+TAIL, None, []),
@@ -113,14 +124,35 @@ def main():
             if success:
                 assert result.returncode==0,(name,result.stderr.decode(errors='replace'))
                 generated=destination.read_bytes().decode()
-                assert BODY in generated or name=='direct_char',name
-                assert 'Ascify preserved packed' in generated and 'Ascify packed layout witness syntax' in generated,name
+                proof_source=generated
+                if name=='standalone_header':
+                    # This child has no parent dependency and must publish as
+                    # its own translated artifact, with its own guard/witness.
+                    receipt=(bundle/'.ascify-local-closure').read_text()
+                    assert 'context_once_line=' not in receipt,name
+                    children=[p.read_bytes().decode() for p in bundle.rglob('*')
+                              if p.is_file() and p.name!='.ascify-local-closure']
+                    packed_children=[text for text in children if BODY in text]
+                    assert len(packed_children)==1,name
+                    proof_source=packed_children[0]
+                    assert BODY not in generated and 'Ascify preserved packed record' not in generated,name
+                assert BODY in proof_source or name=='direct_char',name
+                assert 'Ascify preserved packed' in proof_source and 'Ascify packed layout witness syntax' in proof_source,name
                 if name.startswith('conditional') or name=='context_once':
                     prefix = (PREFIX.rstrip('\n')+'\n' if name=='conditional_no_gap' else
                               PREFIX+'\n' if name=='conditional_two_gaps' else
                               PREFIX.replace('\n','\r\n')+' \t\r\n' if name=='conditional_whitespace_crlf' else PREFIX)
                     assert prefix in generated and FOOTER in generated,name
                     assert 'requires the original inactive configuration' in generated,name
+                if name=='standalone_header':
+                    assert PREFIX in proof_source and FOOTER in proof_source,name
+                    assert 'requires the original inactive configuration' in proof_source,name
+                if name=='context_once':
+                    receipt=(Path(str(destination)+'.headers')/'.ascify-local-closure').read_text()
+                    assert 'context_pragma_events_sha256=' in receipt,name
+                    assert 'context_once_line='+str(inputs/'record.cuh')+'\t' in receipt,name
+                    assert '#pragma once' not in generated,name
+                    assert 'return parent_context_value;' in generated,name
                 if a.ccec:
                     obj=case/'target.o'
                     target=run([a.ccec,'-O2','-std=c++17','-x','dpp','--cce-aicore-arch=dav-c310-vec',

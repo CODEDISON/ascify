@@ -357,7 +357,12 @@ bool PackedRecordBoundary::prove(clang::CompilerInstance &ci,
         guard += "defined(" + r.undefinedNames[i] + ")";
       }
       guard += "\n#error Ascify packed region requires the original inactive configuration\n#endif\n";
-      owned.emplace_back(sm, start.getLocWithOffset(r.open), 0, guard);
+      // Discovery proves selected child headers too, but each replacement
+      // set belongs to its current main file. The closure stages every child
+      // separately, or reparses its authenticated flattened source as main;
+      // that pass must prove and emit its own guards before publication.
+      if (r.file == sm.getMainFileID())
+        owned.emplace_back(sm, start.getLocWithOffset(r.open), 0, guard);
     }
     const char *witnessSyntax[] = {"static_assert", "sizeof", "alignof", "static_cast",
                                    "__builtin_offsetof", "decltype", "nullptr"};
@@ -370,7 +375,8 @@ bool PackedRecordBoundary::prove(clang::CompilerInstance &ci,
       syntaxGuard += std::string("defined(") + witnessSyntax[i] + ")";
     }
     syntaxGuard += "\n#error Ascify packed layout witness syntax must remain unshadowed\n#endif\n";
-    owned.emplace_back(sm, start.getLocWithOffset(r.end), 0, syntaxGuard + records.witnesses);
+    if (r.file == sm.getMainFileID())
+      owned.emplace_back(sm, start.getLocWithOffset(r.end), 0, syntaxGuard + records.witnesses);
   }
   return true;
 }
