@@ -8,6 +8,9 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Experimental lowering of one literal unsigned packed-byte SAD accumulate
+  instruction, with private uint32 operands and modulo-32-bit arithmetic.
+  Other inline assembly remains outside this rewrite; target validation is required.
 - Texture projection can retain uninstantiated utilities from the exact selected
   product cooperative-groups profile after physical-input, CUDA-control and
   device-attribute macro proofs. Concrete instances, caller templates and SDK

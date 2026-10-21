@@ -97,6 +97,21 @@ __aicore__ ASCIFY_FORCEINLINE unsigned int cuda_lane_id() {
   return (threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)) & 31u;
 }
 
+// Internal target for the exact unsigned quad-byte SAD accumulate instruction.
+// Extract by value, independently of host byte order. Each difference is at
+// most 255; unsigned accumulation preserves the low 32 bits, including carry.
+__aicore__ ASCIFY_FORCEINLINE unsigned int packed_u8_sad4_add(
+    unsigned int a, unsigned int b, unsigned int result) {
+  static_assert(sizeof(unsigned int) * CHAR_BIT == 32,
+                "packed byte SAD requires 32-bit unsigned int");
+  for (unsigned int index = 0; index < 32; index += 8) {
+    const unsigned int left = (a >> index) & 255u;
+    const unsigned int right = (b >> index) & 255u;
+    result += left >= right ? left - right : right - left;
+  }
+  return result;
+}
+
 // Internal target for a resolved CUDA float frexp(float, int*) overload.
 // Keep native lookup in this protected header, before caller declarations.
 #if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3)

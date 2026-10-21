@@ -116,6 +116,7 @@ private:
   std::vector<SemanticRewriteRange> SemanticRewriteRanges;
   std::vector<SemanticRewriteRange> cudaLaneIdMacroRanges;
   std::set<unsigned> rewrittenCudaLaneIdOffsets;
+  std::set<unsigned> rewrittenCudaPackedSadOffsets;
   struct CudaAttributeGuard {
     clang::SourceLocation begin;
     clang::SourceLocation end;
@@ -311,6 +312,7 @@ public:
       const mat::MatchFinder::MatchResult &Result);
   bool auditKernelAttributeObservations();
   bool rewriteCudaLaneIdAsm(const mat::MatchFinder::MatchResult &Result);
+  bool rewriteCudaPackedSadAsm(const mat::MatchFinder::MatchResult &Result);
   void recordCudaAttributeGuard(clang::SourceLocation location,
                                 const clang::Token &name,
                                 const clang::MacroDefinition &definition);

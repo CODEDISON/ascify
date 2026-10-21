@@ -54,6 +54,28 @@ ownership, rebinding, callback ordering, rollback, and normal process exit.
 | Device properties | Report the actual SoC name and vector-core count without changing the current binding; publish output only after successful queries; do not invent CUDA compute capability or SM counts |
 | Host math profile | Admit exact `max(float, float)` with `fmaxf` semantics and `min(int, int)` / `max(int, int)`; mixed-type and double max are outside this admission |
 | Half2 | Proven device-local construction and arithmetic use target constructors/intrinsics, preserving separate half multiplication and addition rounding; unsupported macros, effects, and template contexts do not receive a broad rewrite |
+| Packed-byte SAD | Experimental lowering of one proved literal `vabsdiff4.u32.u32.u32.add` instruction to unsigned integer arithmetic; target compilation and device validation are separate requirements |
+
+The packed-byte SAD rule accepts the exact decoded instruction string
+`vabsdiff4.u32.u32.u32.add %0, %1, %2, %3;`, one unnamed `=r` output and three
+unnamed `r` inputs, without volatility, goto or clobbers. The owner must be a
+non-template device/global function. The output must be a writable private
+automatic unsigned-int32 local; inputs are unsigned-int32 private local values,
+parameters or unsigned integer literals. Attributed/register variables, references,
+volatile values, side effects, casts, calls, raw directives, pragma operators,
+escaped identifier spellings and macro-expanded statement tokens
+remain outside the rule. Adjacent
+ordinary string literals may form the exact string, including in a separately
+proved selected local header. Function names do not determine admission.
+
+For inputs A, B and C, the helper adds C to the four absolute differences between
+corresponding unsigned bytes of A and B, keeping the low 32 bits. It uses shifts,
+masks and unsigned arithmetic, with a static 32-bit type check. This follows the
+default byte selection and secondary accumulation in the [PTX video instruction
+contract](https://docs.nvidia.com/cuda/parallel-thread-execution/#simd-video-instructions-vadd4-vsub4-vavrg4-vabsdiff4-vmin4-vmax4).
+Signed variants, explicit selectors, saturation and multi-instruction assembly
+remain unchanged. Host arithmetic tests establish the helper's integer result;
+they do not establish CCEC compilation, device execution or sample correctness.
 
 On CANN 9.1, an ordinary ACL stream has no implicit synchronization with the
 default stream, matching `cudaStreamNonBlocking`. Ascify calls `aclrtCreateStream`

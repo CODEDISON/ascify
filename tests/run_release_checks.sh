@@ -51,6 +51,8 @@ run_check "target ABI compatibility static contract" \
   sh "$rewrite_dir/check_target_abi_compat.sh"
 run_check "NVIDIA sample-helper compatibility contract" \
   sh "$rewrite_dir/check_sample_helper_compat.sh"
+run_check "packed unsigned-byte SAD host arithmetic" \
+  sh "$rewrite_dir/check_packed_sad_host.sh"
 run_check "unsigned texture host arithmetic and type rejection" \
   sh "$rewrite_dir/check_texture_unsigned_host.sh"
 run_check "dependent sample-helper emitted type domain" \
@@ -246,6 +248,12 @@ run_check "OpenMP sample-helper pragma and compiler-header boundaries" \
 
 run_check "CUDA lane ID instruction boundaries" \
   "$python" -B "$rewrite_dir/check_lane_id_conversion.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+
+run_check "CUDA packed-byte SAD instruction boundaries" \
+  "$python" -B "$rewrite_dir/check_packed_sad_conversion.py" \
     --binary "$ASCIFY_BINARY" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"

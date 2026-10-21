@@ -767,12 +767,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 67401)
+  if (contents.size() != 68122)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "9fcbbfbdb59ff1b3e997aba99c06ef9d4b49dde8f51a035182b7693e1b7faef8");
+      "d2bc75d0b297f3eef3e29207b0632db87856779ddaa42746e895d67315db7d32");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -799,12 +799,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 67401)
+  if (invalidBuffer || contents.size() != 68122)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "9fcbbfbdb59ff1b3e997aba99c06ef9d4b49dde8f51a035182b7693e1b7faef8");
+      "d2bc75d0b297f3eef3e29207b0632db87856779ddaa42746e895d67315db7d32");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -5816,6 +5816,150 @@ bool AscifyAction::rewriteCudaLaneIdAsm(
   static const dppCounter counter = {
       "CUDA lane ID", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
   Statistics::current().incrementCounter(counter, "CUDA lane ID instruction");
+  return true;
+}
+
+bool AscifyAction::rewriteCudaPackedSadAsm(
+    const mat::MatchFinder::MatchResult &Result) {
+  // The existing matcher observes all main-buffer asm statements. This rule
+  // recognizes the instruction and operand proof, never a wrapper's name.
+  const auto *statement = Result.Nodes.getNodeAs<clang::GCCAsmStmt>(sCudaLaneIdAsm);
+  if (statement == nullptr || Result.Context == nullptr ||
+      Result.SourceManager == nullptr || statement->isVolatile() ||
+      statement->isSimple() || statement->getNumOutputs() != 1 ||
+      statement->getNumInputs() != 3 || statement->getNumClobbers() != 0 ||
+      !statement->getOutputName(0).empty() ||
+      getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)
+    return false;
+#if LLVM_VERSION_MAJOR >= 9
+  if (statement->isAsmGoto()) return false;
+#endif
+#if LLVM_VERSION_MAJOR >= 21
+  const auto *literal = llvm::dyn_cast_or_null<clang::StringLiteral>(
+      statement->getAsmStringExpr());
+  if (!llvm::isa_and_nonnull<clang::StringLiteral>(
+          statement->getOutputConstraintExpr(0))) return false;
+#else
+  const auto *literal = statement->getAsmString();
+#endif
+  if (literal == nullptr || literal->getString() !=
+      "vabsdiff4.u32.u32.u32.add %0, %1, %2, %3;" ||
+      statement->getOutputConstraint(0) != "=r") return false;
+  for (unsigned index = 0; index < 3; ++index) {
+#if LLVM_VERSION_MAJOR >= 21
+    if (!llvm::isa_and_nonnull<clang::StringLiteral>(
+            statement->getInputConstraintExpr(index))) return false;
+#endif
+    if (!statement->getInputName(index).empty() ||
+        statement->getInputConstraint(index) != "r") return false;
+  }
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  const auto *owner = enclosingNonLambdaFunction(statement, context);
+  if (owner == nullptr || owner->hasAttr<clang::CUDAHostAttr>() ||
+      (!owner->hasAttr<clang::CUDADeviceAttr>() &&
+       !owner->hasAttr<clang::CUDAGlobalAttr>()) ||
+      owner->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      owner->isDependentContext() || context.getTypeSize(context.UnsignedIntTy) != 32)
+    return false;
+  if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(owner))
+    if (method->getParent()->isLambda()) return false;
+  const auto privateValue = [&](const clang::VarDecl *variable, bool input) {
+    return variable != nullptr &&
+        (variable->isLocalVarDecl() ||
+         (input && llvm::isa<clang::ParmVarDecl>(variable))) &&
+        variable->hasLocalStorage() && variable->getDeclContext() == owner &&
+        variable->getStorageClass() == clang::SC_None && !variable->hasAttrs() &&
+        variable->getTLSKind() == clang::VarDecl::TLS_None &&
+        !variable->hasAttr<clang::CUDASharedAttr>() &&
+        !variable->hasAttr<clang::CUDAConstantAttr>() &&
+        !variable->hasAttr<clang::CUDADeviceAttr>() &&
+        !variable->getType().isVolatileQualified() &&
+        (input || !variable->getType().isConstQualified()) &&
+        context.hasSameType(variable->getType().getUnqualifiedType(),
+                            context.UnsignedIntTy);
+  };
+  const auto *output = statement->getOutputExpr(0);
+  const auto *reference = llvm::dyn_cast<clang::DeclRefExpr>(output->IgnoreParens());
+  if (reference == nullptr ||
+      !privateValue(llvm::dyn_cast<clang::VarDecl>(reference->getDecl()), false) ||
+      output->isTypeDependent() || output->isValueDependent()) return false;
+  for (unsigned index = 0; index < 3; ++index) {
+    const auto *input = statement->getInputExpr(index);
+    if (input->isTypeDependent() || input->isValueDependent() ||
+        !context.hasSameType(input->getType().getUnqualifiedType(),
+                             context.UnsignedIntTy)) return false;
+    input = input->IgnoreParenImpCasts();
+    if (llvm::isa<clang::IntegerLiteral>(input)) continue;
+    const auto *value = llvm::dyn_cast<clang::DeclRefExpr>(input);
+    if (value == nullptr ||
+        !privateValue(llvm::dyn_cast<clang::VarDecl>(value->getDecl()), true))
+      return false;
+  }
+  const auto begin = statement->getBeginLoc();
+  const auto last = statement->getEndLoc();
+  if (begin.isInvalid() || last.isInvalid() || begin.isMacroID() ||
+      last.isMacroID() || !source.isWrittenInMainFile(begin) ||
+      !source.isWrittenInMainFile(last)) return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto end = clang::Lexer::getLocForEndOfToken(last, 0, source, options);
+  if (end.isInvalid()) return false;
+  const unsigned firstOffset = source.getFileOffset(begin);
+  const unsigned endOffset = source.getFileOffset(end);
+  const auto file = source.getFileID(begin);
+  for (const auto &macro : cudaLaneIdMacroRanges)
+    if (macro.file == file && firstOffset < macro.endOffset &&
+        macro.beginOffset < endOffset) return false;
+  // Active AST literals omit inactive branches and directive side effects.
+  // Replacing the whole statement must not erase either. Inspect all physical
+  // tokens, including digraph directives and inactive pragma operators.
+  bool invalidBuffer = false;
+  const auto buffer = source.getBufferData(file, &invalidBuffer);
+  if (invalidBuffer || firstOffset >= endOffset || endOffset > buffer.size())
+    return false;
+  clang::Lexer lexer(source.getLocForStartOfFile(file), options,
+                     buffer.begin(), buffer.begin() + firstOffset, buffer.end());
+  clang::Token token;
+  for (;;) {
+    lexer.LexFromRawLexer(token);
+    if (source.getFileOffset(token.getLocation()) >= endOffset) break;
+    if (token.is(clang::tok::eof) || token.is(clang::tok::hash) ||
+        token.is(clang::tok::hashhash)) return false;
+    if (token.is(clang::tok::raw_identifier)) {
+      // Escaped newlines can spell a pragma operator without its literal
+      // raw bytes. The admitted grammar needs no cleaned identifiers.
+      if (token.needsCleaning() || token.getRawIdentifier() == "_Pragma" ||
+          token.getRawIdentifier() == "__pragma") return false;
+      // Also reject escaped/unicode spellings instead of guessing their
+      // preprocessor identifier identity from physical bytes.
+      for (const char c : token.getRawIdentifier())
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_')) return false;
+    }
+  }
+  std::vector<std::string> operands;
+  for (const auto *expression : {output, statement->getInputExpr(0),
+                                statement->getInputExpr(1), statement->getInputExpr(2)}) {
+    bool invalid = false;
+    const auto spelling = clang::Lexer::getSourceText(
+        clang::CharSourceRange::getTokenRange(expression->getSourceRange()),
+        source, options, &invalid);
+    if (invalid || spelling.empty()) return false;
+    operands.push_back(spelling.str());
+  }
+  if (!rewrittenCudaPackedSadOffsets.insert(firstOffset).second) return true;
+  const std::string replacement = "(" + operands[0] +
+      ") = ::ascify::packed_u8_sad4_add((" + operands[1] + "), (" +
+      operands[2] + "), (" + operands[3] + "))";
+  ct::Replacement edit(source, begin, endOffset - firstOffset, replacement);
+  if (!insertSemanticReplacement(edit, clang::FullSourceLoc(begin, source), begin, end)) {
+    rewrittenCudaPackedSadOffsets.erase(firstOffset);
+    return false;
+  }
+  needsCudaCompatHeader = true;
+  static const dppCounter counter = {
+      "CUDA packed byte SAD", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(counter, "CUDA packed byte SAD instruction");
   return true;
 }
 
@@ -11254,7 +11398,7 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
     return;
   }
   if (Result.Nodes.getNodeAs<clang::GCCAsmStmt>(sCudaLaneIdAsm) != nullptr) {
-    (void)rewriteCudaLaneIdAsm(Result);
+    if (!rewriteCudaLaneIdAsm(Result)) (void)rewriteCudaPackedSadAsm(Result);
     return;
   }
   if (Result.Nodes.getNodeAs<clang::ParmVarDecl>(
