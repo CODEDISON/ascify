@@ -96,6 +96,30 @@ When the explicit frontend compatibility profile is enabled, the texture record 
 
 The texture audit also proves a narrow class of scalar non-type-template calls, including recursive `template<int n>` functions with a fixed `float` return and fixed scalar arguments. A call must name exactly one defined free function template: all template parameters are explicit non-pack `int` values without defaults or constraints, and every actual argument has the same canonical builtin arithmetic type as its fixed formal parameter. Explicit template arguments are integer literals or that template's own integer parameters combined with unary signs and `+`/`-`. Such scalar arguments cannot add ADL candidates. Dependent `+`, `-`, and `*` expressions are admitted only when both recursively proved operand types match, with ordinary integer promotion. The unresolved name is admitted only as that call's direct callee. This is not general dependent-template support: function addresses, overloaded candidate sets, dependent returns, record arguments and other unproved expressions remain rejected. Function bodies, concrete instantiations, explicit types and reflection operands still undergo the full audit.
 
+## Bounded synchronous array rectangles
+
+`cudaMemcpy2DToArray` copies rows into registered, nonlayered F32, U32 or
+RGBA8 arrays. X offsets and width are bytes; Y offsets and height are rows.
+The bounded adapter requires X and width to be multiples of the four-byte
+texel size. Source pitch may include arbitrary byte padding. It admits only
+explicit host-to-device and device-to-device directions. Subword rectangles,
+other formats, layered arrays and automatic/UVA direction inference are not
+part of this API surface.
+
+The adapter validates the complete source span, integer and pointer overflow,
+current device/context ownership and destination rectangle before writing.
+It holds the existing texture registry lock, checks live sticky errors and
+uses the existing default-stream wait followed by synchronous row copies.
+An ACL failure is propagated immediately; rows already copied are not rolled
+back. This operation performs no pixel conversion, normalization or sampling,
+and changes no descriptor ABI or reader contract. Zero-size handling remains
+bounded by the ordinary parameter, ownership and error checks.
+
+The original scalar-copy device probe covered F32/U32 on its own predecessor
+installation. It does not establish RGBA8 or this candidate's acceptance.
+CPU memory-model byte comparisons and public channel reads are host checks;
+complete original targets and their frozen numerical oracles remain separate.
+
 ## Sampling and numerical limits
 
 Finite scalar `int` template call chains can additionally qualify for [bounded attribute-only device template inlining](bounded-device-template-inlining.md). That optional rule preserves language linkage and the existing texture/reflection gates; it is not general template support or a runtime acceptance claim.

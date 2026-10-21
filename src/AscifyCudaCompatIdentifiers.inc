@@ -394,6 +394,7 @@
     "cudaMallocPitch",
     "cudaMemcpy",
     "cudaMemcpy2D",
+    "cudaMemcpy2DToArray",
     "cudaMemcpy3D",
     "cudaMemcpy3DParms",
     "cudaMemcpyAsync",

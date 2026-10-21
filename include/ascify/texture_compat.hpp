@@ -308,6 +308,41 @@ inline aclError cudaMemcpyToArray(cudaArray_t array,size_t x,size_t y,const void
       record->bytes-offset,src,bytes,kind);
 }
 
+// Array offsets and copy width are bytes in X and rows in Y. Validate the
+// complete rectangle before the first write, then retain ownership through all
+// synchronous row copies. This bounded 32-bit-texel adapter requires whole-element
+// X offsets and widths; a byte-unit API does not imply subword-array support.
+inline aclError cudaMemcpy2DToArray(cudaArray_t array,size_t x,size_t y,const void *src,
+    size_t spitch,size_t width,size_t height,aclrtMemcpyKind kind) {
+  if(kind!=ACL_MEMCPY_HOST_TO_DEVICE && kind!=ACL_MEMCPY_DEVICE_TO_DEVICE)
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  if(x%sizeof(uint32_t) || width%sizeof(uint32_t))
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  size_t sb=0;
+  if(!detail::textureRowsRange(spitch,width,height,sb) ||
+      !detail::nonnullMemoryRange(src,sb) ||
+      reinterpret_cast<uintptr_t>(src)>UINTPTR_MAX-sb)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  int32_t device=-1; void *context=nullptr;
+  aclError status=detail::textureCurrent(device,context);
+  if(status!=ACL_SUCCESS) return status;
+  detail::TextureLock guard;
+  auto *record=detail::textureArray(array);
+  if(!record || record->layered || !detail::textureOwned(*record,device,context) ||
+      x>record->pitch || width>record->pitch-x ||
+      y>record->height || height>record->height-y)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  if(record->channel_kind!=detail::TextureChannelFloat &&
+      record->channel_kind!=detail::TextureChannelUnsigned &&
+      record->channel_kind!=detail::TextureChannelRGBA)
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  status=detail::textureStatusLocked(device,context);
+  if(status!=ACL_SUCCESS || !width || !height) return status;
+  const size_t offset=y*record->pitch+x;
+  return detail::textureCopyRows(static_cast<unsigned char*>(record->storage)+offset,
+      record->pitch,src,spitch,width,height,kind);
+}
+
 inline aclError cudaMemcpy3D(const cudaMemcpy3DParms *parameters) {
   if(!parameters) return ACL_ERROR_RT_PARAM_INVALID;
   const auto &p=*parameters;

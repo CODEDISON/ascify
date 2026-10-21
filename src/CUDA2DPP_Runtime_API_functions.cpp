@@ -56,6 +56,7 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   m["cudaMemcpy2D"] = {"ascify::cudaMemcpy2D", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["cudaMemset2D"] = {"ascify::cudaMemset2D", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["cudaMemcpyToArray"] = {"ascify::cudaMemcpyToArray", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaMemcpy2DToArray"] = {"ascify::cudaMemcpy2DToArray", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["cudaMemcpy3D"] = {"ascify::cudaMemcpy3D", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["cudaCreateTextureObject"] = {"ascify::cudaCreateTextureObject", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["cudaDestroyTextureObject"] = {"ascify::cudaDestroyTextureObject", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};

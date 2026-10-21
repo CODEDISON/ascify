@@ -8,6 +8,10 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Bounded synchronous `cudaMemcpy2DToArray` rectangles for the registered F32,
+  U32 and RGBA8 array formats, with explicit H2D/D2D, whole-texel offsets and
+  preserved row padding. New candidate and original Sample validation are
+  separate from predecessor scalar-copy evidence.
 - Experimental preservation of bounded, physically proved `MAX` fallbacks in
   the frozen Samples-helper transaction. Both include orders retain the exact
   original macro body and evaluations; other observations and macro epochs
