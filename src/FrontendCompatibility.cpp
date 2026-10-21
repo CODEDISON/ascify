@@ -465,6 +465,18 @@ bool IsVerifiedFrontendHostMathInput(
          parsedContents == kHostMathHeader;
 }
 
+bool IsVerifiedFrontendCooperativeGroupsInput(
+    const FrontendCompatibilityConfig& config,
+    const std::string& path,
+    const std::string& parsedContents) {
+  return config.enabled() &&
+         config.profile == kAdmittedFrontendCompatibilityV1 &&
+         ((path == config.canonicalRoot + "/cooperative_groups.h" &&
+           parsedContents == kAdmissionHeader) ||
+          (path == config.canonicalRoot + "/cooperative_groups/reduce.h" &&
+           parsedContents == kReductionHeader));
+}
+
 bool ConfigureFrontendCompatibility(
     clang::tooling::RefactoringTool& tool,
     const std::string& profile,

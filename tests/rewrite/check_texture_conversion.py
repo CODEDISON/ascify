@@ -128,6 +128,47 @@ def main():
         profile_host_math=(a.profile_host_math or (installed_host_math if installed_host_math.is_file() else
                           Path(__file__).resolve().parents[2]/'frontend_compat/ascify-admitted-v1/host_math.h')).resolve(strict=True)
         summary['profile_host_math']={'path':str(profile_host_math),'sha256':sha(profile_host_math)}
+        profile_cg = profile_host_math.parent/'cooperative_groups.h'
+        profile_reduce = profile_host_math.parent/'cooperative_groups/reduce.h'
+        summary['profile_cg_inputs'] = {str(q):sha(q) for q in (profile_cg,profile_reduce)}
+        cg_include = '#include <cooperative_groups.h>\n'
+        cg_descriptor = 'cudaTextureDesc descriptor{};'
+        # These tests isolate the parser profile boundary: the syntax stage
+        # reads the exact same product CG header, with the genuine CUDA SDK
+        # attribute macros. Other texture cases retain their official SDK path.
+        cg_extra = ['-I'+str(profile_host_math.parent)]
+        cg_cases = [
+            ('profile_cg_unused',cg_include+cg_descriptor,['ascify::cudaTextureDesc descriptor'],{}),
+            ('profile_cg_block_fetch',cg_include+'__global__ void k(float*p,cudaTextureObject_t t){auto b=cooperative_groups::this_thread_block();b.sync();p[0]=tex2D<float>(t,.5f,.5f);}', ['ascify::tex2D<float>'],{}),
+            ('profile_cg_tile_fetch',cg_include+'__global__ void k(float*p,cudaTextureObject_t t){auto b=cooperative_groups::this_thread_block();auto g=cooperative_groups::tiled_partition<32>(b);p[0]=g.shfl_up(tex2D<float>(t,.5f,.5f),1);}', ['ascify::tex2D<float>'],{}),
+            ('profile_cg_reduce_unused','#include <cooperative_groups/reduce.h>\n'+cg_descriptor,['ascify::cudaTextureDesc descriptor'],{}),
+            ('profile_cg_late_unused_macro',cg_include+'#define host_float_max_enabled CallerEnabled\n#undef host_float_max_enabled\n'+cg_descriptor,['ascify::cudaTextureDesc descriptor'],{}),
+            ('profile_cg_local_header','#include "local.cuh"\n'+cg_descriptor,['ascify::cudaTextureDesc descriptor'],{'local.cuh':cg_include+'__device__ inline void sync_block(){cooperative_groups::this_thread_block().sync();}\n'}),
+            ('profile_cg_user_template',cg_include+'template<class T>T identity(T v){return v;}\n'+cg_descriptor,None,{}),
+            ('profile_cg_concrete_sdk_reflection',cg_include+'template<class T>size_t bytes(T*p){return sizeof(T);} size_t f(cudaTextureDesc*p){return bytes(p);}',None,{}),
+            ('profile_cg_layout_observation',cg_include+cg_descriptor+'\nsize_t f(){return sizeof(cudaTextureDesc);}',None,{}),
+            ('profile_cg_full_runtime','#include <cuda_runtime_api.h>\n'+cg_include+cg_descriptor,None,{}),
+            ('profile_cg_macro_empty','#define inline\n'+cg_include+'#undef inline\n'+cg_descriptor,None,{}),
+            ('profile_cg_macro_namespace','#define cooperative_groups caller_groups\n'+cg_include+'#undef cooperative_groups\n'+cg_descriptor,None,{}),
+            ('profile_cg_macro_method','#define shfl_up caller_shuffle\n'+cg_include+'#undef shfl_up\n'+cg_descriptor,None,{}),
+            ('profile_cg_macro_parameter','#define T CallerT\n'+cg_include+'#undef T\n'+cg_descriptor,None,{}),
+            ('profile_cg_foreign_qualifier','#define ASCIFY_FRONTEND_COMPAT_DEVICE_ __device__\n'+cg_include+cg_descriptor,None,{}),
+            ('profile_cg_redefine_device','#undef __device__\n#define __device__ __attribute__((device))\n'+cg_include+cg_descriptor,None,{}),
+            ('profile_cg_redefine_location','#undef __location__\n#define __location__(a) __annotate__(a)\n'+cg_include+cg_descriptor,None,{}),
+            ('profile_cg_redefine_annotate','#undef __annotate__\n#define __annotate__(a) __attribute__((a))\n'+cg_include+cg_descriptor,None,{}),
+            ('profile_cg_redefine_cudacc','#undef __CUDACC__\n#define __CUDACC__ 1\n'+cg_include+cg_descriptor,None,{}),
+            ('profile_cg_redefine_cuda','#undef __CUDA__\n#define __CUDA__ 1\n'+cg_include+cg_descriptor,None,{}),
+            ('profile_cg_cuda_pop','#pragma push_macro("__CUDA__")\n#undef __CUDA__\n#pragma pop_macro("__CUDA__")\n'+cg_include+cg_descriptor,None,{}),
+            ('profile_cg_namespace','#include <type_traits>\nnamespace caller {\n'+cg_include+'}\n'+cg_descriptor,None,{}),
+            ('profile_cg_copy','#include "cooperative_groups.h"\n'+cg_descriptor,None,{'cooperative_groups.h':profile_cg.read_text()}),
+            ('profile_cg_changed_copy','#include "cooperative_groups.h"\n'+cg_descriptor,None,{'cooperative_groups.h':profile_cg.read_text().replace('shfl_up(', 'caller_shuffle(')}),
+        ]
+        for name,code,expected,headers in cg_cases:
+            # Root staging uses a temporary file. Preserve explicit quote
+            # lookup so these two fixtures actually select the caller shadow.
+            extra = cg_extra + (['-iquote{case}'] if name in
+                                ('profile_cg_copy','profile_cg_changed_copy') else [])
+            cases.append((name,code,expected,extra,headers))
         cases += [
             ('profile_fake_host_math','#include <fake/host_math.h>\ncudaTextureDesc descriptor{};',None,['-I{case}'],{'fake/host_math.h':'template<class T>T caller_identity(T x){return x;}\n'}),
             ('profile_macro_template_parameter','cudaTextureDesc descriptor{};',None,['-DA=CallerType'],{}),
@@ -168,7 +209,7 @@ def main():
             if expected is None:
                 output_headers=directory/'output.cce.headers'
                 assert z.returncode>0 and not output.exists() and not output.is_symlink() and not output_headers.exists() and not output_headers.is_symlink() and json.loads(receipt.read_text())['status']=='failed',(name,z.stderr)
-                assert any(marker in z.stderr for marker in ('CUDA texture boundary','CUDA runtime-API header boundary','Ascify cannot publish CUDA compatibility output')),(name,z.stderr)
+                assert any(marker in z.stderr for marker in ('CUDA texture boundary','CUDA runtime-API header boundary','Ascify cannot publish CUDA compatibility output','frontend compatibility')),(name,z.stderr)
                 assert 'fatal error:' not in z.stderr,(name,z.stderr)
             else:
                 assert z.returncode==0 and json.loads(receipt.read_text())['status']=='succeeded',(name,z.stderr)
@@ -185,6 +226,7 @@ def main():
     assert all(sha(Path(q))==digest for q,digest in helper_identity.items())
     if 'profile_host_math' in summary:
         assert sha(profile_host_math)==summary['profile_host_math']['sha256']
+        assert all(sha(Path(q))==digest for q,digest in summary['profile_cg_inputs'].items())
     summary.update(passed=all(row['passed'] for row in summary['cases']),total=len(cases));save()
     assert summary['passed'], 'texture boundary matrix contains failures'
 if __name__=='__main__':main()

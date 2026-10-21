@@ -20,6 +20,10 @@ for supported domains and experimental paths.
   translation and local-header proofs without implicit CUDA headers or CUDA
   language predefines. The default without a language remains CUDA; conflicting
   device options fail. See [the input contract](docs/host-cxx-input.md).
+- Texture projection can retain uninstantiated utilities from the exact selected
+  product cooperative-groups profile after physical-input, CUDA-control and
+  device-attribute macro proofs. Concrete instances, caller templates and SDK
+  layout observations retain their existing checks.
 - Direct physical CUDA Runtime includes inside proved whole-file guards of
   selected local headers. Nested conditions, guard macro-stack operations and
   conditional root-source includes remain outside this admission rule.
