@@ -1078,7 +1078,14 @@ bool ascifySourceWithLocalHeaderClosure(
       const auto originalRootSha256 = inputSha256(originalInput);
       if (!originalEvidence.standardPreprocessing || originalRootSha256.empty() ||
           originalEvidence.fileSha256[originalPlan.rootSourcePath()] != originalRootSha256 ||
-          !originalEvidence.changedPathBinding.empty()) {
+          originalEvidence.parsedRootSourcePath != originalPlan.rootSourcePath() ||
+          discoveryEvidence.parsedRootSourcePath.empty() ||
+          originalEvidence.parsedRootSha256 != originalRootSha256 ||
+          discoveryEvidence.parsedRootSha256 != originalRootSha256 ||
+          originalEvidence.fileEntries[originalEvidence.parsedRootSourcePath] != 1 ||
+          discoveryEvidence.fileEntries[discoveryEvidence.parsedRootSourcePath] != 1 ||
+          !originalEvidence.changedPathBinding.empty() ||
+          !discoveryEvidence.changedPathBinding.empty()) {
         plan.fail("contextual root buffer identity or input path binding changed");
         return false;
       }
@@ -1117,9 +1124,12 @@ bool ascifySourceWithLocalHeaderClosure(
       // even if the sibling uses no parent declaration or helper macro. Close
       // over those already-selected root siblings before constructing edits.
       // This does not admit active nested includes or arbitrary include trees.
-      const auto samePhysicalEdge = [](const LocalHeaderEdge &a,
+      const auto samePhysicalEdge = [&](const LocalHeaderEdge &a,
                                        const LocalHeaderEdge &b) {
-        return a.parentSourcePath == b.parentSourcePath &&
+        // The two main buffers have identical saved-source bytes above, but
+        // discovery may use a physical temporary copy. Map only that root.
+        return a.parentSourcePath == originalEvidence.parsedRootSourcePath &&
+            b.parentSourcePath == discoveryEvidence.parsedRootSourcePath &&
             a.childSourcePath == b.childSourcePath &&
             a.originalSpelling == b.originalSpelling &&
             a.sourceOffset == b.sourceOffset &&
@@ -1132,7 +1142,7 @@ bool ascifySourceWithLocalHeaderClosure(
                                         const std::string &path) {
         const LocalHeaderEdge *found = nullptr;
         for (const auto &edge : evidence.originalEdges) {
-          if (edge.parentSourcePath != originalPlan.rootSourcePath() ||
+          if (edge.parentSourcePath != evidence.parsedRootSourcePath ||
               edge.childSourcePath != path) continue;
           if (found != nullptr) return static_cast<const LocalHeaderEdge *>(nullptr);
           found = &edge;

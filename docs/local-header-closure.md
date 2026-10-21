@@ -135,6 +135,12 @@ agree on the one real entry and the exact literal, physically skipped include.
 Every added sibling still passes the existing raw-input, pragma and nested-include
 checks. Real nested entries, macro/angle includes and unselected parents remain
 rejected. This also covers siblings that use no provider symbol or helper macro.
+Discovery can parse a temporary copy of the root. Each parse records its actual
+main-file path and a digest of the buffer Clang parsed. Both buffers must equal
+the saved original source and have one main-file entry. Only those authenticated
+root identities are mapped when comparing direct root include edges; child paths,
+literal spelling, offsets and skipped state still have to match exactly. Nested
+edges retain their original physical-path comparison.
 
 All non-once active pragma events have an ordered digest of their complete
 physical line and presumed source location. This digest must match discovery,

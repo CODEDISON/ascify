@@ -4469,6 +4469,14 @@ void AscifyAction::FileChanged(
       // The root may be an intentional virtual input. Inventory its real
       // source separately; the virtual input is covered by the token digest.
       if (sourceManager.isWrittenInMainFile(spelling)) {
+        if (!evidence.parsedRootSourcePath.empty() &&
+            evidence.parsedRootSourcePath != path)
+          evidence.changedPathBinding = path;
+        evidence.parsedRootSourcePath = path;
+        bool invalid = false;
+        const auto parsed = sourceManager.getBufferData(file, &invalid);
+        evidence.parsedRootSha256 = invalid ? std::string() :
+            contextualInputSha256(parsed);
         if (auto physical = llvm::MemoryBuffer::getFile(path))
           evidence.fileSha256[path] = contextualInputSha256((*physical)->getBuffer());
       } else {

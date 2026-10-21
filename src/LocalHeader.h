@@ -58,6 +58,10 @@ struct LocalHeaderInputEvidence {
   std::string pragmaSha256;
   bool hasPhysicalLineDirective = false;
   bool ordinaryPhysicalInput = false;
+  // Discovery may parse a temporary root copy. Bind its actual main buffer,
+  // separately from the original source identity used by contextual reparses.
+  std::string parsedRootSourcePath;
+  std::string parsedRootSha256;
   std::map<std::string, std::string> fileSha256;
   std::map<std::string, std::string> pathBindings;
   std::string changedPathBinding;

@@ -8,6 +8,8 @@ for supported domains and experimental paths.
 
 - Preserve once-protected contextual providers across independent selected root
   siblings, with the same two-parse skipped-edge and strict joint proof.
+- Bind temporary discovery-root and original proof-root include edges through
+  the identical parsed source bytes, retaining all nested-edge checks.
 
 ### Added
 
