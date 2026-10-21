@@ -202,6 +202,52 @@ bytes, include edges and proof digests are recorded and rechecked before publica
 neither partial output nor a partial bundle and preserves previous output. Inputs remain unchanged. See
 the [local-header closure contract](local-header-closure.md).
 
+## Bounded preservation of `MAX`
+
+The experimental preservation rule covers a physically owned root or selected
+local header containing a closed three-line `#ifndef MAX`, function-like
+two-parameter `#define MAX`, `#endif` fallback. It requires the normal
+preprocessor. The admitted bodies are the frozen helper's `(a > b ? a : b)`,
+the grouped comparison `((a > b) ? a : b)`, and `((a < b) ? b : a)`, with two
+distinct, unmapped parameter names. The original body and calls stay unchanged.
+
+If the authenticated helper defined `MAX` first, its exact guarded definition
+is replayed at the original helper include position in the same atomic helper
+transaction. The later caller fallback stays inactive. If the caller fallback
+defined it first, that original definition remains active and no competing
+definition is emitted. The frozen helper's pure fallback and the retained,
+authenticated helper-image consumer must use that same definition. Physical
+input identity, the actual preprocessing timeline and final macro definition
+are checked; a filename or system-header classification is insufficient.
+
+The two comparison bodies have different NaN and equal-value behavior. Ascify
+does not replace either with a function or change its operands, parentheses or
+repeated evaluations. Direct calls are limited to unchanged expression tokens;
+CUDA identifiers, argument macros, indirect aliases, function-address uses,
+enclosing observers and overlapping semantic rewrites remain excluded. The
+existing main-file-only frozen-image fallback rule is unchanged.
+
+Redefinition, undefinition, macro-stack operations, unrelated `#if`/`#ifdef`
+observations, unowned or unresolved raw `MAX` tokens, nonclosed fallback bodies,
+comments/splices in the fallback, and failed contextual proofs reject the whole
+helper transaction. Other Runtime, texture and local-header gates still apply.
+This source rule does not establish complete Sample build or numeric success.
+
+Explicit host C++ may use an unconditional, direct literal include of the
+configured physical `cuda_runtime.h` as an SDK provenance root. Its resolved
+path, file identity and parsed bytes must match that configured header; only
+the existing finite dependency roles propagate ownership. This handles channel
+and builtin declarations loaded before `cuda_runtime_api.h` without injecting
+CUDA language semantics. Macro-selected, transitive and conditional umbrella
+roots do not gain this new provenance. All texture ABI, layout, reflection,
+macro-use and transaction checks remain mandatory.
+
+The [MAX preservation matrix](../tests/rewrite/check_sample_helper_max_preservation.py)
+checks both include orders, original source syntax, exact final preprocessor
+definition, real target objects, and independent host NaN, signed-zero and
+side-effect results. Negative cases preserve an actual prior managed output
+and bundle and leave fresh output paths absent. It executes no NPU work.
+
 ## Maintenance and verification
 
 The runtime helpers are in [ascify_cuda_compat.hpp](../include/ascify/ascify_cuda_compat.hpp); context

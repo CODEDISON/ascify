@@ -8,6 +8,10 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Experimental preservation of bounded, physically proved `MAX` fallbacks in
+  the frozen Samples-helper transaction. Both include orders retain the exact
+  original macro body and evaluations; other observations and macro epochs
+  remain rejected. See [the helper contract](docs/sample-helpers.md).
 - Experimental authenticated RGBA8 texture channels: normalized `float4`
   Point/Linear reads and element-type `uchar4` Point reads on bounded 2D and
   layered resources. Numerical, coordinate and validation limits are recorded
@@ -102,3 +106,5 @@ for supported domains and experimental paths.
 - Order owned runtime cleanup after initialization and device binding.
 - Propagate selected Hybrid launch failures without launching the SIMT fallback.
 - Match Hybrid launch memory capacity to the runtime's shared allocations.
+
+- Authenticate a direct literal physical CUDA Runtime umbrella include in host C++ before early texture declarations; retain all SDK dependency and texture use checks. Validate final MAX definitions separately for both CCEC preprocessor tables.

@@ -1833,6 +1833,32 @@ static bool isConfiguredCudaRuntimeApiPath(llvm::StringRef path,
 #endif
 }
 
+// Host C++ has no forced CUDA wrapper. Authenticate this additional direct
+// Runtime umbrella root before its early builtin/channel headers are entered.
+static bool isConfiguredCudaRuntimeHeaderPath(llvm::StringRef path,
+                                           clang::SourceManager &source) {
+  if (!pathIsWithinConfiguredCudaInclude(path))
+    return false;
+  llvm::SmallString<256> expected(CudaPath.getValue()), physicalExpected,
+      physicalActual;
+  llvm::sys::path::append(expected, "include", "cuda_runtime.h");
+  if (llvm::sys::fs::real_path(expected, physicalExpected) ||
+      llvm::sys::fs::real_path(path, physicalActual) ||
+      physicalExpected != physicalActual)
+    return false;
+#if LLVM_VERSION_MAJOR >= 10
+  auto file = source.getFileManager().getFileRef(path);
+  if (!file) {
+    llvm::consumeError(file.takeError());
+    return false;
+  }
+  return physicalSourceFileMatches(physicalExpected, file->getFileEntry(), source);
+#else
+  const auto file = source.getFileManager().getFile(path);
+  return file && physicalSourceFileMatches(physicalExpected, **file, source);
+#endif
+}
+
 static bool verifiedFrontendCgFile(
     clang::FileID file, clang::CompilerInstance &compiler,
     const ascify::FrontendCompatibilityConfig &profile) {
@@ -4421,9 +4447,23 @@ void AscifyAction::FileChanged(
   const auto *sdkEntry = sourceManager.getFileEntryForID(file);
   const auto include = sourceManager.getSpellingLoc(sourceManager.getIncludeLoc(file));
   const auto parentFile = include.isValid() ? sourceManager.getFileID(include) : clang::FileID();
+  unsigned hostRuntimeIncludeLine = 0;
+  if (include.isFileID() && sourceManager.isWrittenInMainFile(include)) {
+    bool invalid = false;
+    const auto parentBytes = sourceManager.getBufferData(parentFile, &invalid);
+    if (!invalid)
+      hostRuntimeIncludeLine = sourceManager.getLocForStartOfFile(parentFile)
+          .getLocWithOffset(physicalLineBegin(parentBytes,
+              sourceManager.getFileOffset(include))).getRawEncoding();
+  }
+  const bool directHostRuntimeRoot =
+      !getCompilerInstance().getLangOpts().CUDA && hostRuntimeIncludeLine != 0 &&
+      hostCudaRuntimeLiteralRootLines.count(hostRuntimeIncludeLine) != 0 &&
+      isConfiguredCudaRuntimeHeaderPath(sourceManager.getFilename(spelling), sourceManager);
   const bool sdkRole = !sourceManager.isWrittenInMainFile(spelling) &&
       isConfiguredCudaSdkDependencyRole(sourceManager.getFilename(spelling)) &&
-      (isConfiguredCudaRuntimeApiPath(sourceManager.getFilename(spelling), sourceManager) ||
+      (directHostRuntimeRoot ||
+       isConfiguredCudaRuntimeApiPath(sourceManager.getFilename(spelling), sourceManager) ||
        (cudaProfilerApiHeaderAdmitted &&
         llvm::sys::path::filename(sourceManager.getFilename(spelling)) ==
             "cuda_profiler_api.h" && include.isValid() &&
@@ -4620,6 +4660,23 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
       includeToken.getIdentifierInfo()->getName() == "include")
     redundantCubIncludeCandidates.push_back(
         {hash_loc, filenameBegin, filenameEnd, resolved_file_name.str()});
+  // This is only an additional physical SDK provenance root. It does not
+  // enable the broader Runtime-header projection or exempt any AST/layout,
+  // macro-observation, transitive dependency or publication check.
+  if (file_name == "cuda_runtime.h" && !getCompilerInstance().getLangOpts().CUDA &&
+      !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks &&
+      directRange && directSpelling && preprocessorConditionalDepth == 0 &&
+      module == nullptr && !getCompilerInstance().getLangOpts().Modules &&
+      includeToken.getIdentifierInfo() != nullptr &&
+      includeToken.getIdentifierInfo()->getName() == "include" &&
+      isConfiguredCudaRuntimeHeaderPath(resolved_file_name, SM)) {
+    bool invalid = false;
+    const auto mainBytes = SM.getBufferData(SM.getMainFileID(), &invalid);
+    if (!invalid)
+      hostCudaRuntimeLiteralRootLines.insert(
+          SM.getLocForStartOfFile(SM.getMainFileID()).getLocWithOffset(
+              physicalLineBegin(mainBytes, SM.getFileOffset(hash_loc))).getRawEncoding());
+  }
   if (file_name == "cuda_runtime_api.h") {
     // A recursive closure translates a selected header as its own main file.
     // Its ordinary whole-file guard is preserved in the emitted header. No
@@ -8107,7 +8164,10 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
       FrozenOfficialNvidiaSampleHelperFunctions |
       FrozenOfficialNvidiaSampleHelperImage |
       FrozenOfficialNvidiaSampleHelperTimer;
+  const bool preservedCallerMax = name == "MAX" &&
+      recordPreservedMaxDefinition(MacroNameTok);
   if (isNvidiaSampleHelperObservableMacro(name) && !fromCompat &&
+      !preservedCallerMax &&
       !locationComesFromFrozenNvidiaSampleHelperFile(
           sourceManager, MacroNameTok.getLocation(), frozenMacroGraph)) {
     nvidiaSampleHelperUnsupportedMacroUse = true;
@@ -9333,6 +9393,18 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
         nvidiaSampleMacroObservationRanges.push_back(invocation);
     }
   }
+  // The new retained MAX domain also audits enclosing macro observers in
+  // selected headers. Existing main-file candidates keep their old ranges.
+  if (macroBegin.isFileID() && macroLast.isFileID() &&
+      !sourceManager.isWrittenInMainFile(macroBegin) &&
+      sourceManager.getFileID(macroBegin) == sourceManager.getFileID(macroLast) &&
+      ownedPreservedMaxLocation(macroBegin)) {
+    const auto end = clang::Lexer::getLocForEndOfToken(
+        macroLast, 0, sourceManager, getCompilerInstance().getLangOpts());
+    if (end.isFileID())
+      nvidiaSampleMacroObservationRanges.push_back({sourceManager.getFileID(macroBegin),
+          sourceManager.getFileOffset(macroBegin), sourceManager.getFileOffset(end)});
+  }
   // A local leaf can depend on macros from the root or an earlier selected
   // sibling. Record the dependency, not an instruction to copy a -D.
   // LocalHeader.cpp still proves a same-position expansion and exact inputs.
@@ -9392,6 +9464,14 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
         MacroNameTok.getLocation(), MacroNameTok, "expansion");
   auditFrozenNvidiaSampleHelperMacroDependency(
       MacroNameTok.getLocation(), MacroNameTok, MD, "expansion");
+  if (MacroNameTok.getIdentifierInfo()->getName() == "MAX" &&
+      preservedMaxNeeded) {
+    if (!admitPreservedMaxExpansion(MacroNameTok, MD, Range, Args)) {
+      nvidiaSampleHelperUnsupportedMacroUse = true;
+      llvm::errs() << "Ascify NVIDIA sample-helper closure: unproved preserved MAX invocation\n";
+    }
+    return;
+  }
   if (macroInfo == nullptr ||
       !locationComesFromRecognizedNvidiaSampleHelper(
           sourceManager, macroInfo->getDefinitionLoc()))
@@ -9612,6 +9692,8 @@ void AscifyAction::rewriteProvenNvidiaSampleHelperMacros() {
         << "recognized helper_cuda.h include; all helper edits kept\n";
     return;
   }
+  if (!provePreservedMaxFinalState())
+    nvidiaSampleHelperUnsupportedMacroUse = true;
   // Replacements are not rollback-capable. Complete every provenance,
   // preprocessor, status-domain, declaration, and range proof before the
   // first helper edit. One unsafe helper use therefore keeps every helper
@@ -9763,6 +9845,9 @@ void AscifyAction::auditRawNvidiaSampleHelperToken(
   if (fileLoc.isInvalid() || !sourceManager.isWrittenInMainFile(fileLoc))
     return;
   const unsigned offset = sourceManager.getFileOffset(fileLoc);
+  if (name == "MAX" &&
+      preservedMaxTokenLocations.count(fileLoc.getRawEncoding()) != 0)
+    return;
   if (nvidiaSampleHelperNormalMacroOffsets.count(offset) != 0 ||
       nvidiaSampleFindDeviceNormalOffsets.count(offset) != 0)
     return;
@@ -9830,6 +9915,299 @@ void AscifyAction::auditRawPublishedCompatTokensInFile(
     }
     lexer.LexFromRawLexer(token);
   }
+}
+
+bool AscifyAction::ownedPreservedMaxLocation(clang::SourceLocation location) {
+  if (!location.isFileID()) return false;
+  auto &source = getCompilerInstance().getSourceManager();
+  const auto file = source.getFileID(location);
+  const auto *entry = source.getFileEntryForID(file);
+  if (file == source.getMainFileID() && localHeaderContext != nullptr &&
+      localHeaderContext->depth == 0 && localHeaderContext->plan != nullptr &&
+      localHeaderContext->virtualInput != nullptr &&
+      localHeaderContext->inputEvidence != nullptr &&
+      localHeaderContext->sourcePath == localHeaderContext->plan->rootSourcePath() &&
+      source.getFilename(location) == localHeaderContext->plan->rootSourcePath()) {
+    bool invalid = false;
+    const auto bytes = source.getBufferData(file, &invalid);
+    if (invalid || bytes != *localHeaderContext->virtualInput) return false;
+    // Only LocalHeader.cpp supplies this in-memory input. Original discovery
+    // must equal the physical root; a flattened joint parse is unpublished and
+    // still requires the existing full token/final-macro/path/byte proof before
+    // LocalHeader.cpp publishes it. Do not generalize this to -remap-file.
+    if (localHeaderContext->requireHelperTransaction) return true;
+    const auto physical = llvm::MemoryBuffer::getFile(localHeaderContext->sourcePath);
+    return physical && (*physical)->getBuffer() == bytes;
+  }
+  if (file == source.getMainFileID() && entry != nullptr &&
+      !source.isFileOverridden(entry) && !getCompilerInstance().getLangOpts().CUDA &&
+      localHeaderContext != nullptr && localHeaderContext->depth == 0 &&
+      localHeaderContext->plan != nullptr &&
+      localHeaderContext->sourcePath == localHeaderContext->plan->rootSourcePath() &&
+      source.getFilename(location) == localHeaderContext->plan->rootSourcePath()) {
+    // The explicit host-C++ frontend also uses Tool.mapVirtualFile, even for
+    // an unmodified root. Its VFS UniqueID is not the physical file's UniqueID.
+    // Admit only the bound root with exactly the current physical bytes; other
+    // headers and caller remaps retain the normal physical-identity check.
+    bool invalid = false;
+    const auto bytes = source.getBufferData(file, &invalid);
+    const auto physical = llvm::MemoryBuffer::getFile(localHeaderContext->sourcePath);
+    return !invalid && physical && (*physical)->getBuffer() == bytes;
+  }
+  if (entry == nullptr || !physicalSourceFileMatches(
+          source.getFilename(location), *entry, source)) return false;
+  // This is the current physical root or a selected original local header,
+  // not an arbitrary -isystem file or a provider selected by its basename.
+  return file == source.getMainFileID() ||
+      (localHeaderContext != nullptr && localHeaderContext->plan != nullptr &&
+       localHeaderContext->plan->isSelectedRootHeader(
+           source.getFilename(location).str()));
+}
+
+bool AscifyAction::recordPreservedMaxFallback(
+    const clang::Token &name, const clang::MacroDefinition &definition) {
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  auto &pp = compiler.getPreprocessor();
+  const auto location = name.getLocation();
+  if (compiler.getPreprocessorOpts().RetainExcludedConditionalBlocks ||
+      !ownedPreservedMaxLocation(location)) return false;
+  const auto file = source.getFileID(location);
+  bool invalid = false;
+  const auto buffer = source.getBufferData(file, &invalid);
+  if (invalid) return false;
+  const unsigned begin = physicalLineBegin(buffer, source.getFileOffset(location));
+  unsigned end = begin;
+  for (unsigned line = 0; line != 3; ++line) {
+    if (end == buffer.size()) return false;
+    const auto newline = buffer.find('\n', end);
+    end = newline == llvm::StringRef::npos ? buffer.size() : newline + 1;
+  }
+  const auto text = buffer.slice(begin, end);
+  // Deliberately closed grammar: three physical directives. Comments, phase-2
+  // splices and alternate directive spellings do not acquire a new exception.
+  if (text.contains('\\') || text.contains('\r') || text.contains('/') ||
+      text.contains('%') || !text.contains('?')) return false;
+  // Raw Lexer requires a NUL sentinel at BufferEnd, not a view ending in the
+  // middle of the source buffer. Its base location retains physical offsets.
+  const std::string ownedText = text.str();
+  clang::Lexer lexer(source.getLocForStartOfFile(file).getLocWithOffset(begin),
+      compiler.getLangOpts(), ownedText.data(), ownedText.data(),
+      ownedText.data() + ownedText.size());
+  lexer.SetCommentRetentionState(true);
+  std::vector<clang::Token> tokens;
+  std::vector<std::string> words;
+  for (;;) {
+    clang::Token token;
+    lexer.LexFromRawLexer(token);
+    if (token.is(clang::tok::eof)) break;
+    if (tokens.size() == 32 || token.is(clang::tok::comment)) return false;
+    tokens.push_back(token);
+    words.push_back(pp.getSpelling(token));
+  }
+  if (tokens.size() < 22 || !tokens[7].isAnyIdentifier() ||
+      !tokens[9].isAnyIdentifier() || words[7] == words[9] ||
+      tokens[2].getLocation() != location) return false;
+  const std::string a = words[7], b = words[9];
+  for (const auto &parameter : {a, b})
+    if (pp.getIdentifierInfo(parameter)->getTokenID() != clang::tok::identifier ||
+        CUDA_RENAMES_MAP().count(parameter) || isAscifyCudaCompatReservedMacro(parameter) ||
+        llvm::StringRef(parameter).starts_with("__")) return false;
+  const std::vector<std::string> prefix =
+      {"#", "ifndef", "MAX", "#", "define", "MAX", "(", a, ",", b, ")"};
+  if (!std::equal(prefix.begin(), prefix.end(), words.begin()) ||
+      words[words.size()-2] != "#" || words.back() != "endif" ||
+      source.getFileOffset(tokens[6].getLocation()) !=
+          source.getFileOffset(tokens[5].getLocation()) + 3) return false;
+  for (unsigned i = 1; i < tokens.size(); ++i)
+    if (tokens[i].isAtStartOfLine() != (i == 3 || i == tokens.size()-2))
+      return false;
+  const std::vector<std::string> body(words.begin()+11, words.end()-2);
+  if (body != std::vector<std::string>{"(",a,">",b,"?",a,":",b,")"} &&
+      body != std::vector<std::string>{"(","(",a,">",b,")","?",a,":",b,")"} &&
+      body != std::vector<std::string>{"(","(",a,"<",b,")","?",b,":",a,")"})
+    return false;
+  const auto *active = definition.getMacroInfo();
+  if (active != nullptr) {
+    const bool frozen = !active->isVariadic() &&
+        frozenNvidiaSampleHelperFileRole(source, active->getDefinitionLoc()) ==
+            FrozenOfficialNvidiaSampleHelperCuda &&
+        activeFrozenHelperCudaMaxBodyMatches(*active, pp);
+    if ((!frozen && (!preservedMaxProviderIsCaller ||
+                     preservedMaxProvider != active)) ||
+        (preservedMaxProvider != nullptr && preservedMaxProvider != active))
+      return false;
+    preservedMaxProvider = active;
+    if (frozen) preservedMaxReplayRequired = true;
+    if (frozen && file != source.getMainFileID() &&
+        localHeaderContext != nullptr && localHeaderContext->depth == 0 &&
+        localHeaderContext->plan != nullptr)
+      localHeaderContext->plan->requireInheritedHelperContext(
+          source.getFilename(location).str());
+  } else if (preservedMaxProvider != nullptr) {
+    return false; // A second macro epoch is never restored by this proof.
+  }
+  preservedMaxFallbacks.push_back({location, tokens[5].getLocation(),
+      {file, begin, end}, a, b, body, active == nullptr});
+  preservedMaxTokenLocations.insert(location.getRawEncoding());
+  preservedMaxTokenLocations.insert(tokens[5].getLocation().getRawEncoding());
+  preservedMaxNeeded = true;
+  return true;
+}
+
+bool AscifyAction::recordPreservedMaxDefinition(const clang::Token &name) {
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  auto &pp = compiler.getPreprocessor();
+  const auto *info = pp.getMacroDefinition(name.getIdentifierInfo()).getMacroInfo();
+  if (info == nullptr || info->isVariadic() || !info->isFunctionLike() ||
+      info->getNumParams() != 2) return false;
+  if (frozenNvidiaSampleHelperFileRole(source, name.getLocation()) ==
+          FrozenOfficialNvidiaSampleHelperCuda &&
+      activeFrozenHelperCudaMaxBodyMatches(*info, pp)) {
+    if (preservedMaxProvider != nullptr && preservedMaxProvider != info)
+      nvidiaSampleHelperUnsupportedMacroUse = true;
+    else preservedMaxProvider = info;
+    return false; // Existing frozen-owner audit applies to the helper itself.
+  }
+  if (!ownedPreservedMaxLocation(name.getLocation()) ||
+      preservedMaxProvider != nullptr) return false;
+  for (const auto &fallback : preservedMaxFallbacks) {
+    if (!fallback.originallyActive || fallback.definitionName != name.getLocation())
+      continue;
+    auto parameter = info->param_begin();
+    if ((*parameter++)->getName() != fallback.parameterLeft ||
+        (*parameter)->getName() != fallback.parameterRight) return false;
+    std::vector<std::string> body;
+    for (const auto &token : info->tokens()) body.push_back(pp.getSpelling(token));
+    if (body != fallback.replacementTokens) return false;
+    preservedMaxProvider = info;
+    preservedMaxProviderIsCaller = true;
+    return true;
+  }
+  return false;
+}
+
+bool AscifyAction::admitPreservedMaxExpansion(
+    const clang::Token &name, const clang::MacroDefinition &definition,
+    clang::SourceRange range, const clang::MacroArgs *arguments) {
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  const auto location = name.getLocation();
+  if (definition.getMacroInfo() != preservedMaxProvider ||
+      preservedMaxProvider == nullptr || arguments == nullptr ||
+      arguments->getNumMacroArguments() != 2 || !location.isFileID() ||
+      !range.getBegin().isFileID() || !range.getEnd().isFileID()) return false;
+  const bool image = frozenOfficialNvidiaSampleHelperFunctionsSeen &&
+      isDirectFrozenFunctionsImageProviderInstance(location);
+  if (!image && !ownedPreservedMaxLocation(location)) return false;
+  bool invalidBuffer = false;
+  const auto buffer = source.getBufferData(source.getFileID(location), &invalidBuffer);
+  if (invalidBuffer) return false;
+  const auto line = buffer.slice(physicalLineBegin(buffer, source.getFileOffset(location)),
+                                 source.getFileOffset(location)).ltrim();
+  if (line.starts_with("#") || line.starts_with("%:")) return false;
+  const auto end = clang::Lexer::getLocForEndOfToken(
+      range.getEnd(), 0, source, compiler.getLangOpts());
+  if (!end.isFileID() || source.getFileID(end) != source.getFileID(location) ||
+      range.getBegin() != location) return false;
+  // Keep the invocation and all effects exactly as spelled. Outside the
+  // authenticated image helper, argument macros and CUDA names require
+  // separate semantic proofs and remain excluded from this small domain.
+  if (!image) for (unsigned index = 0; index != 2; ++index) {
+    const auto *token = arguments->getUnexpArgument(index);
+    unsigned count = 0;
+    for (; token->isNot(clang::tok::eof); ++token) {
+      if (++count > 512 || token->isAnnotation() || token->getLocation().isMacroID() ||
+          token->is(clang::tok::hash) || token->is(clang::tok::hashhash)) return false;
+      if (const auto *identifier = token->getIdentifierInfo()) {
+        const auto word = identifier->getName();
+        if (compiler.getPreprocessor().getMacroDefinition(identifier) ||
+            CUDA_RENAMES_MAP().count(word) || word.starts_with("cu") ||
+            word.starts_with("__") || word == "_Pragma")
+          return false;
+      }
+    }
+    if (count == 0) return false;
+  }
+  const SemanticRewriteRange invocation{source.getFileID(location),
+      source.getFileOffset(location), source.getFileOffset(end)};
+  if (invocation.beginOffset >= invocation.endOffset) return false;
+  preservedMaxInvocationRanges.push_back(invocation);
+  preservedMaxTokenLocations.insert(location.getRawEncoding());
+  if (!preservedMaxProviderIsCaller) preservedMaxReplayRequired = true;
+  return true;
+}
+
+void AscifyAction::auditRawPreservedMaxTokens(clang::FileID file) {
+  if (!preservedMaxNeeded || file.isInvalid()) return;
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  const auto start = source.getLocForStartOfFile(file);
+  const unsigned role = frozenNvidiaSampleHelperFileRole(source, start);
+  // These complete authenticated files remain in the output. Their closed
+  // fallbacks and the image consumer retain the recorded active definition.
+  if (role == FrozenOfficialNvidiaSampleHelperCuda ||
+      role == FrozenOfficialNvidiaSampleHelperString ||
+      role == FrozenOfficialNvidiaSampleHelperFunctions ||
+      role == FrozenOfficialNvidiaSampleHelperImage ||
+      role == FrozenOfficialNvidiaSampleHelperTimer) return;
+  bool invalid = false;
+  const auto buffer = source.getBufferData(file, &invalid);
+  if (invalid) { nvidiaSampleHelperUnsupportedMacroUse = true; return; }
+  clang::Lexer lexer(start, compiler.getLangOpts(), buffer.begin(), buffer.begin(), buffer.end());
+  for (;;) {
+    clang::Token token;
+    lexer.LexFromRawLexer(token);
+    if (token.is(clang::tok::eof)) break;
+    if (!token.isAnyIdentifier() || compiler.getPreprocessor().getSpelling(token) != "MAX")
+      continue;
+    const auto location = token.getLocation();
+    if (preservedMaxTokenLocations.count(location.getRawEncoding())) continue;
+    if (file == source.getMainFileID() &&
+        nvidiaSampleHelperNormalMacroOffsets.count(source.getFileOffset(location))) continue;
+    nvidiaSampleHelperUnsupportedMacroUse = true;
+    llvm::errs() << "Ascify NVIDIA sample-helper closure: residual preserved MAX token\n";
+    return;
+  }
+}
+
+bool AscifyAction::provePreservedMaxFinalState() {
+  if (!preservedMaxNeeded) return true;
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  auto &pp = compiler.getPreprocessor();
+  if (compiler.getPreprocessorOpts().RetainExcludedConditionalBlocks ||
+      preservedMaxProvider == nullptr ||
+      pp.getMacroDefinition(pp.getIdentifierInfo("MAX")).getMacroInfo() != preservedMaxProvider)
+    return false;
+  if (preservedMaxProviderIsCaller) {
+    if (preservedMaxReplayRequired ||
+        !ownedPreservedMaxLocation(preservedMaxProvider->getDefinitionLoc())) return false;
+  } else if (!preservedMaxReplayRequired ||
+      frozenNvidiaSampleHelperFileRole(source, preservedMaxProvider->getDefinitionLoc()) !=
+          FrozenOfficialNvidiaSampleHelperCuda ||
+      !activeFrozenHelperCudaMaxBodyMatches(*preservedMaxProvider, pp)) return false;
+  auto overlaps = [](const SemanticRewriteRange &a, const SemanticRewriteRange &b) {
+    return a.file == b.file && a.beginOffset < b.endOffset && b.beginOffset < a.endOffset;
+  };
+  for (const auto &fallback : preservedMaxFallbacks) {
+    if (!ownedPreservedMaxLocation(fallback.guardName)) return false;
+    for (const auto &edit : SemanticRewriteRanges)
+      if (overlaps(fallback.range, edit)) return false;
+  }
+  for (const auto &invocation : preservedMaxInvocationRanges) {
+    for (const auto &edit : SemanticRewriteRanges)
+      if (overlaps(invocation, edit)) return false;
+    for (const auto &observer : nvidiaSampleMacroObservationRanges)
+      if (observer.file == invocation.file && observer.beginOffset <= invocation.beginOffset &&
+          invocation.endOffset <= observer.endOffset &&
+          (observer.beginOffset < invocation.beginOffset || invocation.endOffset < observer.endOffset))
+        return false;
+  }
+  auditRawPreservedMaxTokens(source.getMainFileID());
+  for (const auto file : nvidiaSampleRetainedFileIds) auditRawPreservedMaxTokens(file);
+  return !nvidiaSampleHelperUnsupportedMacroUse;
 }
 
 bool AscifyAction::admitFrozenHelperMaxFallback(
@@ -9924,6 +10302,11 @@ void AscifyAction::auditExternalNvidiaSampleHelperPreprocessorUse(
     return;
   if (name == "MAX" && directive == "#ifndef" &&
       admitFrozenHelperMaxFallback(macroNameToken))
+    return;
+  if (name == "MAX" && directive == "#ifndef" &&
+      recordPreservedMaxFallback(macroNameToken,
+          getCompilerInstance().getPreprocessor().getMacroDefinition(
+              macroNameToken.getIdentifierInfo())))
     return;
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
@@ -10052,6 +10435,15 @@ void AscifyAction::auditFrozenNvidiaSampleHelperMacroDependency(
   // not import project semantics into the frozen helper profile.
   if (macroInfo == nullptr)
     return;
+  // This exact frozen file contains MAX only in its pure fallback guard and
+  // definition. A physically retained, already-recorded caller fallback is
+  // therefore not a semantic dependency of the removed helper body.
+  if (macroNameToken.getIdentifierInfo()->getName() == "MAX" &&
+      useKind == "#ifndef" &&
+      frozenConsumerRole == FrozenOfficialNvidiaSampleHelperCuda &&
+      preservedMaxNeeded && preservedMaxProviderIsCaller &&
+      macroInfo == preservedMaxProvider)
+    return;
   const clang::SourceLocation definitionLocation =
       sourceManager.getSpellingLoc(macroInfo->getDefinitionLoc());
   const clang::FileID definitionFile = definitionLocation.isValid()
@@ -10132,6 +10524,8 @@ void AscifyAction::auditFrozenNvidiaSampleHelperMacroDependency(
 void AscifyAction::finalizeNvidiaSampleHelperClosure() {
   if (nvidiaSampleHelperIncludes.empty())
     return;
+  if (!provePreservedMaxFinalState())
+    nvidiaSampleHelperUnsupportedMacroUse = true;
   // Inspect the completed callback history, not just the current prescan
   // stack. Every enclosing observer must be proved; the candidate's own
   // identical range and macro invocations inside its arguments are harmless.
@@ -10332,6 +10726,9 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
       "#include <stdlib.h>\n"
       "#include <string.h>\n"
       "#include <helper_string.h>";
+  if (preservedMaxNeeded && preservedMaxReplayRequired)
+    includeReplacementText +=
+        "\n#ifndef MAX\n#define MAX(a, b) (a > b ? a : b)\n#endif";
   const bool helperNeedsCompat =
       !nvidiaSampleHelperMacroCandidates.empty() ||
       !nvidiaSampleFindDeviceCandidates.empty();
