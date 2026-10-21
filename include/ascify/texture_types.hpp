@@ -91,9 +91,12 @@ inline cudaChannelFormatDesc cudaCreateChannelDesc(
 }
 template<typename T>
 inline cudaChannelFormatDesc cudaCreateChannelDesc() {
-  static_assert(std::is_same<T, float>::value,
-                "Ascify texture channels currently admit only float32");
-  return {32, 0, 0, 0, cudaChannelFormatKindFloat};
+  static_assert(std::is_same<T, float>::value ||
+                std::is_same<T, unsigned int>::value,
+                "Ascify texture channels require float32 or unsigned int32");
+  static_assert(sizeof(unsigned int) == 4, "texture unsigned int channel width");
+  return {32, 0, 0, 0, std::is_same<T, unsigned int>::value
+      ? cudaChannelFormatKindUnsigned : cudaChannelFormatKindFloat};
 }
 
 } // namespace ascify

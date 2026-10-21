@@ -10,6 +10,16 @@ import subprocess
 
 CASES = [
     ('float_fetch','__global__ void k(float*p,cudaTextureObject_t t){p[0]=tex2D<float>(t,.5f,.5f);}', ['ascify::tex2D<float>']),
+    ('unsigned_fetch','__global__ void k(unsigned int*p,cudaTextureObject_t t){p[0]=tex2D<unsigned int>(t,.5f,.5f);}', ['ascify::tex2D<unsigned int>']),
+    ('unsigned_layered_fetch','__global__ void k(unsigned int*p,cudaTextureObject_t t){p[0]=tex2DLayered<unsigned int>(t,.5f,.5f,1);}', ['ascify::tex2DLayered<unsigned int>']),
+    ('unsigned_alias_fetch','using Pixel=unsigned int;__global__ void k(Pixel*p,cudaTextureObject_t t){p[0]=tex2D<Pixel>(t,.5f,.5f);}', ['ascify::tex2D<Pixel>']),
+    ('unsigned_array_allocate','void f(){cudaArray*a=nullptr;auto c=cudaCreateChannelDesc<unsigned int>();auto s=cudaMallocArray(&a,&c,4,3);}', ['ascify::cudaMallocArray','ascify::cudaCreateChannelDesc<unsigned int>']),
+    ('unsigned_layered_allocate','void f(){cudaArray*a=nullptr;auto c=cudaCreateChannelDesc<unsigned int>();auto s=cudaMalloc3DArray(&a,&c,make_cudaExtent(4,3,2),cudaArrayLayered);}', ['ascify::cudaCreateChannelDesc<unsigned int>','make_cudaExtent(4,3,2),0x01)']),
+    ('unsigned_macro_fetch','#define FETCH_UINT(t) tex2D<unsigned int>(t,.5f,.5f)\n__global__ void k(unsigned int*p,cudaTextureObject_t t){p[0]=FETCH_UINT(t);}', None),
+    ('unsigned_pointer_fetch','__global__ void k(unsigned int*p,cudaTextureObject_t t){tex2D<unsigned int>(p,t,.5f,.5f);}', None),
+    ('unsupported_small_channel','void f(){auto d=cudaCreateChannelDesc<unsigned short>();}', None),
+    ('unsigned_sampler_macro','#define textureSampleUnsigned fake_sampler\n__global__ void k(unsigned int*p,cudaTextureObject_t t){p[0]=tex2D<unsigned int>(t,.5f,.5f);}', None),
+    ('unsigned_tag_macro','#define unsigned_element invalid_tag\n__global__ void k(unsigned int*p,cudaTextureObject_t t){p[0]=tex2D<unsigned int>(t,.5f,.5f);}', None),
     ('layered_fetch','__global__ void k(float*p,cudaTextureObject_t t){p[0]=tex2DLayered<float>(t,.5f,.5f,1);}', ['ascify::tex2DLayered<float>']),
     ('fractional_fetch','__global__ void k(float*p,cudaTextureObject_t t){p[0]=tex2D<float>(t,.501f,.333f);}', ['ascify::tex2D<float>']),
     ('fast_name_macro','#define tex2DFast user_fetch\n__global__ void k(float*p,cudaTextureObject_t t){p[0]=tex2D<float>(t,.5f,.5f);}', None),

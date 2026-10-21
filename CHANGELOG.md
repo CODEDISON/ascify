@@ -11,6 +11,9 @@ for supported domains and experimental paths.
 - Direct physical CUDA Runtime includes inside proved whole-file guards of
   selected local headers. Nested conditions, guard macro-stack operations and
   conditional root-source includes remain outside this admission rule.
+- Experimental single-component unsigned-int32 texture point reads with exact
+  element bits and sticky rejection errors. Signed, normalized-read and linear
+  integer sampling remain unsupported; target validation is still required.
 - Transactional configuration guards for proved inactive Samples-helper branches;
   enabling an unsupported retained branch in the target produces an explicit error.
 - Generic 32-bit integer `atomicAdd` for proven device-helper parameters,

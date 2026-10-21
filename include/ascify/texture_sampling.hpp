@@ -20,12 +20,14 @@ struct TextureSamplingDescriptor {
   uint32_t wrap_y;
   uint32_t linear;
   uint32_t layered;
+  uint32_t unsigned_element;
   uint64_t error;
 };
-static_assert(sizeof(TextureSamplingDescriptor) == 64, "texture descriptor ABI");
+static_assert(sizeof(TextureSamplingDescriptor) == 72, "texture descriptor ABI");
 static_assert(alignof(TextureSamplingDescriptor) == 8, "texture descriptor alignment");
 static_assert(offsetof(TextureSamplingDescriptor, width) == 24, "texture dimension ABI");
-static_assert(offsetof(TextureSamplingDescriptor, error) == 56, "texture error ABI");
+static_assert(offsetof(TextureSamplingDescriptor, unsigned_element) == 56, "texture channel ABI");
+static_assert(offsetof(TextureSamplingDescriptor, error) == 64, "texture error ABI");
 static_assert(std::is_trivially_copyable<TextureSamplingDescriptor>::value,
               "texture descriptor must be copied without host pointers");
 
@@ -76,7 +78,7 @@ template<bool Approximate = false>
 __aicore__ ASCIFY_FORCEINLINE float textureSampleFloat(
     unsigned long long token, float x, float y, int layer, bool layered) {
   const auto *descriptor = reinterpret_cast<const TextureSamplingDescriptor *>(token);
-  if (!descriptor->width || !descriptor->height ||
+  if (!descriptor->width || !descriptor->height || descriptor->unsigned_element ||
       !__builtin_isfinite(x) || !__builtin_isfinite(y) ||
       (descriptor->layered != 0) != layered || layer < 0 ||
       static_cast<uint32_t>(layer) >= descriptor->layers)
@@ -109,6 +111,32 @@ __aicore__ ASCIFY_FORCEINLINE float textureSampleFloat(
   const float row1 = a == 0.0f ? t01 :
       (1.0f - a) * t01 + a * textureLoadFloat(descriptor, ix + 1, iy + 1, layer);
   return (1.0f - b) * row0 + b * row1;
+}
+
+// Element-type integer reads preserve all 32 payload bits. In particular,
+// neither the load nor the return goes through float, even under fast policy.
+__aicore__ ASCIFY_FORCEINLINE unsigned int textureSampleUnsigned(
+    unsigned long long token, float x, float y, int layer, bool layered) {
+  static_assert(sizeof(unsigned int) == 4, "texture unsigned int fetch width");
+  const auto *descriptor = reinterpret_cast<const TextureSamplingDescriptor *>(token);
+  if (!descriptor->width || !descriptor->height || !descriptor->unsigned_element ||
+      descriptor->linear || !__builtin_isfinite(x) || !__builtin_isfinite(y) ||
+      (descriptor->layered != 0) != layered || layer < 0 ||
+      static_cast<uint32_t>(layer) >= descriptor->layers) {
+    (void)textureSamplingReject(descriptor);
+    return 0;
+  }
+  x = textureCoordinate(x, descriptor->width, descriptor->normalized != 0,
+                        descriptor->wrap_x != 0);
+  y = textureCoordinate(y, descriptor->height, descriptor->normalized != 0,
+                        descriptor->wrap_y != 0);
+  const int ix = textureAddressIndex(static_cast<int>(floorf(x)),
+      static_cast<int>(descriptor->width), descriptor->wrap_x != 0);
+  const int iy = textureAddressIndex(static_cast<int>(floorf(y)),
+      static_cast<int>(descriptor->height), descriptor->wrap_y != 0);
+  const uint64_t address = descriptor->data + uint64_t(layer) * descriptor->layer_bytes +
+      uint64_t(iy) * descriptor->pitch_bytes + uint64_t(ix) * sizeof(unsigned int);
+  return *reinterpret_cast<const unsigned int *>(address);
 }
 #endif
 

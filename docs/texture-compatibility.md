@@ -1,12 +1,37 @@
-# Bounded float texture conversion
+# Bounded scalar texture conversion
 
-The texture adapter is under validation. Native engineering probes have passed on Ascend950DT with CANN 9.1; no original CUDA Sample success is claimed by this document.
+The texture adapter is under validation. Earlier float engineering probes have passed on Ascend950DT with CANN 9.1. The unsigned-int extension described below has not yet passed target compilation or device validation; it adds no original CUDA Sample success.
+
+## Unsigned 32-bit element extension
+
+The additional channel is the exact CUDA `unsigned int` type, with a 32-bit
+single-component unsigned channel description. Array and layered-array storage,
+and an existing adapter-owned `cudaMallocPitch` allocation, retain the same
+four-byte element width and byte-pitch checks as float storage. An unsigned
+texture accepts only element-type reads and point filtering; normalized integer
+reads, linear filtering, smaller integer channels and vector channels remain
+outside this extension. Float and unsigned fetch types are checked against the
+descriptor, including calls selected by the fast-math policy. The integer
+payload is loaded and returned as `unsigned int`, with no float intermediate.
+
+Coordinate normalization, wrap/clamp and lifetime rules are unchanged. A type
+mismatch or invalid coordinate sets the existing sticky error; an unsigned
+failure returns zero only as a placeholder, and the blocking error status must
+still be checked. The private host/device descriptor is now 72 bytes with the
+error-address field at byte 64. Old installed headers or raw-descriptor probes
+must not be mixed with the new product; each probe must bind the new ABI.
+
+This removes one source-level rejection in `stereoDisparity`, but does not yet
+make that original sample executable: its pitch2D resource uses ordinary
+`cudaMalloc`, which is not an adapter-owned pitched allocation. That ownership
+extension, full target compilation and original CPU verification remain
+separate gates. No sample source, algorithm, input or oracle is modified.
 
 ## Accepted surface
 
-The frontend requires physical CUDA SDK declarations and direct literal references. The SDK `cudaArrayLayered` macro is materialized as its exact `0x01` literal, retaining its int prvalue type; unproved enclosing macro observers are rejected. Texture calls inside `checkCudaErrors` require the authenticated frozen helper and its successfully committed rewrite transaction. It maps float32 single-component arrays, layered 2D arrays, owned pitched allocations, and float `tex2D`/`tex2DLayered` calls. Descriptor fields retain their CUDA meanings; descriptor binary layout is private. User declarations, indirect function calls, macro-generated names, general layout/reflection, and dependent texture fetches are rejected. Literal zero initialization and a narrowly proved native `memset` of exactly the same whole descriptor are admitted.
+The frontend requires physical CUDA SDK declarations and direct literal references. The SDK `cudaArrayLayered` macro is materialized as its exact `0x01` literal, retaining its int prvalue type; unproved enclosing macro observers are rejected. Texture calls inside `checkCudaErrors` require the authenticated frozen helper and its successfully committed rewrite transaction. It maps single-component float32 or unsigned-int32 arrays, layered 2D arrays, owned pitched allocations, and corresponding `tex2D`/`tex2DLayered` calls. Descriptor fields retain their CUDA meanings; descriptor binary layout is private. User declarations, indirect function calls, macro-generated names, general layout/reflection, and dependent texture fetches are rejected. Literal zero initialization and a narrowly proved native `memset` of exactly the same whole descriptor are admitted.
 
-The public APIs include array/pitch allocation and free, 2D row copies and memset, copies to an array, array/pointer `cudaMemcpy3D`, texture creation/destruction, and the associated descriptors. Width/height/layer extents are positive and at most 2^20. Pitches and pointer offsets are bytes; an array endpoint makes the copy extent width count float elements. Bounds and multiplication overflow are checked. Arrays support float32 with no flags except the layered flag for layered allocation. Resource views, mipmaps, normalized integer reads, sRGB, mirror/border addressing, and other unsupported descriptor settings return an explicit error.
+The public APIs include array/pitch allocation and free, 2D row copies and memset, copies to an array, array/pointer `cudaMemcpy3D`, texture creation/destruction, and the associated descriptors. Width/height/layer extents are positive and at most 2^20. Pitches and pointer offsets are bytes; an array endpoint makes the copy extent width count 32-bit elements. Bounds and multiplication overflow are checked. Arrays support float32 or unsigned-int32 with no flags except the layered flag for layered allocation. Resource views, mipmaps, normalized integer reads, sRGB, mirror/border addressing, and other unsupported descriptor settings return an explicit error.
 
 When the explicit frontend compatibility profile is enabled, the texture record audit recognizes its exact product-owned, forced host-math include. Only that inclusion's unchanged dependent template declarations receive the utility exception; actual macro expansions in it disable the exception. Every entered include instance is audited separately, so a caller that undefines the include guard and includes the same physical header again does not inherit the forced inclusion's exception. Caller templates, copied or shadow headers, and concrete texture-layout observations remain subject to the same audit.
 

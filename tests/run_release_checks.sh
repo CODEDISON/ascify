@@ -51,6 +51,8 @@ run_check "target ABI compatibility static contract" \
   sh "$rewrite_dir/check_target_abi_compat.sh"
 run_check "NVIDIA sample-helper compatibility contract" \
   sh "$rewrite_dir/check_sample_helper_compat.sh"
+run_check "unsigned texture host arithmetic and type rejection" \
+  sh "$rewrite_dir/check_texture_unsigned_host.sh"
 run_check "dependent sample-helper emitted type domain" \
   "$python" -B "$rewrite_dir/check_sample_helper_template_domain.py"
 run_check "narrow cooperative-groups compatibility contract" \

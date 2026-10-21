@@ -16,7 +16,7 @@ struct TextureAllocation {
   int32_t device = -1;
   void *context = nullptr;
   unsigned references = 0;
-  bool array = false, layered = false;
+  bool array = false, layered = false, unsigned_element = false;
 };
 struct TextureHandle {
   void *descriptor = nullptr;
@@ -36,9 +36,9 @@ inline bool textureMultiply(size_t a, size_t b, size_t &result) {
   if (b && a > SIZE_MAX / b) return false;
   result = a * b; return true;
 }
-inline bool textureFloatChannel(const cudaChannelFormatDesc &channel) {
+inline bool textureScalar32Channel(const cudaChannelFormatDesc &channel) {
   return channel.x == 32 && channel.y == 0 && channel.z == 0 && channel.w == 0 &&
-         channel.f == cudaChannelFormatKindFloat;
+         (channel.f == cudaChannelFormatKindFloat || channel.f == cudaChannelFormatKindUnsigned);
 }
 inline aclError textureCurrent(int32_t &device, void *&context) {
   aclError status = cudaRuntimeEnsureReady();
@@ -137,7 +137,7 @@ inline void textureAfterReset(int32_t device) {
 }
 
 inline aclError textureAllocate(TextureAllocation **result, size_t width,
-    size_t height, size_t layers, bool array, bool layered) {
+    size_t height, size_t layers, bool array, bool layered, bool unsigned_element = false) {
   // Bounds also keep all sampler integer conversions and float extents exact.
   if (!width || !height || !layers || width > (1U<<20) || height > (1U<<20) ||
       layers > (1U<<20)) return ACL_ERROR_FEATURE_UNSUPPORTED;
@@ -164,7 +164,7 @@ inline aclError textureAllocate(TextureAllocation **result, size_t width,
   status = ::aclrtMalloc(&storage,bytes,ACL_MEM_MALLOC_HUGE_FIRST);
   if (status != ACL_SUCCESS) return status;
   if (!storage) return ACL_ERROR_RT_MEMORY_ALLOCATION;
-  *slot = {storage,bytes,pitch,width,height,layers,device,context,0,array,layered};
+  *slot = {storage,bytes,pitch,width,height,layers,device,context,0,array,layered,unsigned_element};
   *result = slot;
   return ACL_SUCCESS;
 }
@@ -218,19 +218,21 @@ inline aclError cudaMallocPitch(T **pointer, size_t *pitch, size_t width, size_t
 inline aclError cudaMallocArray(cudaArray_t *array, const cudaChannelFormatDesc *channel,
     size_t width, size_t height=0, unsigned flags=0) {
   if (!array || !channel) return ACL_ERROR_RT_PARAM_INVALID;
-  if (flags || !detail::textureFloatChannel(*channel)) return ACL_ERROR_FEATURE_UNSUPPORTED;
+  if (flags || !detail::textureScalar32Channel(*channel)) return ACL_ERROR_FEATURE_UNSUPPORTED;
   detail::TextureAllocation *record=nullptr;
-  aclError status=detail::textureAllocate(&record,width,height,1,true,false);
+  aclError status=detail::textureAllocate(&record,width,height,1,true,false,
+      channel->f == cudaChannelFormatKindUnsigned);
   if(status==ACL_SUCCESS) *array=reinterpret_cast<cudaArray_t>(record);
   return status;
 }
 inline aclError cudaMalloc3DArray(cudaArray_t *array, const cudaChannelFormatDesc *channel,
     cudaExtent extent, unsigned flags=0) {
   if (!array || !channel) return ACL_ERROR_RT_PARAM_INVALID;
-  if (flags != cudaArrayLayered || !detail::textureFloatChannel(*channel))
+  if (flags != cudaArrayLayered || !detail::textureScalar32Channel(*channel))
     return ACL_ERROR_FEATURE_UNSUPPORTED;
   detail::TextureAllocation *record=nullptr;
-  aclError status=detail::textureAllocate(&record,extent.width,extent.height,extent.depth,true,true);
+  aclError status=detail::textureAllocate(&record,extent.width,extent.height,extent.depth,true,true,
+      channel->f == cudaChannelFormatKindUnsigned);
   if(status==ACL_SUCCESS) *array=reinterpret_cast<cudaArray_t>(record);
   return status;
 }
@@ -378,12 +380,17 @@ inline aclError cudaCreateTextureObject(cudaTextureObject_t *output,
   detail::TextureLock guard;
   detail::TextureAllocation *record=nullptr;
   size_t width=0,height=0,pitch=0;
+  bool unsigned_element=false;
   if(resource->resType==cudaResourceTypeArray) {
     record=detail::textureArray(resource->res.array.array);
-    if(record) { width=record->width; height=record->height; pitch=record->pitch; }
+    if(record) {
+      width=record->width; height=record->height; pitch=record->pitch;
+      unsigned_element=record->unsigned_element;
+    }
   } else if(resource->resType==cudaResourceTypePitch2D) {
     const auto &input=resource->res.pitch2D;
-    if(!detail::textureFloatChannel(input.desc)) return ACL_ERROR_FEATURE_UNSUPPORTED;
+    if(!detail::textureScalar32Channel(input.desc)) return ACL_ERROR_FEATURE_UNSUPPORTED;
+    unsigned_element=input.desc.f == cudaChannelFormatKindUnsigned;
     record=detail::texturePointer(input.devPtr);
     width=input.width; height=input.height; pitch=input.pitchInBytes;
     size_t row_bytes=0,bytes=0;
@@ -393,6 +400,8 @@ inline aclError cudaCreateTextureObject(cudaTextureObject_t *output,
         !record || pitch!=record->pitch || bytes>record->bytes) return ACL_ERROR_RT_PARAM_INVALID;
   } else return ACL_ERROR_FEATURE_UNSUPPORTED;
   if(!record || !detail::textureOwned(*record,device,context)) return ACL_ERROR_RT_PARAM_INVALID;
+  if(unsigned_element && texture->filterMode!=cudaFilterModePoint)
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
   detail::TextureHandle *slot=nullptr;
   for(auto &handle:detail::textureRegistry().handles) if(!handle.descriptor) {slot=&handle;break;}
   if(!slot) return ACL_ERROR_BAD_ALLOC;
@@ -409,6 +418,7 @@ inline aclError cudaCreateTextureObject(cudaTextureObject_t *output,
   value.wrap_x=value.normalized && texture->addressMode[0]==cudaAddressModeWrap;
   value.wrap_y=value.normalized && texture->addressMode[1]==cudaAddressModeWrap;
   value.linear=texture->filterMode==cudaFilterModeLinear;
+  value.unsigned_element=unsigned_element;
   value.error=reinterpret_cast<uint64_t>(descriptor)+sizeof(value);
   unsigned char image[96]={};std::memcpy(image,&value,sizeof(value));
   status=::aclrtMemcpy(descriptor,sizeof(image),image,sizeof(image),ACL_MEMCPY_HOST_TO_DEVICE);
@@ -447,9 +457,13 @@ inline aclError cudaDestroyTextureObject(cudaTextureObject_t texture) {
 
 template<typename T>
 __aicore__ ASCIFY_FORCEINLINE T tex2D(cudaTextureObject_t texture,float x,float y) {
-  static_assert(std::is_same<T,float>::value,"Ascify texture fetch supports float32 only");
+  static_assert(std::is_same<T,float>::value || std::is_same<T,unsigned int>::value,
+                "Ascify texture fetch requires float32 or unsigned int32");
 #if defined(ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS) && defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
-  return detail::textureSampleFloat(texture,x,y,0,false);
+  if constexpr (std::is_same<T,unsigned int>::value)
+    return detail::textureSampleUnsigned(texture,x,y,0,false);
+  else
+    return detail::textureSampleFloat(texture,x,y,0,false);
 #else
   static_assert(detail::dependentFalse<T>::value,"Ascify texture sampling requires the admitted pure-SIMT API");
   return T{};
@@ -457,9 +471,13 @@ __aicore__ ASCIFY_FORCEINLINE T tex2D(cudaTextureObject_t texture,float x,float 
 }
 template<typename T>
 __aicore__ ASCIFY_FORCEINLINE T tex2DLayered(cudaTextureObject_t texture,float x,float y,int layer) {
-  static_assert(std::is_same<T,float>::value,"Ascify texture fetch supports float32 only");
+  static_assert(std::is_same<T,float>::value || std::is_same<T,unsigned int>::value,
+                "Ascify texture fetch requires float32 or unsigned int32");
 #if defined(ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS) && defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
-  return detail::textureSampleFloat(texture,x,y,layer,true);
+  if constexpr (std::is_same<T,unsigned int>::value)
+    return detail::textureSampleUnsigned(texture,x,y,layer,true);
+  else
+    return detail::textureSampleFloat(texture,x,y,layer,true);
 #else
   static_assert(detail::dependentFalse<T>::value,"Ascify texture sampling requires the admitted pure-SIMT API");
   return T{};
@@ -467,9 +485,13 @@ __aicore__ ASCIFY_FORCEINLINE T tex2DLayered(cudaTextureObject_t texture,float x
 }
 template<typename T>
 __aicore__ ASCIFY_FORCEINLINE T tex2DFast(cudaTextureObject_t texture,float x,float y) {
-  static_assert(std::is_same<T,float>::value,"Ascify texture fetch supports float32 only");
+  static_assert(std::is_same<T,float>::value || std::is_same<T,unsigned int>::value,
+                "Ascify texture fetch requires float32 or unsigned int32");
 #if defined(ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS) && defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
-  return detail::textureSampleFloat<true>(texture,x,y,0,false);
+  if constexpr (std::is_same<T,unsigned int>::value)
+    return detail::textureSampleUnsigned(texture,x,y,0,false);
+  else
+    return detail::textureSampleFloat<true>(texture,x,y,0,false);
 #else
   static_assert(detail::dependentFalse<T>::value,"Ascify texture sampling requires the admitted pure-SIMT API");
   return T{};
@@ -477,9 +499,13 @@ __aicore__ ASCIFY_FORCEINLINE T tex2DFast(cudaTextureObject_t texture,float x,fl
 }
 template<typename T>
 __aicore__ ASCIFY_FORCEINLINE T tex2DLayeredFast(cudaTextureObject_t texture,float x,float y,int layer) {
-  static_assert(std::is_same<T,float>::value,"Ascify texture fetch supports float32 only");
+  static_assert(std::is_same<T,float>::value || std::is_same<T,unsigned int>::value,
+                "Ascify texture fetch requires float32 or unsigned int32");
 #if defined(ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS) && defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
-  return detail::textureSampleFloat<true>(texture,x,y,layer,true);
+  if constexpr (std::is_same<T,unsigned int>::value)
+    return detail::textureSampleUnsigned(texture,x,y,layer,true);
+  else
+    return detail::textureSampleFloat<true>(texture,x,y,layer,true);
 #else
   static_assert(detail::dependentFalse<T>::value,"Ascify texture sampling requires the admitted pure-SIMT API");
   return T{};

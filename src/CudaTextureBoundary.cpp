@@ -209,8 +209,9 @@ bool ValidateCudaTextureBoundary(clang::ASTContext &context,
           return fail(reference->getExprLoc(),"texture function is not a direct call");
         if (const auto *arguments=function->getTemplateSpecializationArgs()) {
           if (arguments->size()!=1 || arguments->get(0).getKind()!=clang::TemplateArgument::Type ||
-              !context.hasSameType(arguments->get(0).getAsType(),context.FloatTy))
-            return fail(reference->getExprLoc(),"texture template requires exact float32");
+              (!context.hasSameType(arguments->get(0).getAsType(),context.FloatTy) &&
+               !context.hasSameType(arguments->get(0).getAsType(),context.UnsignedIntTy)))
+            return fail(reference->getExprLoc(),"texture template requires exact float32 or unsigned int32");
         }
         if ((function->getName()=="tex2D" && call->getNumArgs()!=3) ||
             (function->getName()=="tex2DLayered" && call->getNumArgs()!=4))
