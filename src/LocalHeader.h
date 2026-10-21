@@ -200,6 +200,10 @@ struct LocalHeaderRewriteContext {
   // original root path using Tool.run, never runAndSave on an input file.
   const std::string *virtualInput = nullptr;
   LocalHeaderInputEvidence *inputEvidence = nullptr;
+  // Internal recursive discovery only. A deferred parse supplies evidence,
+  // never an artifact; the strict joint parse must commit the helper proof.
+  bool allowInheritedHelperDiscovery = false;
+  bool deferredInheritedHelperDiscovery = false;
   bool requireHelperTransaction = false;
   bool helperTransactionCommitted = false;
 

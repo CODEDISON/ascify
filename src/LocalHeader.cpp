@@ -1011,6 +1011,7 @@ bool ascifySourceWithLocalHeaderClosure(
   rootContext.artifactPath = plan.rootArtifactPath();
   rootContext.depth = 0;
   rootContext.inputEvidence = recursive ? &discoveryEvidence : nullptr;
+  rootContext.allowInheritedHelperDiscovery = recursive;
   bool ok = ascifySingleSource(
       mainSourceAbsPath, pathString(stagedRoot), compDB, OptionsParserPtr,
       ascify_exe, mainSourceAbsPath, false, &rootContext);
@@ -1019,6 +1020,14 @@ bool ascifySourceWithLocalHeaderClosure(
                  << "Local-header root staging failed: "
                  << (plan.failed() ? plan.failureReason() : mainSourceAbsPath)
                  << "\n";
+    llvm::sys::fs::remove_directories(stagingRoot);
+    return false;
+  }
+
+  if (rootContext.deferredInheritedHelperDiscovery &&
+      (!recursive || plan.inheritedHelperHeaders().empty())) {
+    llvm::errs() << sAscify << sError
+                 << "Deferred helper discovery has no joint transaction\n";
     llvm::sys::fs::remove_directories(stagingRoot);
     return false;
   }
@@ -1052,10 +1061,16 @@ bool ascifySourceWithLocalHeaderClosure(
       originalContext.artifactPath = originalPlan.rootArtifactPath();
       originalContext.virtualInput = &originalInput;
       originalContext.inputEvidence = &originalEvidence;
+      originalContext.allowInheritedHelperDiscovery = true;
       if (!ascifySingleSource(mainSourceAbsPath, pathString(stagedRoot), compDB,
                               OptionsParserPtr, ascify_exe, mainSourceAbsPath, false,
                               &originalContext) || originalPlan.failed()) {
         plan.fail("original include-context proof parse failed");
+        return false;
+      }
+      if (originalContext.deferredInheritedHelperDiscovery !=
+          rootContext.deferredInheritedHelperDiscovery) {
+        plan.fail("inherited helper discovery state changed during proof parse");
         return false;
       }
       // The parse used this saved buffer, not a fresh read in FileChanged.

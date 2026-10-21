@@ -59,9 +59,9 @@ def main():
             PREFIX+OPEN+BODY+FOOTER, []),
         ('standalone_header_badfield', False, HELPER+'#include "record.cuh"\n'+TAIL,
             PREFIX+OPEN+BODY.replace('DWord length','float length')+FOOTER, []),
-        # Preserve the previous complete fixture as an explicit conservative
-        # refusal: pack plus a non-main helper expansion is not yet admitted.
-        ('context_helper_outside_main', False, HELPER+'#include "record.cuh"\nint main(){checked();return sizeof(FileRecord)==14?0:1;}\n',
+        # Discovery publishes no edits; the contextual reparse must prove
+        # the complete helper transaction and the same packed layout.
+        ('context_helper_outside_main', True, HELPER+'#include "record.cuh"\nint main(){checked();return sizeof(FileRecord)==14?0:1;}\n',
             '#pragma once\n'+PREFIX+OPEN+BODY+FOOTER+'inline void checked(){getLastCudaError("context packed");}\n', []),
         ('direct_char', True, HELPER+OPEN+'struct FileRecord { char x; unsigned char y; signed char z; };\n'+RESET+TAIL, None, []),
         ('unmatched', False, HELPER+OPEN+BODY+TAIL, None, []),
@@ -138,7 +138,7 @@ def main():
                     assert BODY not in generated and 'Ascify preserved packed record' not in generated,name
                 assert BODY in proof_source or name=='direct_char',name
                 assert 'Ascify preserved packed' in proof_source and 'Ascify packed layout witness syntax' in proof_source,name
-                if name.startswith('conditional') or name=='context_once':
+                if name.startswith('conditional') or name in ('context_once','context_helper_outside_main'):
                     prefix = (PREFIX.rstrip('\n')+'\n' if name=='conditional_no_gap' else
                               PREFIX+'\n' if name=='conditional_two_gaps' else
                               PREFIX.replace('\n','\r\n')+' \t\r\n' if name=='conditional_whitespace_crlf' else PREFIX)
@@ -147,12 +147,15 @@ def main():
                 if name=='standalone_header':
                     assert PREFIX in proof_source and FOOTER in proof_source,name
                     assert 'requires the original inactive configuration' in proof_source,name
-                if name=='context_once':
+                if name in ('context_once','context_helper_outside_main'):
                     receipt=(Path(str(destination)+'.headers')/'.ascify-local-closure').read_text()
                     assert 'context_pragma_events_sha256=' in receipt,name
                     assert 'context_once_line='+str(inputs/'record.cuh')+'\t' in receipt,name
                     assert '#pragma once' not in generated,name
-                    assert 'return parent_context_value;' in generated,name
+                    if name=='context_once':
+                        assert 'return parent_context_value;' in generated,name
+                    else:
+                        assert 'ASCIFY_NVIDIA_SAMPLE_GET_LAST_CUDA_ERROR' in generated,name
                 if a.ccec:
                     obj=case/'target.o'
                     target=run([a.ccec,'-O2','-std=c++17','-x','dpp','--cce-aicore-arch=dav-c310-vec',

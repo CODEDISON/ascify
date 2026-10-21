@@ -320,6 +320,9 @@ bool ascifySingleSource(const std::string &srcPath,
         &edits, localHeaderContext, frontendCompatibility);
     if (Tool.run(&factory))
       return false;
+    if (localHeaderContext != nullptr &&
+        localHeaderContext->deferredInheritedHelperDiscovery)
+      return true; // Evidence only: no application of edits or staging output.
     auto rewritten = ct::applyAllReplacements(input, edits);
     if (!rewritten) {
       llvm::errs() << sAscify << sError << llvm::toString(rewritten.takeError())
@@ -378,6 +381,12 @@ bool ascifySingleSource(const std::string &srcPath,
                  << "Ascifying failed: " << srcPath << "\n";
     if (!SaveTemps && !preserveTemp) sys::fs::remove(tmpFile);
     return false;
+  }
+
+  if (localHeaderContext != nullptr &&
+      localHeaderContext->deferredInheritedHelperDiscovery) {
+    sys::fs::remove(tmpFile);
+    return true; // The caller must run the strict contextual transaction.
   }
 
   // Copy the tmpfile to the output

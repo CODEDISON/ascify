@@ -10721,7 +10721,10 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
 void AscifyAction::EndSourceFileAction() {
   if (cudaRuntimeApiBoundaryFailed)
     return;
-  finalizeCudaAttributeGuards();
+  const bool helperDiscovery = localHeaderContext != nullptr &&
+      localHeaderContext->deferredInheritedHelperDiscovery;
+  if (!helperDiscovery)
+    finalizeCudaAttributeGuards();
   if (localHeaderContext != nullptr && localHeaderContext->depth == 0 &&
       localHeaderContext->plan != nullptr) {
     // References include declarations in signatures and instantiated bodies.
@@ -10791,6 +10794,14 @@ void AscifyAction::EndSourceFileAction() {
                    *localHeaderContext->plan, inputEvidence);
     dependencies.TraverseDecl(
         getCompilerInstance().getASTContext().getTranslationUnitDecl());
+  }
+  if (helperDiscovery) {
+    // File-entry capture precedes the closing pack pragma. Refresh only raw
+    // closed-region metadata now; no layout witness or owned edit is emitted.
+    // The strict joint parse still proves records, macros and final edits.
+    if (packedRecords.used())
+      for (const auto file : enteredSourceFileIds) recordContextPragmaSource(file);
+    return;
   }
   finalizePendingNvidiaSampleHelperPragma();
   if (cudaDeviceSymbolGeneratedNameConflict) {
@@ -11249,6 +11260,26 @@ void AscifyAction::ExecuteAction() {
   // Reset the contextual token watcher above before any diagnostic early exit.
   if (getCompilerInstance().getDiagnostics().hasErrorOccurred())
     return;
+  // A recognized helper can be provided by a selected parent-context header.
+  // Before that header is inlined, its macro transaction cannot be proved.
+  // These two discovery parses collect original evidence only. The existing
+  // joint parse has this flag disabled and must pass every boundary below.
+  if (localHeaderContext != nullptr &&
+      localHeaderContext->allowInheritedHelperDiscovery &&
+      localHeaderContext->depth == 0 && localHeaderContext->plan != nullptr &&
+      !localHeaderContext->plan->failed() &&
+      !localHeaderContext->plan->inheritedHelperHeaders().empty() &&
+      localHeaderContext->inputEvidence != nullptr &&
+      localHeaderContext->inputEvidence->standardPreprocessing &&
+      localHeaderContext->inputEvidence->ordinaryPhysicalInput &&
+      !localHeaderContext->requireHelperTransaction && !AscifyAMAP &&
+      TargetRecipe == "none") {
+    localHeaderContext->deferredInheritedHelperDiscovery = true;
+    *replacements = ct::Replacements();
+    llvm::errs() << "Ascify contextual helper discovery: evidence only; "
+                    "strict joint transaction required\n";
+    return;
+  }
   if (cudaRuntimeApiHeaderAdmitted && !auditCudaRuntimeApiSurface()) {
     cudaRuntimeApiBoundaryFailed = true;
     return;

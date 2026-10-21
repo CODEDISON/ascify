@@ -8,6 +8,11 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Recursive inherited-helper discovery can collect original context before
+  checking helper-wrapped texture calls. Discovery emits no artifact; the
+  contextual joint conversion retains all macro, texture, layout and atomic
+  publication checks.
+
 - Experimental preservation of literal packed fixed-integer record regions,
   with configuration guards, target layout witnesses and final edit protection.
   Packed pointers, arrays, templates and arbitrary packing state remain outside
