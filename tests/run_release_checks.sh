@@ -293,6 +293,9 @@ run_check "half2 syntax and separate rounding conversion" \
   sh "$rewrite_dir/check_half2_translation.sh"
 run_check "inherited parent helper conversion boundary" \
   "$python" -B "$rewrite_dir/check_inherited_sample_helper_context.py"
+run_check "physically skipped contextual helper include boundary" \
+  "$python" -B "$rewrite_dir/check_context_skipped_includes.py"
+  "$python" -B "$rewrite_dir/check_context_literal_pragmas.py"
 run_check "quoted frozen sample-helper transaction ownership" \
   "$python" -B "$rewrite_dir/check_quoted_sample_helper.py"
 run_check "resolved device float frexp overload boundary" \

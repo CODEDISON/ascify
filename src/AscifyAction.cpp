@@ -4358,6 +4358,59 @@ bool AscifyAction::RewriteToken(clang::Lexer &, clang::Token &tok) {
   return false;
 }
 
+void AscifyAction::recordContextPragmaSource(clang::FileID file) {
+  if (localHeaderContext == nullptr || localHeaderContext->inputEvidence == nullptr)
+    return;
+  auto &source = getCompilerInstance().getSourceManager();
+  if (file.isInvalid() || source.getFileEntryForID(file) == nullptr)
+    return;
+  bool invalid = false;
+  const auto bytes = source.getBufferData(file, &invalid);
+  if (invalid) return;
+  auto &evidence = *localHeaderContext->inputEvidence;
+  const auto start = source.getLocForStartOfFile(file);
+  const auto path = contextualCanonicalPath(source.getFilename(start));
+  bool safe = true, afterHash = false;
+  unsigned hashOffset = 0;
+  std::vector<unsigned> onceLines;
+  clang::Lexer raw(start, getCompilerInstance().getLangOpts(), bytes.begin(),
+                   bytes.begin(), bytes.end());
+  clang::Token token;
+  for (;;) {
+    raw.LexFromRawLexer(token);
+    if (token.is(clang::tok::eof)) break;
+    const auto word = clang::Lexer::getSpelling(
+        token, source, getCompilerInstance().getLangOpts());
+    if (token.isAnyIdentifier() && (word == "_Pragma" || word == "__pragma"))
+      safe = false;
+    if (afterHash && (word == "line" || token.is(clang::tok::numeric_constant)))
+      evidence.hasPhysicalLineDirective = true;
+    if (afterHash && word == "pragma") {
+      const auto begin = physicalLineBegin(bytes, hashOffset);
+      const auto end = bytes.find_first_of("\r\n", begin);
+      const auto line = bytes.slice(begin, end);
+      const auto tokens = directPragmaTokens(line);
+      const bool once = hasExactDirectiveTokens(line, {"#", "pragma", "once"});
+      const bool unroll = hasExactDirectiveTokens(line, {"#", "pragma", "unroll"}) ||
+          (tokens.size() == 4 && tokens[0].spelling == "#" &&
+           tokens[1].spelling == "pragma" && tokens[2].spelling == "unroll" &&
+           !tokens[3].spelling.empty() && tokens[3].spelling.size() <= 4 &&
+           std::all_of(tokens[3].spelling.begin(), tokens[3].spelling.end(),
+                       [](char c) { return c >= '0' && c <= '9'; }));
+      if (token.needsCleaning() || line.contains('\\') || line.contains("??") ||
+          line.contains("/*") || line.contains("*/") || (!once && !unroll))
+        safe = false;
+      if (once) onceLines.push_back(begin);
+    }
+    afterHash = token.is(clang::tok::hash) && token.isAtStartOfLine();
+    if (afterHash) hashOffset = source.getFileOffset(token.getLocation());
+  }
+  if (safe && onceLines.size() <= 1 && !path.empty()) {
+    evidence.literalContextPragmaFiles.insert(path);
+    evidence.contextOnceLineOffsets[path] = std::move(onceLines);
+  }
+}
+
 void AscifyAction::FileChanged(
     clang::SourceLocation location,
     clang::PPCallbacks::FileChangeReason reason,
@@ -4387,6 +4440,7 @@ void AscifyAction::FileChanged(
     return;
   }
   enteredSourceFileIds.insert(file);
+  recordContextPragmaSource(file);
   if (frontendCompatibility.enabled() &&
       verifiedFrontendCgFile(file, getCompilerInstance(), frontendCompatibility)) {
     auto &compiler = getCompilerInstance();
@@ -4413,8 +4467,31 @@ void AscifyAction::FileChanged(
       } else {
         bool invalid = false;
         const auto contents = sourceManager.getBufferData(file, &invalid);
-        if (!invalid)
+        if (!invalid) {
           evidence.fileSha256[path] = contextualInputSha256(contents);
+          // Inlining changes include depth. A pragma hidden in an inactive
+          // depth-dependent branch must not become active without appearing
+          // in the token/macro digests. Reject raw pragma introducers too.
+          if (localHeaderContext->plan != nullptr &&
+              localHeaderContext->plan->isSelectedRootHeader(path)) {
+            clang::Lexer raw(sourceManager.getLocForStartOfFile(file),
+                getCompilerInstance().getLangOpts(), contents.begin(),
+                contents.begin(), contents.end());
+            clang::Token token;
+            bool afterHash = false;
+            for (;;) {
+              raw.LexFromRawLexer(token);
+              if (token.is(clang::tok::eof)) break;
+              const auto word = clang::Lexer::getSpelling(
+                  token, sourceManager, getCompilerInstance().getLangOpts());
+              if (token.isAnyIdentifier() &&
+                  (word == "_Pragma" || word == "__pragma" ||
+                   (afterHash && word == "pragma")))
+                evidence.pragmaFiles.insert(path);
+              afterHash = token.is(clang::tok::hash);
+            }
+          }
+        }
       }
     }
   }
@@ -4527,10 +4604,25 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
     auto &evidence = *localHeaderContext->inputEvidence;
     const auto parent = contextualRecordPathBinding(evidence, SM.getFilename(SM.getExpansionLoc(hash_loc)));
     const auto child = contextualRecordPathBinding(evidence, resolved_file_name);
-    if (!parent.empty() && !child.empty())
+    if (!parent.empty()) {
+      const auto begin = filename_range.getBegin();
+      const auto end = filename_range.getEnd();
+      bool invalid = false;
+      const auto literal = clang::Lexer::getSourceText(
+          filename_range, SM, getCompilerInstance().getLangOpts(), &invalid);
+      const bool direct = !invalid && hash_loc.isFileID() &&
+          begin.isFileID() && end.isFileID() &&
+          SM.getFileID(hash_loc) == SM.getFileID(begin) &&
+          SM.getFileID(begin) == SM.getFileID(end) &&
+          !is_angled && literal == ("\"" + file_name.str() + "\"") &&
+          module == nullptr && !getCompilerInstance().getLangOpts().Modules &&
+          includeToken.getIdentifierInfo() != nullptr &&
+          includeToken.getIdentifierInfo()->getName() == "include";
       localHeaderContext->inputEvidence->originalEdges.push_back(
           {parent, file_name.str(), child, {},
-           SM.getFileOffset(SM.getExpansionLoc(hash_loc))});
+           SM.getFileOffset(SM.getExpansionLoc(hash_loc)), 0, {}, is_angled,
+           direct, direct ? SM.getFileOffset(begin) : 0, false});
+    }
   }
   if (!is_angled && localHeaderContext != nullptr &&
       localHeaderContext->inputEvidence != nullptr) {
@@ -4576,6 +4668,14 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
       isRecognizedNvidiaSampleHelperCuda(resolved_file_name);
   if (!SM.isWrittenInMainFile(hash_loc)) {
     if (recognizedNvidiaHelper) {
+      // This is a request for a second, original-position proof, not an
+      // exception to helper provenance. The current transaction still fails.
+      // Only a selected direct local provider can become a contextual input;
+      // the joint parse must then prove the usual direct helper transaction.
+      if (localHeaderContext != nullptr && localHeaderContext->depth == 0 &&
+          localHeaderContext->plan != nullptr)
+        localHeaderContext->plan->requireInheritedHelperContext(
+            SM.getFilename(SM.getExpansionLoc(hash_loc)).str());
       nvidiaSampleHelperUnsupportedMacroUse = true;
       llvm::errs()
           << "Ascify NVIDIA sample-helper closure: recognized helper was "
@@ -4808,6 +4908,29 @@ void AscifyAction::FileSkipped(const clang::FileEntry& skippedFile,
   if (!location.isFileID())
     return;
   auto& source = getCompilerInstance().getSourceManager();
+  if (localHeaderContext != nullptr && localHeaderContext->inputEvidence != nullptr) {
+    auto &evidence = *localHeaderContext->inputEvidence;
+    const auto parent = contextualRecordPathBinding(evidence, source.getFilename(location));
+    const auto child = contextualRecordPathBinding(evidence, resolvedPath);
+    const auto previous = evidence.fileSha256.find(child);
+    const auto file = source.translateFile(&skippedFile);
+    bool invalid = false;
+    const auto contents = file.isValid()
+        ? source.getBufferData(file, &invalid) : llvm::StringRef();
+    // A pre-defined guard is not evidence of an earlier physical include.
+    // Bind the actual FileSkipped callback to a literal edge and the exact
+    // already-entered, non-overridden file bytes and physical identity.
+    if (!parent.empty() && !child.empty() && file.isValid() && !invalid &&
+        enteredSourceFileIds.count(file) != 0 &&
+        evidence.fileEntries[child] == 1 && previous != evidence.fileSha256.end() &&
+        !previous->second.empty() && previous->second == contextualInputSha256(contents) &&
+        physicalSourceFileMatches(resolvedPath, skippedFile, source)) {
+      for (auto &edge : evidence.originalEdges)
+        if (edge.parentSourcePath == parent && edge.childSourcePath == child &&
+            edge.directLiteral && edge.filenameOffset == source.getFileOffset(location))
+          edge.physicallySkipped = true;
+    }
+  }
   for (const auto& candidate : redundantCubIncludeCandidates) {
     if (candidate.filenameBegin != location ||
         candidate.resolvedPath != resolvedPath ||
@@ -4990,6 +5113,20 @@ void AscifyAction::PragmaDirective(
   const unsigned lineBegin = physicalLineBegin(buffer, offset);
   const auto lineEnd = buffer.find_first_of("\r\n", lineBegin);
   const auto physicalLine = buffer.slice(lineBegin, lineEnd);
+  if (localHeaderContext != nullptr && localHeaderContext->inputEvidence != nullptr &&
+      !hasExactDirectiveTokens(physicalLine, {"#", "pragma", "once"})) {
+    // User line directives are excluded before this evidence can authorize
+    // contextual pragma replay. Only governed flattening supplies #line maps.
+    const auto presumed = sourceManager.getPresumedLoc(fileLocation);
+    if (presumed.isInvalid()) {
+      nvidiaSampleHelperUnsupportedMacroUse = true;
+      return;
+    }
+    const std::string path = presumed.getFilename();
+    contextualPragmaEvents += std::to_string(path.size()) + ":" + path + ":" +
+        std::to_string(presumed.getLine()) + ":" +
+        std::to_string(physicalLine.size()) + ":" + physicalLine.str() + "\n";
+  }
   if (getCompilerInstance().getLangOpts().OpenMP && !Loc.isMacroID()) {
     if (sourceManager.isWrittenInMainFile(fileLocation) &&
         hasExactDirectiveTokens(physicalLine,
@@ -10998,6 +11135,14 @@ void AscifyAction::ExecuteAction() {
   // spelling includes actual __FILE__/__LINE__/__COUNTER__/include-level uses.
   std::string contextualTokens;
   if (localHeaderContext != nullptr && localHeaderContext->inputEvidence != nullptr) {
+    const auto &options = getCompilerInstance().getPreprocessorOpts();
+    const auto &language = getCompilerInstance().getLangOpts();
+    localHeaderContext->inputEvidence->ordinaryPhysicalInput =
+        !language.Modules && !language.CPlusPlusModules && options.ImplicitPCHInclude.empty() &&
+        options.PCHThroughHeader.empty() && options.PrecompiledPreambleBytes.first == 0 &&
+        !options.PrecompiledPreambleBytes.second &&
+        getCompilerInstance().getFrontendOpts().ModuleFiles.empty() &&
+        getCompilerInstance().getASTContext().getExternalSource() == nullptr;
 #if LLVM_VERSION_MAJOR >= 10
     localHeaderContext->inputEvidence->standardPreprocessing =
         !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks;
@@ -11014,6 +11159,8 @@ void AscifyAction::ExecuteAction() {
   if (localHeaderContext != nullptr && localHeaderContext->inputEvidence != nullptr) {
     PP.setTokenWatcher(nullptr);
     auto &evidence = *localHeaderContext->inputEvidence;
+    evidence.ordinaryPhysicalInput = evidence.ordinaryPhysicalInput &&
+        getCompilerInstance().getASTContext().getExternalSource() == nullptr;
     evidence.tokenSha256 = contextualInputSha256(contextualTokens);
     contextualTokens.clear();
     std::map<std::string, std::string> definitions;
@@ -11041,6 +11188,7 @@ void AscifyAction::ExecuteAction() {
       macros += std::to_string(entry.first.size()) + ":" + entry.first + ":" +
           std::to_string(entry.second.size()) + ":" + entry.second;
     evidence.macroSha256 = contextualInputSha256(macros);
+    evidence.pragmaSha256 = contextualInputSha256(contextualPragmaEvents);
   }
   auto &SM = getCompilerInstance().getSourceManager();
   // The scratch-specific parsing projection must never publish code without

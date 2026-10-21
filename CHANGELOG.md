@@ -8,6 +8,10 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Contextual local headers can retain literal unroll pragmas and normalize a
+  single pragma once after physical include-entry proof. Ordered payload and
+  position replay, unchanged inputs and atomic helper checks remain required.
+
 - Bounded `cudaMemcpy2DToArray` for non-layered scalar32 arrays, with byte-unit
   pitches, whole-element rectangles, ownership checks and real synchronous ACL
   row copies. Real-device validation remains required for this addition.
@@ -24,6 +28,10 @@ for supported domains and experimental paths.
   product cooperative-groups profile after physical-input, CUDA-control and
   device-attribute macro proofs. Concrete instances, caller templates and SDK
   layout observations retain their existing checks.
+
+- Contextual helper providers and repeated local includes proven physically
+  skipped in both original parses, preserving token/macro and atomic helper
+  proofs. Real nested entries, re-entry and opaque pragmas remain rejected.
 - Direct physical CUDA Runtime includes inside proved whole-file guards of
   selected local headers. Nested conditions, guard macro-stack operations and
   conditional root-source includes remain outside this admission rule.

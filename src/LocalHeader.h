@@ -40,6 +40,11 @@ struct LocalHeaderEdge {
   unsigned sourceOffset = 0;
   unsigned resumeLine = 0;
   std::string resumeFile;
+  // Original-context evidence only; ordinary closure edges leave defaults.
+  bool isAngled = false;
+  bool directLiteral = false;
+  unsigned filenameOffset = 0;
+  bool physicallySkipped = false;
 };
 
 // Evidence belongs to one parse of the original root include context. It is
@@ -48,11 +53,18 @@ struct LocalHeaderInputEvidence {
   bool standardPreprocessing = false;
   std::string tokenSha256;
   std::string macroSha256;
+  // Ordered literal pragma events include their full payload. Clang annotation
+  // tokens alone do not expose e.g. the count of an unroll directive.
+  std::string pragmaSha256;
+  bool hasPhysicalLineDirective = false;
+  bool ordinaryPhysicalInput = false;
   std::map<std::string, std::string> fileSha256;
   std::map<std::string, std::string> pathBindings;
   std::string changedPathBinding;
   std::map<std::string, unsigned> fileEntries;
   std::set<std::string> pragmaFiles;
+  std::set<std::string> literalContextPragmaFiles;
+  std::map<std::string, std::vector<unsigned>> contextOnceLineOffsets;
   std::set<std::string> quotedIncludeParents;
   std::vector<LocalHeaderEdge> originalEdges;
 };

@@ -101,6 +101,8 @@ private:
 
   ct::Replacements *replacements = nullptr;
   LocalHeaderRewriteContext *localHeaderContext = nullptr;
+  std::string contextualPragmaEvents;
+  void recordContextPragmaSource(clang::FileID file);
   std::set<std::string> siblingSourceMacroContextUsers;
   ascify::FrontendCompatibilityConfig frontendCompatibility;
   std::set<unsigned> rewrittenFrontendHostMathOffsets;

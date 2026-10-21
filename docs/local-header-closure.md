@@ -62,13 +62,15 @@ no quoted includes of its own; otherwise it uses ordinary recursive closure
 parsing. This avoids mistaking a self-contained header's own included provider
 for an inherited sibling dependency. Macro observations are deferred until the
 original preprocessing pass completes, so later quoted includes are considered.
-The original root-defined dependency rule and contextual leaf checks remain
-unchanged: a non-leaf that genuinely needs a root definition is still rejected.
+The original root-defined dependency rule remains separate from this sibling
+rule. A non-leaf that genuinely needs a root definition is rejected unless it
+satisfies the physically skipped helper-context rule below.
 
 This path requires standard preprocessing (`--default-preprocessor`), no
 `--amap`, and no target recipe. A candidate must have exactly one direct literal
-include on its own line, one file entry, a final newline, no nested quoted
-include and no pragma. A virtual expansion uses `#line` to retain source
+include on its own line, one file entry, a final newline and no pragma
+(including raw pragma introducers in inactive branches). Nested quoted includes
+normally remain outside the boundary. A virtual expansion uses `#line` to retain source
 locations, then a second parse must produce the same expanded token digest and
 final macro-state digest as the original complete translation unit. Builtins
 such as the include level and counter can make that proof fail. Input bytes,
@@ -82,6 +84,51 @@ regression](../tests/rewrite/check_parent_source_context.py) and [helper context
 regression](../tests/rewrite/check_inherited_sample_helper_context.py). This proof
 preserves source context; it does not establish target API support or device
 correctness.
+
+For a joint helper transaction, a selected direct local header may itself
+provide the recognized helper include. It is expanded at its original position;
+the helper is still accepted only by the existing direct-include provenance and
+atomic transaction proof in the joint parse.
+
+A nested quoted include in this context is admitted only when Clang reports
+`FileSkipped` in both discovery and original-context parses. The resolved file
+must have exactly one actual physical entry, unchanged bytes, and the same
+physical identity and path binding. Every additional incoming edge to an
+inlined provider must be such a skipped nested edge; repeated direct root
+includes are still rejected. Each skipped directive must occupy one literal
+physical line without continuation, macro include or extra tokens. Only those
+directives are replaced by spaces in the virtual input, retaining newlines and
+avoiding a new relative lookup from the root. Token and final macro equivalence,
+input revalidation and the helper transaction remain mandatory. A pre-defined
+guard, a real nested entry, re-entry, opaque pragma or unproved skip does not
+qualify. The marker records the original skipped edges. See the
+[frontend regression](../tests/rewrite/check_context_skipped_includes.py).
+
+## Literal pragmas in contextual headers
+
+A contextual header may contain one literal `#pragma once`, plus literal
+`#pragma unroll` directives with an optional decimal count. Its complete raw
+input, including inactive branches, must contain no other pragmas, macro pragma
+operators, continued directives or macro count. Every selected input must be
+ordinary physical preprocessing, without modules, PCH, precompiled preambles or
+an external AST source. User `#line` and GNU line directives anywhere in entered
+physical inputs prevent this new admission because they could spoof pragma
+position evidence. Existing pragma-free context rules are unaffected.
+
+The unique original entry and every skipped re-entry must pass the existing
+include proof in both original parses. Only the exact once line is blanked in
+the virtual input, preserving line boundaries; original files stay unchanged.
+All non-once active pragma events have an ordered digest of their complete
+physical line and presumed source location. This digest must match discovery,
+original and joint parsing, alongside expanded tokens, final macros and input
+identity. The payload digest is necessary because annotation tokens do not
+expose an unroll count. The published marker identifies only normalized once
+lines from actual inlined headers. Unknown pragmas remain rejected.
+
+[Focused cases](../tests/rewrite/check_context_literal_pragmas.py) validate
+original CUDA syntax before conversion and check atomic rejection with both
+fresh and pre-existing output. This rule supplies a context prerequisite; it
+does not admit packed records or claim a complete Sample passed.
 
 ## Runtime API includes inside a header guard
 
