@@ -128,7 +128,7 @@ lines from actual inlined headers. Unknown pragmas remain rejected.
 [Focused cases](../tests/rewrite/check_context_literal_pragmas.py) validate
 original CUDA syntax before conversion and check atomic rejection with both
 fresh and pre-existing output. This rule supplies a context prerequisite; it
-does not admit packed records or claim a complete Sample passed.
+does not by itself admit packed records or claim a complete Sample passed.
 
 ## Runtime API includes inside a header guard
 
@@ -162,3 +162,45 @@ one-shot filesystem failure to exercise root publish failure and checked
 rollback-rename retry, then verifies byte-identical inputs/old outputs and no
 transaction-backup leak.  These tests prove publication behavior only; they do
 not establish target compilation, device correctness or crash recovery.
+
+## Preserved packed integer records (experimental)
+
+A separate proof can preserve literal `#pragma pack(1)` regions followed by a
+same-file literal `#pragma pack()`. The input must start with ordinary default
+packing options, without serialized AST inputs, PCH, modules or preambles.
+Unknown pragma failures remain failures. Includes, file transitions, nested
+regions and unowned raw pack directives, even in inactive source, reject the
+new proof. Macro pragma construction and cleaned tokens are excluded from a
+file that supplies an admitted region.
+
+The region contains only plain global structs and typedefs of 8/16/32-bit
+integer scalars. Macro-derived declarations, pointers, arrays, initializers,
+bitfields, methods, base classes, dependent records and source attributes are
+excluded. The original AST must show one-byte packing and contiguous field
+layout. All original record and pragma bytes remain unchanged. Target
+`static_assert` witnesses check record size/alignment, every field offset,
+width and signedness, including plain `char`. Both original insertion-time
+macro checks and immediately adjacent target guards protect generated witness
+syntax from macro replacement.
+
+A common conditional footer is allowed: a disjunction of `defined(NAME)` terms
+selects an inactive `pack(pop)` branch and an active `pack()` branch. Those names
+must all be undefined at the actual source points. An optional preceding
+conditional `pack(push)` must use the identical condition. The original branches
+remain intact; an error guard immediately before `pack(1)` prevents target
+headers or flags from activating the other configuration. No platform or sample
+name grants permission.
+
+The final replacement set, including helper edits, token rewrites and generated
+includes, is checked against the complete protected interval and its insertion
+boundaries. Only the proof-owned guard and post-region witnesses may be added.
+Physical path aliases cannot bypass this check. Publication is transactional.
+When such a header also requires inherited context, only region-owned raw pack
+lines join the literal once/unroll context proof; complete ordered pragma,
+token, macro, input and skipped-edge checks still apply.
+
+The [focused matrix](../tests/rewrite/check_packed_record_conversion.py) validates
+original source syntax before every conversion, preserves old outputs on
+rejection, and can compile all positive outputs with actual CCEC. This source
+feature is still awaiting those checks and complete original DCT verification;
+it is not a new numeric Sample result.

@@ -44,6 +44,12 @@ cl::opt<std::string> CudaPath("cuda-path",
   cl::value_desc("directory"),
   cl::cat(ToolTemplateCategory));
 
+cl::opt<std::string> InputLanguage("input-language",
+  cl::desc("Input language: auto (explicit compiler -x, otherwise CUDA), cuda or c++"),
+  cl::value_desc("language"),
+  cl::init("auto"),
+  cl::cat(ToolTemplateCategory));
+
 cl::opt<bool> SaveTemps("save-temps",
   cl::desc("Save temporary files"),
   cl::value_desc("save-temps"),
@@ -207,6 +213,7 @@ const std::vector<std::string> ascifyOptions {
 };
 
 const std::vector<std::string> ascifyOptionsWithTwoArgs {
+  std::string(InputLanguage.ArgStr),
   std::string(OutputDir.ArgStr),
   std::string(OutputStatsFilename.ArgStr),
   std::string(TemporaryDir.ArgStr),

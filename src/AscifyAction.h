@@ -37,6 +37,7 @@ THE SOFTWARE.
 #include "DavC310TargetRecipe.h"
 #include "CudaVec3AbiBoundary.h"
 #include "ReplacementsFrontendActionFactory.h"
+#include "PackedRecordBoundary.h"
 #include "Statistics.h"
 
 namespace ct = clang::tooling;
@@ -102,6 +103,8 @@ private:
   ct::Replacements *replacements = nullptr;
   LocalHeaderRewriteContext *localHeaderContext = nullptr;
   std::string contextualPragmaEvents;
+  ascify::PackedRecordBoundary packedRecords;
+  bool finalizePackedRecordEdits(const std::vector<ct::Replacement> &owned);
   void recordContextPragmaSource(clang::FileID file);
   std::set<std::string> siblingSourceMacroContextUsers;
   ascify::FrontendCompatibilityConfig frontendCompatibility;

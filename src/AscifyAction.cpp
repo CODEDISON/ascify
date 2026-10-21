@@ -4371,6 +4371,9 @@ void AscifyAction::recordContextPragmaSource(clang::FileID file) {
   const auto start = source.getLocForStartOfFile(file);
   const auto path = contextualCanonicalPath(source.getFilename(start));
   bool safe = true, afterHash = false;
+  evidence.literalContextPragmaFiles.erase(path);
+  evidence.contextOnceLineOffsets.erase(path);
+  const auto ownedPackLines = packedRecords.ownedPragmaLines();
   unsigned hashOffset = 0;
   std::vector<unsigned> onceLines;
   clang::Lexer raw(start, getCompilerInstance().getLangOpts(), bytes.begin(),
@@ -4397,8 +4400,10 @@ void AscifyAction::recordContextPragmaSource(clang::FileID file) {
            !tokens[3].spelling.empty() && tokens[3].spelling.size() <= 4 &&
            std::all_of(tokens[3].spelling.begin(), tokens[3].spelling.end(),
                        [](char c) { return c >= '0' && c <= '9'; }));
+      const bool ownedPack = std::find(ownedPackLines.begin(), ownedPackLines.end(),
+          std::make_pair(file, begin)) != ownedPackLines.end();
       if (token.needsCleaning() || line.contains('\\') || line.contains("??") ||
-          line.contains("/*") || line.contains("*/") || (!once && !unroll))
+          line.contains("/*") || line.contains("*/") || (!once && !unroll && !ownedPack))
         safe = false;
       if (once) onceLines.push_back(begin);
     }
@@ -4415,6 +4420,8 @@ void AscifyAction::FileChanged(
     clang::SourceLocation location,
     clang::PPCallbacks::FileChangeReason reason,
     clang::SrcMgr::CharacteristicKind fileType) {
+  if (reason == clang::PPCallbacks::EnterFile || reason == clang::PPCallbacks::ExitFile)
+    packedRecords.includeOrFileTransition();
   if (reason == clang::PPCallbacks::ExitFile) {
     if (!nvidiaSampleHelperCudaFileStack.empty())
       nvidiaSampleHelperCudaFileStack.pop_back();
@@ -4588,6 +4595,7 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
                                       clang::CharSourceRange filename_range,
                                       StringRef resolved_file_name, StringRef,
                                       StringRef, const clang::Module* module) {
+  packedRecords.includeOrFileTransition();
   std::string frontendCompatibilityError;
   if (!ascify::ValidateFrontendCompatibilityInclude(
           frontendCompatibility, file_name.str(), resolved_file_name.str(),
@@ -4904,6 +4912,7 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
 void AscifyAction::FileSkipped(const clang::FileEntry& skippedFile,
                                const clang::Token& filenameToken,
                                StringRef resolvedPath) {
+  packedRecords.includeOrFileTransition();
   const auto location = filenameToken.getLocation();
   if (!location.isFileID())
     return;
@@ -5137,6 +5146,18 @@ void AscifyAction::PragmaDirective(
     if (isFrozenOpenMPVariantPragma(physicalLine) &&
         isFrozenNativeOpenMPHeader(sourceManager, file))
       return;
+  }
+  const bool packOpen = hasExactDirectiveTokens(physicalLine, {"#", "pragma", "pack", "(", "1", ")"});
+  const bool packReset = hasExactDirectiveTokens(physicalLine, {"#", "pragma", "pack", "(", ")"});
+  if (packOpen || packReset) {
+    const bool selected = sourceManager.isWrittenInMainFile(fileLocation) ||
+        (localHeaderContext != nullptr && localHeaderContext->plan != nullptr &&
+         localHeaderContext->plan->isSelectedRootHeader(sourceManager.getFilename(fileLocation).str()));
+    const bool governedVirtual = localHeaderContext != nullptr &&
+        localHeaderContext->virtualInput != nullptr && sourceManager.isWrittenInMainFile(fileLocation) &&
+        buffer == *localHeaderContext->virtualInput;
+    if (packedRecords.pragma(getCompilerInstance(), fileLocation, packOpen, packReset,
+                             selected, governedVirtual)) return;
   }
   if (!isDirectlyAllowedHashPragma(
           line, pragmaOperation,
@@ -10823,6 +10844,16 @@ void AscifyAction::EndSourceFileAction() {
     getCompilerInstance().getDiagnostics().Report(diagnostic);
     return;
   }
+  std::vector<ct::Replacement> packedOwnedEdits;
+  if (!packedRecords.prove(getCompilerInstance(), nvidiaSampleHelperUnsupportedMacroUse,
+                           packedOwnedEdits)) {
+    const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error, "packed-record boundary: %0");
+    getCompilerInstance().getDiagnostics().Report(diagnostic) << packedRecords.error();
+    return;
+  }
+  if (packedRecords.used())
+    for (const auto file : enteredSourceFileIds) recordContextPragmaSource(file);
   finalizeNvidiaSampleHelperClosure();
   for (unsigned required:cudaTextureRequiredHelperOffsets) {
     const bool committed=std::any_of(nvidiaSampleHelperMacroCandidates.begin(),
@@ -10865,8 +10896,10 @@ void AscifyAction::EndSourceFileAction() {
                     : ascify::DavC310TargetRecipe::TargetHeader;
     includes += ">\n";
   }
-  if (includes.empty())
+  if (includes.empty()) {
+    finalizePackedRecordEdits(packedOwnedEdits);
     return;
+  }
 
   if (useSimdTargetRecipe) {
     std::string shielded;
@@ -10908,6 +10941,26 @@ void AscifyAction::EndSourceFileAction() {
                          : SM.getLocForStartOfFile(mainFile));
   ct::Replacement Rep(SM, insertLoc, 0, includes);
   insertReplacement(Rep, clang::FullSourceLoc(insertLoc, SM));
+  finalizePackedRecordEdits(packedOwnedEdits);
+}
+
+bool AscifyAction::finalizePackedRecordEdits(const std::vector<ct::Replacement> &owned) {
+  if (!packedRecords.used()) return true;
+  auto diagnose = [&](const std::string &reason) {
+    const auto id = getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error, "packed-record final edit boundary: %0");
+    getCompilerInstance().getDiagnostics().Report(id) << reason;
+    return false;
+  };
+  if (!packedRecords.auditFinalEdits(*replacements, {})) return diagnose(packedRecords.error());
+  ct::Replacements staged(*replacements);
+  for (const auto &edit : owned) {
+    std::string error;
+    if (!llcompat::insertReplacement(staged, edit, &error)) return diagnose(error);
+  }
+  if (!packedRecords.auditFinalEdits(staged, owned)) return diagnose(packedRecords.error());
+  *replacements = std::move(staged);
+  return true;
 }
 
 namespace {

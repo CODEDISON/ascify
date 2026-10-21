@@ -8,6 +8,11 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Experimental preservation of literal packed fixed-integer record regions,
+  with configuration guards, target layout witnesses and final edit protection.
+  Packed pointers, arrays, templates and arbitrary packing state remain outside
+  this proof; target compilation and complete sample validation are required.
+
 - Contextual local headers can retain literal unroll pragmas and normalize a
   single pragma once after physical include-entry proof. Ordered payload and
   position replay, unchanged inputs and atomic helper checks remain required.
@@ -32,6 +37,10 @@ for supported domains and experimental paths.
 - Contextual helper providers and repeated local includes proven physically
   skipped in both original parses, preserving token/macro and atomic helper
   proofs. Real nested entries, re-entry and opaque pragmas remain rejected.
+- Explicit host C++ input mode and compiler `-x c++` selection, retaining AST
+  translation and local-header proofs without implicit CUDA headers or CUDA
+  language predefines. The default without a language remains CUDA; conflicting
+  device options fail. See [the input contract](docs/host-cxx-input.md).
 - Direct physical CUDA Runtime includes inside proved whole-file guards of
   selected local headers. Nested conditions, guard macro-stack operations and
   conditional root-source includes remain outside this admission rule.

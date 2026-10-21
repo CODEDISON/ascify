@@ -147,6 +147,9 @@ run_check "real CUDA runtime-API header admission and refusal" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
 
+run_check "explicit host C++ input and mixed-TU contract" \
+  "$python" -B "$rewrite_dir/check_host_cxx_input.py"
+
 run_check "selected local-header Runtime guard admission and refusal" \
   "$python" -B "$rewrite_dir/check_local_runtime_api_guard.py" \
     --binary "$ASCIFY_BINARY" \
@@ -295,7 +298,13 @@ run_check "inherited parent helper conversion boundary" \
   "$python" -B "$rewrite_dir/check_inherited_sample_helper_context.py"
 run_check "physically skipped contextual helper include boundary" \
   "$python" -B "$rewrite_dir/check_context_skipped_includes.py"
+run_check "literal pragma contextual replay boundary" \
   "$python" -B "$rewrite_dir/check_context_literal_pragmas.py"
+run_check "preserved packed integer record boundary" \
+  "$python" -B "$rewrite_dir/check_packed_record_conversion.py" \
+    --binary "$ASCIFY_BINARY" --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang++}" --evidence-dir "$work_dir/packed_records"
 run_check "quoted frozen sample-helper transaction ownership" \
   "$python" -B "$rewrite_dir/check_quoted_sample_helper.py"
 run_check "resolved device float frexp overload boundary" \
