@@ -153,6 +153,14 @@ run_check "selected local-header Runtime guard admission and refusal" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
 
+run_check "authenticated Runtime profile utility patterns and instantiations" \
+  "$python" -B "$rewrite_dir/check_runtime_profile_utilities.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang++}" \
+    --evidence-dir "$work_dir/runtime_profile_utilities"
+
 run_check "frozen CUDA vec3 ABI rejection and publication boundary" \
   "$python" -B "$rewrite_dir/check_vec3_abi_boundary.py" \
     --binary "$ASCIFY_BINARY" \

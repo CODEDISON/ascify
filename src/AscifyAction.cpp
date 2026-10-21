@@ -1848,6 +1848,43 @@ static bool verifiedFrontendCgFile(
       physicalSourceFileMatches(path, *entry, source);
 }
 
+static bool verifiedForcedFrontendHostMathFile(
+    clang::FileID file, clang::CompilerInstance &compiler,
+    const ascify::FrontendCompatibilityConfig &profile) {
+  auto &source = compiler.getSourceManager();
+  if (file.isInvalid()) return false;
+  const auto *entry = source.getFileEntryForID(file);
+  const auto begin = source.getLocForStartOfFile(file);
+  const auto include = source.getIncludeLoc(file);
+  bool invalid = false;
+  const auto bytes = source.getBufferData(file, &invalid);
+  return !invalid && entry != nullptr && include.isValid() &&
+      source.getFileID(source.getSpellingLoc(include)) ==
+          compiler.getPreprocessor().getPredefinesFileID() &&
+      ascify::IsVerifiedFrontendHostMathInput(
+          profile, source.getFilename(begin).str(), bytes.str()) &&
+      physicalSourceFileMatches(source.getFilename(begin), *entry, source);
+}
+
+static bool ordinaryRuntimeProfileInput(clang::CompilerInstance &compiler) {
+  const auto &pp = compiler.getPreprocessorOpts();
+  const auto &lang = compiler.getLangOpts();
+  for (const auto &macro : pp.Macros) {
+    const llvm::StringRef definition(macro.first);
+    if (definition.split('=').first ==
+            "ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_HOST_MATH_H_" ||
+        definition.contains('\n') || definition.contains('\r'))
+      return false;
+  }
+  return lang.CUDA && !pp.RetainExcludedConditionalBlocks &&
+      !lang.Modules && !lang.CPlusPlusModules &&
+      pp.ImplicitPCHInclude.empty() && pp.PCHThroughHeader.empty() &&
+      pp.PrecompiledPreambleBytes.first == 0 &&
+      !pp.PrecompiledPreambleBytes.second &&
+      compiler.getFrontendOpts().ModuleFiles.empty() &&
+      compiler.getASTContext().getExternalSource() == nullptr;
+}
+
 static bool frontendCgMacroTokens(
     const clang::MacroInfo &macro, clang::Preprocessor &preprocessor,
     std::initializer_list<llvm::StringRef> expected, bool parameter = false) {
@@ -2000,6 +2037,19 @@ static auto runtimeHeaderMemberClass(const Member *member, long)
   if (qualifier.getKind() != Qualifier::Kind::Type)
     return {};
   return clang::QualType(qualifier.getAsType(), 0);
+}
+
+template <typename Visitor>
+static auto traverseRuntimeIdentityTypeLoc(Visitor &visitor,
+    clang::TemplateSpecializationTypeLoc type, bool qualifier, int)
+    -> decltype(visitor.TraverseTemplateSpecializationTypeLoc(type, qualifier)) {
+  return visitor.TraverseTemplateSpecializationTypeLoc(type, qualifier);
+}
+template <typename Visitor>
+static auto traverseRuntimeIdentityTypeLoc(Visitor &visitor,
+    clang::TemplateSpecializationTypeLoc type, bool, long)
+    -> decltype(visitor.TraverseTemplateSpecializationTypeLoc(type)) {
+  return visitor.TraverseTemplateSpecializationTypeLoc(type);
 }
 
 static bool requiresCudaCompatHeader(llvm::StringRef name) {
@@ -4557,6 +4607,19 @@ void AscifyAction::FileChanged(
   }
   enteredSourceFileIds.insert(file);
   if (frontendCompatibility.enabled() &&
+      verifiedForcedFrontendHostMathFile(
+          file, getCompilerInstance(), frontendCompatibility)) {
+    auto &compiler = getCompilerInstance();
+    auto &preprocessor = compiler.getPreprocessor();
+    if (compiler.getLangOpts().CUDA &&
+        !compiler.getPreprocessorOpts().RetainExcludedConditionalBlocks &&
+        trustedFrontendCgCudaControl("__CUDA__", preprocessor.getMacroInfo(
+            preprocessor.getIdentifierInfo("__CUDA__")), compiler) &&
+        trustedFrontendCgCudaControl("__CUDACC__", preprocessor.getMacroInfo(
+            preprocessor.getIdentifierInfo("__CUDACC__")), compiler))
+      verifiedFrontendHostMathEntryFileIds.insert(file.getHashValue());
+  }
+  if (frontendCompatibility.enabled() &&
       verifiedFrontendCgFile(file, getCompilerInstance(), frontendCompatibility)) {
     auto &compiler = getCompilerInstance();
     auto &preprocessor = compiler.getPreprocessor();
@@ -5049,6 +5112,27 @@ void AscifyAction::PragmaDirective(
   const clang::SourceLocation expansion =
       sourceManager.getExpansionLoc(Loc);
   if (Introducer != clang::PIK_HashPragma) {
+    if (frontendCompatibility.enabled()) {
+      auto &compiler = getCompilerInstance();
+      const auto file = expansion.isValid() ? sourceManager.getFileID(expansion)
+                                            : clang::FileID();
+      const auto *entry = file.isValid() ? sourceManager.getFileEntryForID(file)
+                                         : nullptr;
+      const auto path = expansion.isValid() ? sourceManager.getFilename(expansion)
+                                            : llvm::StringRef();
+      const bool physicalNative = expansion.isValid() && entry != nullptr &&
+          sourceManager.isInSystemHeader(expansion) &&
+          physicalSourceFileMatches(path, *entry, sourceManager) &&
+          (pathIsWithinPhysicalDirectory(path, "/usr/include") ||
+           pathIsWithinPhysicalDirectory(path, "/usr/lib/gcc"));
+      // An imported generic pragma macro can conceal a guard-stack string
+      // from caller raw tokens. Observe its actual expansion as well. Native
+      // headers retain their original ownership; caller -isystem is not proof.
+      if (!physicalNative &&
+          !cudaRuntimeApiSdkFileIds.count(file.getHashValue()) &&
+          (!file.isValid() || !isOwnedCudaCompilerInput(file, compiler)))
+        frontendHostMathGuardModified = true;
+    }
     // _Pragma/__pragma tokens are lexed from a scratch buffer.  Admit only a
     // diagnostic pragma applied inside a file that was a system header on its
     // first EnterFile callback.  The matching specialized callback below
@@ -8417,6 +8501,11 @@ void AscifyAction::MacroUndefined(
     const clang::MacroDefinition &MD) {
   if (frontendCompatibility.enabled() &&
       MacroNameTok.getIdentifierInfo() != nullptr &&
+      MacroNameTok.getIdentifierInfo()->getName() ==
+          "ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_HOST_MATH_H_")
+    frontendHostMathGuardModified = true;
+  if (frontendCompatibility.enabled() &&
+      MacroNameTok.getIdentifierInfo() != nullptr &&
       frontendCgControlName(MacroNameTok.getIdentifierInfo()->getName()) &&
       !trustedFrontendCgControlOwner(
           MacroNameTok.getIdentifierInfo()->getName(), MacroNameTok.getLocation(),
@@ -8460,6 +8549,11 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
       getCompilerInstance().getSourceManager();
   const auto definitionFile = sourceManager.getFileID(
       sourceManager.getSpellingLoc(MacroNameTok.getLocation()));
+  if (frontendCompatibility.enabled() &&
+      name == "ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_HOST_MATH_H_" &&
+      !verifiedForcedFrontendHostMathFile(
+          definitionFile, getCompilerInstance(), frontendCompatibility))
+    frontendHostMathGuardModified = true;
   if (frontendCompatibility.enabled() && frontendCgControlName(name) &&
       !trustedFrontendCgControlOwner(name, MacroNameTok.getLocation(),
                                     getCompilerInstance(), frontendCompatibility))
@@ -8760,6 +8854,18 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
             frontendCompatibility.canonicalRoot + "/cooperative_groups.h" &&
         verifiedFrontendCgFile(file, compiler, frontendCompatibility);
   };
+  const auto provedHostMathFile = [&](clang::FileID file) {
+    return ordinaryRuntimeProfileInput(compiler) && file.isValid() &&
+        !frontendHostMathGuardModified && !frontendCgControlModified &&
+        !cudaAttributeControlModified &&
+        verifiedFrontendHostMathEntryFileIds.count(file.getHashValue()) &&
+        !macroAlteredFrontendHostMathFileIds.count(file.getHashValue()) &&
+        verifiedForcedFrontendHostMathFile(file, compiler, frontendCompatibility);
+  };
+  if (frontendCompatibility.enabled() &&
+      (!ordinaryRuntimeProfileInput(compiler) || frontendHostMathGuardModified ||
+       verifiedFrontendHostMathEntryFileIds.empty()))
+    return reject({}, "unproved forced host-math preprocessing", "host_math.h");
   for (const auto &observation : cudaRuntimeApiCgMacroObservations) {
     if (!provedCgFile(observation.file))
       return reject(observation.location,
@@ -8867,6 +8973,10 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
             frontendCompatibility.canonicalRoot + "/cooperative_groups.h" &&
         verifiedFrontendCgFile(file, compiler, frontendCompatibility))
       inputFiles.insert(file);
+  // Extend O only by independently authenticated forced host-math entries H.
+  // In particular, do not rescan arbitrary native/compiler/synthetic entries.
+  for (const auto file : enteredSourceFileIds)
+    if (provedHostMathFile(file)) inputFiles.insert(file);
   for (const auto file : inputFiles) {
     if (file.isInvalid() || cudaRuntimeApiSdkFileIds.count(file.getHashValue()))
       continue;
@@ -8892,6 +9002,7 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
     if (invalid)
       return reject(begin, "cannot audit retained file", source.getFilename(begin));
     const bool frozenCg = provedCgFile(file);
+    const bool frozenHostMath = provedHostMathFile(file);
     const auto provedCgControlToken = [&](llvm::StringRef name,
                                           clang::SourceLocation location) {
       if (!frozenCg) return false;
@@ -8907,6 +9018,16 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
               line == "#if defined(__CUDACC__) || defined(__CUDA__)") ||
           (name == "__device__" &&
            line == "#define ASCIFY_FRONTEND_COMPAT_DEVICE_ __device__");
+    };
+    const auto provedHostMathControlToken = [&](llvm::StringRef name,
+                                                clang::SourceLocation location) {
+      if (!frozenHostMath || (name != "__CUDACC__" && name != "__CUDA__"))
+        return false;
+      const auto offset = source.getFileOffset(location);
+      const auto start = data.rfind('\n', offset), end = data.find('\n', offset);
+      return data.slice(start == llvm::StringRef::npos ? 0 : start + 1,
+                        end == llvm::StringRef::npos ? data.size() : end) ==
+          "#if defined(__CUDACC__) || defined(__CUDA__)";
     };
     clang::Lexer lexer(begin, compiler.getLangOpts(), data.begin(), data.begin(), data.end());
     clang::Token token;
@@ -8925,6 +9046,13 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
         pragmaOperand = false;
       if (token.isAnyIdentifier()) {
         const auto name = clang::Lexer::getSpelling(token, source, compiler.getLangOpts());
+        if (frontendCompatibility.enabled() && !frozenHostMath &&
+            name == "ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_HOST_MATH_H_")
+          return reject(token.getLocation(), "observes forced host-math control", name);
+        if (frontendCompatibility.enabled() && !physicalNativeSystemHeader &&
+            (name == "_Pragma" || name == "__pragma" ||
+             name == "push_macro" || name == "pop_macro"))
+          return reject(token.getLocation(), "unproved forced host-math macro-stack surface", name);
         if (name == "_Pragma" || name == "__pragma")
           pragmaOperand = true;
         if (directive && name == "pragma")
@@ -8947,7 +9075,8 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
         const bool provedFalseNativeCondition = physicalNativeSystemHeader &&
             directive && name == "__CUDACC__" &&
             isFalseNativeStrictCondition(data, source.getFileOffset(token.getLocation()));
-        const bool provedCgControl = provedCgControlToken(name, token.getLocation());
+        const bool provedCgControl = provedCgControlToken(name, token.getLocation()) ||
+            provedHostMathControlToken(name, token.getLocation());
         if (!provedFalseNativeCondition && !provedCgControl &&
             isSdkMacro(name) && (directive || !admittedCodeMacro(name)))
           return reject(token.getLocation(), "observes removed SDK macro", name);
@@ -8964,6 +9093,10 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
           return reject(token.getLocation(), "unproved retained macro dependency", name);
       } else if ((directive || pragmaOperand) && token.is(clang::tok::string_literal)) {
         const auto literal = clang::Lexer::getSpelling(token, source, compiler.getLangOpts());
+        if (frontendCompatibility.enabled() && !frozenHostMath &&
+            literal.find("ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_HOST_MATH_H_") !=
+                std::string::npos)
+          return reject(token.getLocation(), "observes forced host-math control in string", literal);
         if ((pragmaOperand || pragmaDirective) && !physicalNativeSystemHeader &&
             literal.find('\\') != std::string::npos)
           return reject(token.getLocation(), "unproved escaped pragma string", literal);
@@ -8987,6 +9120,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
   std::set<unsigned> auditedFiles, nativeFiles;
   std::set<unsigned> frozenTextureUtilityFiles;
   std::set<unsigned> frozenTextureCgFiles;
+  std::set<unsigned> frozenRuntimePatternFiles;
   // A physical file may be entered more than once with different include
   // parents or macro contexts. translateFile returns only its first FileID;
   // retain that inventory, but audit every observed inclusion independently.
@@ -9000,6 +9134,25 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
         isOwnedCudaCompilerInput(file, compiler, textureOnly)) continue;
     auditedFiles.insert(file.getHashValue());
     const auto begin = source.getLocForStartOfFile(file);
+    if (!textureOnly && ordinaryRuntimeProfileInput(compiler) &&
+        !frontendCgControlModified && !cudaAttributeControlModified) {
+      if (!frontendHostMathGuardModified &&
+          verifiedFrontendHostMathEntryFileIds.count(file.getHashValue()) &&
+          !macroAlteredFrontendHostMathFileIds.count(file.getHashValue()) &&
+          verifiedForcedFrontendHostMathFile(file, compiler, frontendCompatibility))
+        frozenRuntimePatternFiles.insert(file.getHashValue());
+      // Full Runtime admission uses only the main CG header whose macro/raw
+      // provenance was proved by auditCudaRuntimeApiSurface. reduce.h remains
+      // outside this rule even though the texture-only projection admits it.
+      if (verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
+          !macroAlteredFrontendCgFileIds.count(file.getHashValue()) &&
+          source.getFilename(begin) ==
+              frontendCompatibility.canonicalRoot + "/cooperative_groups.h" &&
+          verifiedFrontendCgFile(file, compiler, frontendCompatibility)) {
+        frozenRuntimePatternFiles.insert(file.getHashValue());
+        frozenTextureCgFiles.insert(file.getHashValue());
+      }
+    }
     if (textureOnly) {
       if (frozenNvidiaSampleHelperFileRole(source, begin) != 0)
         frozenTextureUtilityFiles.insert(file.getHashValue());
@@ -9056,14 +9209,110 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
                 const std::set<unsigned> &sdk,
                 const std::set<unsigned> &audited,
                 const std::set<unsigned> &native, const std::set<unsigned> &frozenTextureUtilityFiles,
-                const std::set<unsigned> &frozenTextureCgFiles, bool textureOnly)
+                const std::set<unsigned> &frozenTextureCgFiles,
+                const std::set<unsigned> &frozenRuntimePatternFiles, bool textureOnly)
         : context(context), source(source), sdk(sdk), audited(audited), native(native), frozenTextureUtilityFiles(frozenTextureUtilityFiles),
           frozenTextureCgFiles(frozenTextureCgFiles),
+          frozenRuntimePatternFiles(frozenRuntimePatternFiles),
           textureOnly(textureOnly) {}
     bool shouldVisitTemplateInstantiations() const { return true; }
     bool shouldVisitImplicitCode() const { return true; }
+    bool TraverseDecl(clang::Decl *declaration) {
+      const auto savedPatterns = runtimePatternDepth;
+      const auto savedInstances = runtimeInstanceDepth;
+      const auto savedParameters = runtimePatternParameters.size();
+      const auto savedCopiedParts = runtimeCopiedPatternParts.size();
+      if (declaration != nullptr && !textureOnly) {
+        // A concrete class can still contain an uninstantiated member
+        // template. Only its proved parameter declarations and exact primary
+        // FunctionDecl enter this scope, never its specialization collection.
+        const bool copiedPatternPart =
+            std::find(runtimeCopiedPatternParts.begin(),
+                      runtimeCopiedPatternParts.end(), declaration) !=
+            runtimeCopiedPatternParts.end();
+        if (copiedPatternPart) {
+          runtimeInstanceDepth = 0;
+          ++runtimePatternDepth;
+        }
+        if (const auto *member = llvm::dyn_cast<clang::FunctionTemplateDecl>(declaration))
+          if (provedCopiedRuntimeMemberPattern(member)) {
+            runtimeCopiedPatternParts.push_back(member->getTemplatedDecl());
+            for (const auto *parameter : *member->getTemplateParameters())
+              runtimeCopiedPatternParts.push_back(parameter);
+          }
+        const auto location = declaration->getLocation();
+        const bool writtenPattern = location.isFileID() &&
+            frozenRuntimePatternFiles.count(
+                source.getFileID(location).getHashValue());
+        if (const auto *partial = llvm::dyn_cast<
+                clang::ClassTemplatePartialSpecializationDecl>(declaration)) {
+          if (writtenPattern && partial->getInstantiatedFromMember() == nullptr)
+            ++runtimePatternDepth;
+          else
+            ++runtimeInstanceDepth;
+        } else if (llvm::isa<clang::ClassTemplateSpecializationDecl>(declaration) ||
+                   llvm::isa<clang::VarTemplateSpecializationDecl>(declaration)) {
+          ++runtimeInstanceDepth;
+        } else if (writtenPattern &&
+                   (llvm::isa<clang::FunctionTemplateDecl>(declaration) ||
+                    llvm::isa<clang::ClassTemplateDecl>(declaration))) {
+          ++runtimePatternDepth;
+        }
+        if (const auto *function = llvm::dyn_cast<clang::FunctionDecl>(declaration))
+          if (!copiedPatternPart &&
+              (function->getTemplateSpecializationKind() != clang::TSK_Undeclared ||
+               function->getInstantiatedFromMemberFunction() != nullptr))
+            ++runtimeInstanceDepth;
+        const clang::TemplateParameterList *parameters = nullptr;
+        if (writtenPattern) {
+          if (const auto *partial = llvm::dyn_cast<
+                  clang::ClassTemplatePartialSpecializationDecl>(declaration))
+            parameters = partial->getTemplateParameters();
+          else if (const auto *pattern = llvm::dyn_cast<clang::TemplateDecl>(declaration))
+            parameters = pattern->getTemplateParameters();
+        }
+        if (parameters != nullptr)
+          for (const auto *parameter : *parameters)
+            if (const auto *type = llvm::dyn_cast<clang::TemplateTypeParmDecl>(parameter))
+              runtimePatternParameters.push_back(type);
+      }
+      // Source locations of instantiated declarations still point into the
+      // product header. They must not inherit the written-pattern exception.
+      const bool accepted =
+          clang::RecursiveASTVisitor<RecordAudit>::TraverseDecl(declaration);
+      runtimePatternDepth = savedPatterns;
+      runtimeInstanceDepth = savedInstances;
+      runtimePatternParameters.resize(savedParameters);
+      runtimeCopiedPatternParts.resize(savedCopiedParts);
+      return accepted;
+    }
+    bool TraverseTemplateSpecializationTypeLoc(
+        clang::TemplateSpecializationTypeLoc type) {
+      return TraverseTemplateSpecializationTypeLoc(type, true);
+    }
+    bool TraverseTemplateSpecializationTypeLoc(
+        clang::TemplateSpecializationTypeLoc type, bool qualifier) {
+      const auto savedArguments = runtimeIdentityArguments.size();
+      clang::SourceLocation argument;
+      const clang::TagDecl *record = nullptr;
+      if (provedRuntimeIdentityArgument(type, argument, record))
+        runtimeIdentityArguments.emplace_back(argument.getRawEncoding(), record);
+      auto &base = static_cast<clang::RecursiveASTVisitor<RecordAudit> &>(*this);
+      const bool accepted = traverseRuntimeIdentityTypeLoc(base, type, qualifier, 0);
+      runtimeIdentityArguments.resize(savedArguments);
+      return accepted;
+    }
     bool VisitNamespaceDecl(clang::NamespaceDecl *declaration) {
       const auto location = source.getExpansionLoc(declaration->getLocation());
+      if (!textureOnly && location.isValid() &&
+          frozenRuntimePatternFiles.count(source.getFileID(location).getHashValue()) &&
+          declaration->getName() == "ascify_frontend_compat_detail" &&
+          !declaration->getDeclContext()->isTranslationUnit()) {
+        badLocation = location;
+        badName = "ascify_frontend_compat_detail";
+        badReason = "forced host-math header included outside translation-unit namespace";
+        return false;
+      }
       if (location.isValid() &&
           frozenTextureCgFiles.count(source.getFileID(location).getHashValue()) &&
           declaration->getName() == "cooperative_groups" &&
@@ -9327,6 +9576,204 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     std::string badName;
     std::string badReason = "unproved SDK record ABI";
   private:
+    bool ownedRuntimeCgDeclaration(const clang::Decl *declaration) const {
+      if (declaration == nullptr || !declaration->getLocation().isFileID())
+        return false;
+      const auto file = source.getFileID(declaration->getLocation()).getHashValue();
+      return frozenRuntimePatternFiles.count(file) && frozenTextureCgFiles.count(file);
+    }
+    bool provedCopiedRuntimeMemberPattern(
+        const clang::FunctionTemplateDecl *member) const {
+      if (textureOnly || !ownedRuntimeCgDeclaration(member) ||
+          member->isMemberSpecialization())
+        return false;
+      const auto *origin = member->getInstantiatedFromMemberTemplate();
+      // One class-instantiation step is the admitted domain. Do not infer
+      // ownership from a shared spelling location or chase arbitrary chains.
+      if (origin == nullptr || origin == member ||
+          origin->getInstantiatedFromMemberTemplate() != nullptr ||
+          origin->isMemberSpecialization() || !ownedRuntimeCgDeclaration(origin))
+        return false;
+      const auto *owner = llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(
+          member->getDeclContext());
+      const auto *originOwner = llvm::dyn_cast<clang::CXXRecordDecl>(
+          origin->getDeclContext());
+      if (owner == nullptr || originOwner == nullptr ||
+          owner->getSpecializationKind() != clang::TSK_ImplicitInstantiation ||
+          !originOwner->isDependentContext() ||
+          !ownedRuntimeCgDeclaration(owner) || !ownedRuntimeCgDeclaration(originOwner))
+        return false;
+      const auto *ownerPattern = owner->getTemplateInstantiationPattern();
+      if (ownerPattern == nullptr ||
+          ownerPattern->getCanonicalDecl() != originOwner->getCanonicalDecl())
+        return false;
+      // A partial specialization has a separate record redeclaration chain.
+      // Authenticate the primary template as well: a caller redeclaration of
+      // that template must not disappear behind an owned partial pattern.
+      const auto *primary = owner->getSpecializedTemplate();
+      if (!ownedRuntimeCgDeclaration(primary))
+        return false;
+      for (const auto *redecl : primary->redecls()) {
+        if (!ownedRuntimeCgDeclaration(redecl))
+          return false;
+        const auto *primaryRecord = llvm::dyn_cast<clang::CXXRecordDecl>(
+            redecl->getTemplatedDecl());
+        if (!ownedRuntimeCgDeclaration(primaryRecord))
+          return false;
+        for (const auto *record : primaryRecord->redecls())
+          if (!ownedRuntimeCgDeclaration(record))
+            return false;
+      }
+      for (const auto *record : {static_cast<const clang::CXXRecordDecl *>(owner),
+                                 originOwner})
+        for (const auto *redecl : record->redecls())
+          if (!ownedRuntimeCgDeclaration(redecl))
+            return false;
+      for (const auto *pattern : {member, origin}) {
+        for (const auto *redecl : pattern->redecls())
+          if (!ownedRuntimeCgDeclaration(redecl) || redecl->isMemberSpecialization())
+            return false;
+        const auto *function = pattern->getTemplatedDecl();
+        if (!ownedRuntimeCgDeclaration(function) ||
+            function->getDescribedFunctionTemplate() != pattern ||
+            function->getTemplateSpecializationKind() != clang::TSK_Undeclared ||
+            !function->getType()->isDependentType())
+          return false;
+        for (const auto *redecl : function->redecls())
+          if (!ownedRuntimeCgDeclaration(redecl) ||
+              redecl->getTemplateSpecializationKind() != clang::TSK_Undeclared)
+            return false;
+      }
+      const auto *parameters = member->getTemplateParameters();
+      const auto *originalParameters = origin->getTemplateParameters();
+      if (parameters->size() == 0 || parameters->size() != originalParameters->size() ||
+          member->getLocation() != origin->getLocation())
+        return false;
+      for (unsigned i = 0; i < parameters->size(); ++i)
+        if (!ownedRuntimeCgDeclaration(parameters->getParam(i)) ||
+            !ownedRuntimeCgDeclaration(originalParameters->getParam(i)) ||
+            parameters->getParam(i)->getKind() != originalParameters->getParam(i)->getKind() ||
+            parameters->getParam(i)->getLocation() != originalParameters->getParam(i)->getLocation())
+          return false;
+      return true;
+    }
+    bool literalRuntimeCgToken(clang::SourceLocation location,
+                               llvm::StringRef spelling,
+                               clang::FileID file) const {
+      if (!location.isFileID() || source.getFileID(location) != file ||
+          !frozenRuntimePatternFiles.count(file.getHashValue()) ||
+          !frozenTextureCgFiles.count(file.getHashValue()))
+        return false;
+      clang::Token token;
+      if (clang::Lexer::getRawToken(location, token, source,
+                                   context.getLangOpts(), true) ||
+          token.isNot(clang::tok::raw_identifier) || token.needsCleaning() ||
+          token.getRawIdentifier() != spelling)
+        return false;
+      return token.getLocation() == location;
+    }
+    bool provedRuntimeIdentityArgument(clang::TemplateSpecializationTypeLoc type,
+                                       clang::SourceLocation &argument,
+                                       const clang::TagDecl *&record) const {
+      // The owned CG pattern names uint4 only as a lane-type equality selector.
+      // It does not instantiate a layout. Permit this exact argument during
+      // this TypeLoc traversal, never the template body or future instances.
+      if (textureOnly || runtimePatternDepth == 0 || runtimeInstanceDepth != 0 ||
+          type.getNumArgs() != 2 || !type.getType()->isDependentType() ||
+          !type.getTemplateNameLoc().isFileID())
+        return false;
+      const auto file = source.getFileID(type.getTemplateNameLoc());
+      if (!literalRuntimeCgToken(type.getTemplateNameLoc(), "is_same", file))
+        return false;
+      const auto *identity = llvm::dyn_cast_or_null<clang::ClassTemplateDecl>(
+          type.getTypePtr()->getTemplateName().getAsTemplateDecl());
+      if (identity == nullptr || identity->getName() != "is_same" ||
+          !identity->getDeclContext()->isStdNamespace())
+        return false;
+      for (const auto *declaration : identity->redecls()) {
+        const auto location = declaration->getLocation();
+        if (!location.isFileID() ||
+            !native.count(source.getFileID(location).getHashValue()))
+          return false;
+      }
+      const auto first = type.getArgLoc(0);
+      const auto second = type.getArgLoc(1);
+      if (first.getArgument().getKind() != clang::TemplateArgument::Type ||
+          second.getArgument().getKind() != clang::TemplateArgument::Type ||
+          first.getTypeSourceInfo() == nullptr || second.getTypeSourceInfo() == nullptr)
+        return false;
+      const auto parameterLoc = first.getTypeSourceInfo()->getTypeLoc().
+          getAs<clang::TemplateTypeParmTypeLoc>();
+      const auto argumentLoc = second.getTypeSourceInfo()->getTypeLoc();
+      const auto recordLoc = argumentLoc.getAs<clang::RecordTypeLoc>();
+      const auto aliasLoc = argumentLoc.getAs<clang::TypedefTypeLoc>();
+      const clang::RecordDecl *declaration = nullptr;
+      clang::SourceLocation recordUse;
+      if (!recordLoc.isNull() &&
+          llvm::isa<clang::RecordType>(second.getArgument().getAsType().getTypePtr())) {
+        declaration = recordLoc.getTypePtr()->getDecl();
+        recordUse = recordLoc.getBeginLoc();
+      } else if (!aliasLoc.isNull() &&
+                 llvm::isa<clang::TypedefType>(second.getArgument().getAsType().getTypePtr())) {
+        // CUDA also writes `typedef struct uint4 uint4` in its physical
+        // vector_types.h. This is a single authenticated SDK spelling layer,
+        // not permission to desugar a caller alias or arbitrary typedef chain.
+        const auto *alias = llvm::dyn_cast<clang::TypedefDecl>(
+            aliasLoc.getTypePtr()->getDecl());
+        if (alias == nullptr || alias->getName() != "uint4" ||
+            !alias->getDeclContext()->getRedeclContext()->isTranslationUnit() ||
+            alias->getTypeSourceInfo() == nullptr ||
+            alias->getUnderlyingType().hasLocalQualifiers() ||
+            !llvm::isa<clang::RecordType>(alias->getUnderlyingType().getTypePtr()))
+          return false;
+        const auto underlying = alias->getTypeSourceInfo()->getTypeLoc().
+            getAs<clang::RecordTypeLoc>();
+        if (underlying.isNull() || !underlying.getBeginLoc().isFileID() ||
+            !sdk.count(source.getFileID(underlying.getBeginLoc()).getHashValue()))
+          return false;
+        for (const auto *redecl : alias->redecls()) {
+          const auto location = redecl->getLocation();
+          if (!location.isFileID() ||
+              !sdk.count(source.getFileID(location).getHashValue()))
+            return false;
+        }
+        declaration = underlying.getTypePtr()->getDecl();
+        recordUse = aliasLoc.getBeginLoc();
+      }
+      if (parameterLoc.isNull() || declaration == nullptr ||
+          first.getArgument().getAsType().hasLocalQualifiers() ||
+          second.getArgument().getAsType().hasLocalQualifiers() ||
+          !llvm::isa<clang::TemplateTypeParmType>(first.getArgument().getAsType().getTypePtr()))
+        return false;
+      const auto *parameter = parameterLoc.getTypePtr()->getDecl();
+      if (parameter == nullptr || parameter->isParameterPack() ||
+          std::find(runtimePatternParameters.begin(), runtimePatternParameters.end(),
+                    parameter) == runtimePatternParameters.end() ||
+          !literalRuntimeCgToken(parameter->getLocation(), parameter->getName(), file) ||
+          !literalRuntimeCgToken(parameterLoc.getBeginLoc(), parameter->getName(), file))
+        return false;
+      const auto *definition = declaration->getDefinition();
+      if (definition == nullptr || declaration->getName() != "uint4" ||
+          !declaration->getDeclContext()->getRedeclContext()->isTranslationUnit() ||
+          !definition->getLocation().isFileID() ||
+          !sdk.count(source.getFileID(definition->getLocation()).getHashValue()) ||
+          !literalRuntimeCgToken(recordUse, "uint4", file) ||
+          second.getLocation() != recordUse)
+        return false;
+      for (const auto *redeclaration : declaration->redecls()) {
+        const auto location = redeclaration->getLocation();
+        if (!location.isFileID()) return false;
+        if (sdk.count(source.getFileID(location).getHashValue())) continue;
+        const auto *forward = llvm::dyn_cast<clang::RecordDecl>(redeclaration);
+        if (forward == nullptr || forward->isCompleteDefinition() || forward->isImplicit() ||
+            !forward->getDeclContext()->isTranslationUnit() ||
+            !literalRuntimeCgToken(location, "uint4", file))
+          return false;
+      }
+      argument = recordUse;
+      record = declaration->getCanonicalDecl();
+      return true;
+    }
     clang::QualType fixedArithmeticType(clang::QualType type) const {
       if (type.isNull() || type->isDependentType()) return {};
       type = type.getCanonicalType().getUnqualifiedType();
@@ -9569,8 +10016,16 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
         // Exact parsed bytes identify the reviewed Sample/profile utilities.
         // Their uninstantiated generic utilities do not establish a texture
         // layout; concrete instantiations still traverse the ordinary checks.
-        // User templates and the full Runtime removal gate remain unchanged.
+        // Caller templates do not inherit this texture-only exception.
         if (textureOnly && frozenTextureUtilityFiles.count(source.getFileID(location).getHashValue()))
+          return true;
+        // The exact reviewed patterns contain type constraints, never arbitrary
+        // SDK layout probes. Their nondependent uint4 identity argument needs
+        // its own scoped proof below. This admits their dependent type
+        // observations, not a whole function/trait/body: normal traversal and
+        // every concrete instantiation retain all original SDK checks.
+        if (!textureOnly && runtimePatternDepth != 0 && runtimeInstanceDepth == 0 &&
+            frozenRuntimePatternFiles.count(source.getFileID(location).getHashValue()))
           return true;
         badLocation = location;
         badName = "<dependent type>";
@@ -9620,6 +10075,12 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       if (record == nullptr)
         return true;
       const auto *declaration = record->getDecl();
+      if (!textureOnly && runtimePatternDepth != 0 && runtimeInstanceDepth == 0 &&
+          std::find(runtimeIdentityArguments.begin(), runtimeIdentityArguments.end(),
+                    std::pair<unsigned, const clang::TagDecl *>(
+                        location.getRawEncoding(), declaration->getCanonicalDecl())) !=
+              runtimeIdentityArguments.end())
+        return true;
       const auto definition = source.getSpellingLoc(declaration->getLocation());
       if (definition.isInvalid() ||
           !sdk.count(source.getFileID(definition).getHashValue())) {
@@ -9673,10 +10134,16 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     const std::set<unsigned> &native;
     const std::set<unsigned> &frozenTextureUtilityFiles;
     const std::set<unsigned> &frozenTextureCgFiles;
+    const std::set<unsigned> &frozenRuntimePatternFiles;
     const bool textureOnly;
+    unsigned runtimePatternDepth = 0;
+    unsigned runtimeInstanceDepth = 0;
+    std::vector<const clang::TemplateTypeParmDecl *> runtimePatternParameters;
+    std::vector<const clang::Decl *> runtimeCopiedPatternParts;
+    std::vector<std::pair<unsigned, const clang::TagDecl *>> runtimeIdentityArguments;
     std::set<const clang::RecordDecl *> reflectedRecords;
     std::set<const clang::VarDecl *> inquiryVariables;
-  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, frozenTextureCgFiles, textureOnly);
+  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, frozenTextureCgFiles, frozenRuntimePatternFiles, textureOnly);
   if (!records.TraverseDecl(compiler.getASTContext().getTranslationUnitDecl()))
     {
       const auto diagnostic = compiler.getDiagnostics().getCustomDiagID(

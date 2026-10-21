@@ -107,6 +107,8 @@ private:
   std::set<unsigned> preservedHostMathCalleeOffsets;
   bool frontendHostMathBuiltinMacroDefined = false;
   std::set<unsigned> macroAlteredFrontendHostMathFileIds;
+  std::set<unsigned> verifiedFrontendHostMathEntryFileIds;
+  bool frontendHostMathGuardModified = false;
   std::set<unsigned> verifiedFrontendCgEntryFileIds;
   std::set<unsigned> macroAlteredFrontendCgFileIds;
   bool frontendCgControlModified = false;

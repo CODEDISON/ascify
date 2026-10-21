@@ -9,8 +9,16 @@ for supported domains and experimental paths.
 ### Added
 
 - Per-inclusion provenance for the admitted product CG qualifier macro chain
-  at the Runtime-header boundary. Full Runtime dependent CG types still fail
-  closed; this does not admit a complete thread-fence reduction project.
+  at the Runtime-header boundary.
+- Authenticated forced host-math conditions and original, uninstantiated
+  primary/partial utility patterns in the main product CG and host-math headers
+  at the full Runtime boundary, including the CG pattern's authenticated
+  `uint4` lane-type identity argument, including its one-level physical SDK
+  typedef spelling. Concrete instances and caller observations
+  retain their checks; this does not admit a complete thread-fence project.
+- Remaining member-template patterns in implicitly instantiated CG classes
+  require exact member/class origin proofs. Their concrete specializations
+  and caller observations remain audited.
 - Adjacent helper status checks can recognize a visible, single-return host
   wrapper around an already admitted Runtime status API. The complete helper
   transaction and local-header publication checks remain required.

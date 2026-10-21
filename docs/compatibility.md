@@ -4,10 +4,36 @@ The admitted frontend profile's physical `cooperative_groups.h` can establish
 the origin of its exact CUDA device-qualifier macro chain and fixed CUDA control
 condition when a Runtime header is removed. Each include instance must retain
 the product bytes and authenticated macro context. Independent caller uses of
-the same SDK macro names remain rejected. This is only a preprocessing-origin
-proof: full Runtime dependent CG types, caller layout observations and other
-unproved Runtime surfaces keep their existing gates. It does not establish
-device execution or complete-project support.
+the same SDK macro names remain rejected. With ordinary CUDA preprocessing,
+the exact forced product `host_math.h` can also establish its three literal CUDA
+control conditions. The include must come from the compiler predefines, with
+unchanged physical bytes, macro expansion history and include-guard ownership.
+Caller guard manipulation, macro-stack operations, conditional-retention mode,
+PCH, modules and external AST inputs cannot use this admission.
+
+The full Runtime type audit may retain dependent observations in original,
+uninstantiated primary and partial template patterns in that authenticated
+host-math header and the main product CG header. Concrete instantiations,
+explicit specializations, caller templates, SDK reflection and ordinary body
+checks remain audited. Within the authenticated CG pattern, the direct
+`uint4` type argument of its dependent `std::is_same<T, uint4>` selector may
+retain its identity after the native template, SDK record, declarations and
+exact argument location are proved. The SDK's own one-level `typedef struct
+uint4 uint4` spelling also requires every typedef redeclaration and its direct
+record source type to belong to the authenticated SDK; caller aliases and
+longer typedef chains are excluded. This grants no `uint4` layout, arithmetic,
+caller type-query or instantiated-interface support. The exception lasts only
+for that template-id's TypeLoc traversal. `cooperative_groups/reduce.h` is outside this additional
+full Runtime rule. This does not establish device execution or complete-project
+support.
+
+A member template copied into an implicitly instantiated product CG class can
+still have uninstantiated parameters. A one-step Clang member-template origin
+and class-pattern identity proof may retain those parameters and that exact
+templated function declaration. All redeclarations must belong to the frozen
+CG profile. This scope excludes the member template's concrete specializations
+and excludes explicitly instantiated or explicitly specialized classes; their
+arguments, interfaces, bodies and SDK observations retain the ordinary audit.
 
 An adjacent local Runtime status assignment may also call a visible ordinary
 host function whose only statement returns an already admitted Runtime API
@@ -280,9 +306,10 @@ Texture projection may retain the uninstantiated SFINAE utilities in the two
 exact product CG headers. Each physical inclusion must preserve the CUDA
 controls, the verified SDK device-attribute expansion chain, and the global
 `cooperative_groups` namespace. Foreign macro expansions or control changes
-keep the texture audit closed. This exception does not admit caller templates,
-skip concrete template instances or SDK layout observations, or change the full
-Runtime-header removal gate.
+keep the texture audit closed. This exception does not admit caller templates
+or skip SDK layout observations. The separate full Runtime rule described
+above additionally tracks original template patterns versus instantiations;
+it admits only the main CG header, not the reduction header.
 
 The current profile includes thread-block operations, a restricted 32-thread
 tile, typed reductions, and a distinct scratch-reduction projection. Target

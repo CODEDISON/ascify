@@ -148,10 +148,10 @@ def main():
             ('profile_cg_user_template',cg_include+'template<class T>T identity(T v){return v;}\n'+cg_descriptor,None,{}),
             ('profile_cg_concrete_sdk_reflection',cg_include+'template<class T>size_t bytes(T*p){return sizeof(T);} size_t f(cudaTextureDesc*p){return bytes(p);}',None,{}),
             ('profile_cg_layout_observation',cg_include+cg_descriptor+'\nsize_t f(){return sizeof(cudaTextureDesc);}',None,{}),
-            ('profile_cg_full_runtime','#include <cuda_runtime_api.h>\n'+cg_include+cg_descriptor,None,{}),
-            # A1 authenticates only the product's macro/control provenance.
-            # Full Runtime dependent-type admission remains a separate gate.
-            ('runtime_cg_plain','#include <cuda_runtime_api.h>\n'+cg_include+'int retained;',None,{}),
+            ('profile_cg_full_runtime','#include <cuda_runtime_api.h>\n'+cg_include+cg_descriptor,['ascify::cudaTextureDesc descriptor'],{}),
+            # Full Runtime admits only authenticated, uninstantiated product
+            # patterns. Caller and concrete-instance observations stay audited.
+            ('runtime_cg_plain','#include <cuda_runtime_api.h>\n'+cg_include+'int retained;',['int retained;'],{}),
             ('runtime_cg_caller_observation','#include <cuda_runtime_api.h>\n'+cg_include+'__annotate__(unused) int retained;',None,{}),
             ('runtime_cg_inactive_observation','#include <cuda_runtime_api.h>\n'+cg_include+'#if 0\n#if defined(__CUDACC__)\nint retained;\n#endif\n#endif',None,{}),
             ('runtime_cg_late_control_restore','#include <cuda_runtime_api.h>\n'+cg_include+'#undef __CUDA__\n#define __CUDA__ 1\nint retained;',None,{}),
@@ -182,7 +182,7 @@ def main():
         cg_reentry_tail = 'namespace repeated_cg {\n'+cg_include+'}\n'
         cg_cases += [
             ('profile_cg_repeat_guarded',cg_include+cg_include+cg_descriptor,['ascify::cudaTextureDesc descriptor'],{}),
-            ('runtime_cg_repeat_guarded','#include <cuda_runtime_api.h>\n'+cg_include+cg_include+'int retained;',None,{}),
+            ('runtime_cg_repeat_guarded','#include <cuda_runtime_api.h>\n'+cg_include+cg_include+'int retained;',['int retained;'],{}),
             ('profile_cg_reentry_guard',cg_reentry+cg_reentry_tail+cg_descriptor,None,{}),
             ('runtime_cg_reentry_guard','#include <cuda_runtime_api.h>\n'+cg_reentry+cg_reentry_tail+'int retained;',None,{}),
             ('runtime_cg_reentry_control_restore','#include <cuda_runtime_api.h>\n'+cg_reentry+'#undef __CUDA__\n#define __CUDA__ 1\n'+cg_reentry_tail+'int retained;',None,{}),
@@ -247,11 +247,6 @@ def main():
                 assert z.returncode>0 and not output.exists() and not output.is_symlink() and not output_headers.exists() and not output_headers.is_symlink() and json.loads(receipt.read_text())['status']=='failed',(name,z.stderr)
                 assert any(marker in z.stderr for marker in ('CUDA texture boundary','CUDA runtime-API header boundary','Ascify cannot publish CUDA compatibility output','frontend compatibility')),(name,z.stderr)
                 assert 'fatal error:' not in z.stderr,(name,z.stderr)
-                if name in ('profile_cg_full_runtime','runtime_cg_plain','runtime_cg_repeat_guarded'):
-                    # The physical host_math Runtime condition rejects first; A2 is not reached.
-                    assert 'host_math.h:20:' in z.stderr,(name,z.stderr)
-                    assert "observes CUDA compiler condition '__CUDACC__'" in z.stderr,(name,z.stderr)
-                    assert 'unproved product CG macro provenance' not in z.stderr,(name,z.stderr)
                 if name in ('runtime_cg_reentry_guard','runtime_cg_reentry_control_restore'):
                     assert 'unproved product CG macro provenance' in z.stderr,(name,z.stderr)
                 if name=='runtime_cg_caller_observation':
@@ -260,7 +255,11 @@ def main():
                     assert "observes CUDA compiler condition '__CUDACC__'" in z.stderr or "observes removed SDK macro '__CUDACC__'" in z.stderr,(name,z.stderr)
             else:
                 assert z.returncode==0 and json.loads(receipt.read_text())['status']=='succeeded',(name,z.stderr)
-                text=output.read_text();assert '#include <ascify/texture_compat.hpp>' in text,(name,text)
+                text=output.read_text()
+                required_header = ('#include <ascify/ascify_cuda_compat.hpp>' if name in
+                                   ('runtime_cg_plain','runtime_cg_repeat_guarded') else
+                                   '#include <ascify/texture_compat.hpp>')
+                assert required_header in text,(name,text)
                 assert all(fragment in text for fragment in expected),(name,expected,text)
                 row['output_sha256']=sha(output)
             assert sha(source)==row['source_sha256']
