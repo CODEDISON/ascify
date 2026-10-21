@@ -6,6 +6,8 @@
 
 namespace ascify {
 namespace detail {
+enum TextureChannelKind { TextureChannelInvalid, TextureChannelFloat,
+                          TextureChannelUnsigned, TextureChannelRGBA };
 
 // Host bookkeeping uses fixed slots and owns no process-exit ACL callback.
 // The runtime manager resets owned devices before finalizing ACL. Explicit
@@ -16,7 +18,8 @@ struct TextureAllocation {
   int32_t device = -1;
   void *context = nullptr;
   unsigned references = 0;
-  bool array = false, layered = false, unsigned_element = false;
+  bool array = false, layered = false;
+  TextureChannelKind channel_kind = TextureChannelInvalid;
 };
 struct TextureHandle {
   void *descriptor = nullptr;
@@ -39,6 +42,13 @@ inline bool textureMultiply(size_t a, size_t b, size_t &result) {
 inline bool textureScalar32Channel(const cudaChannelFormatDesc &channel) {
   return channel.x == 32 && channel.y == 0 && channel.z == 0 && channel.w == 0 &&
          (channel.f == cudaChannelFormatKindFloat || channel.f == cudaChannelFormatKindUnsigned);
+}
+inline TextureChannelKind textureChannelKind(const cudaChannelFormatDesc &channel) {
+  if (textureScalar32Channel(channel)) return channel.f == cudaChannelFormatKindFloat
+      ? TextureChannelFloat : TextureChannelUnsigned;
+  if (channel.x == 8 && channel.y == 8 && channel.z == 8 && channel.w == 8 &&
+      channel.f == cudaChannelFormatKindUnsigned) return TextureChannelRGBA;
+  return TextureChannelInvalid;
 }
 inline aclError textureCurrent(int32_t &device, void *&context) {
   aclError status = cudaRuntimeEnsureReady();
@@ -137,7 +147,8 @@ inline void textureAfterReset(int32_t device) {
 }
 
 inline aclError textureAllocate(TextureAllocation **result, size_t width,
-    size_t height, size_t layers, bool array, bool layered, bool unsigned_element = false) {
+    size_t height, size_t layers, bool array, bool layered,
+    TextureChannelKind channel_kind = TextureChannelInvalid) {
   // Bounds also keep all sampler integer conversions and float extents exact.
   if (!width || !height || !layers || width > (1U<<20) || height > (1U<<20) ||
       layers > (1U<<20)) return ACL_ERROR_FEATURE_UNSUPPORTED;
@@ -164,7 +175,7 @@ inline aclError textureAllocate(TextureAllocation **result, size_t width,
   status = ::aclrtMalloc(&storage,bytes,ACL_MEM_MALLOC_HUGE_FIRST);
   if (status != ACL_SUCCESS) return status;
   if (!storage) return ACL_ERROR_RT_MEMORY_ALLOCATION;
-  *slot = {storage,bytes,pitch,width,height,layers,device,context,0,array,layered,unsigned_element};
+  *slot = {storage,bytes,pitch,width,height,layers,device,context,0,array,layered,channel_kind};
   *result = slot;
   return ACL_SUCCESS;
 }
@@ -218,21 +229,23 @@ inline aclError cudaMallocPitch(T **pointer, size_t *pitch, size_t width, size_t
 inline aclError cudaMallocArray(cudaArray_t *array, const cudaChannelFormatDesc *channel,
     size_t width, size_t height=0, unsigned flags=0) {
   if (!array || !channel) return ACL_ERROR_RT_PARAM_INVALID;
-  if (flags || !detail::textureScalar32Channel(*channel)) return ACL_ERROR_FEATURE_UNSUPPORTED;
+  const auto channel_kind = detail::textureChannelKind(*channel);
+  if (flags || channel_kind == detail::TextureChannelInvalid) return ACL_ERROR_FEATURE_UNSUPPORTED;
   detail::TextureAllocation *record=nullptr;
   aclError status=detail::textureAllocate(&record,width,height,1,true,false,
-      channel->f == cudaChannelFormatKindUnsigned);
+      channel_kind);
   if(status==ACL_SUCCESS) *array=reinterpret_cast<cudaArray_t>(record);
   return status;
 }
 inline aclError cudaMalloc3DArray(cudaArray_t *array, const cudaChannelFormatDesc *channel,
     cudaExtent extent, unsigned flags=0) {
   if (!array || !channel) return ACL_ERROR_RT_PARAM_INVALID;
-  if (flags != cudaArrayLayered || !detail::textureScalar32Channel(*channel))
+  const auto channel_kind = detail::textureChannelKind(*channel);
+  if (flags != cudaArrayLayered || channel_kind == detail::TextureChannelInvalid)
     return ACL_ERROR_FEATURE_UNSUPPORTED;
   detail::TextureAllocation *record=nullptr;
   aclError status=detail::textureAllocate(&record,extent.width,extent.height,extent.depth,true,true,
-      channel->f == cudaChannelFormatKindUnsigned);
+      channel_kind);
   if(status==ACL_SUCCESS) *array=reinterpret_cast<cudaArray_t>(record);
   return status;
 }
@@ -363,7 +376,8 @@ inline aclError cudaCreateTextureObject(cudaTextureObject_t *output,
     const cudaResourceDesc *resource,const cudaTextureDesc *texture,
     const cudaResourceViewDesc *view) {
   if(!output || !resource || !texture) return ACL_ERROR_RT_PARAM_INVALID;
-  if(view || resource->flags || texture->readMode!=cudaReadModeElementType ||
+  if(view || resource->flags || (texture->readMode!=cudaReadModeElementType &&
+      texture->readMode!=cudaReadModeNormalizedFloat) ||
       texture->sRGB || (texture->normalizedCoords!=0 && texture->normalizedCoords!=1) ||
       texture->maxAnisotropy>1 || texture->mipmapFilterMode!=cudaFilterModePoint ||
       texture->mipmapLevelBias!=0 || texture->minMipmapLevelClamp!=0 ||
@@ -380,17 +394,17 @@ inline aclError cudaCreateTextureObject(cudaTextureObject_t *output,
   detail::TextureLock guard;
   detail::TextureAllocation *record=nullptr;
   size_t width=0,height=0,pitch=0;
-  bool unsigned_element=false;
+  detail::TextureChannelKind channel_kind=detail::TextureChannelInvalid;
   if(resource->resType==cudaResourceTypeArray) {
     record=detail::textureArray(resource->res.array.array);
     if(record) {
       width=record->width; height=record->height; pitch=record->pitch;
-      unsigned_element=record->unsigned_element;
+      channel_kind=record->channel_kind;
     }
   } else if(resource->resType==cudaResourceTypePitch2D) {
     const auto &input=resource->res.pitch2D;
-    if(!detail::textureScalar32Channel(input.desc)) return ACL_ERROR_FEATURE_UNSUPPORTED;
-    unsigned_element=input.desc.f == cudaChannelFormatKindUnsigned;
+    channel_kind=detail::textureChannelKind(input.desc);
+    if(channel_kind==detail::TextureChannelInvalid) return ACL_ERROR_FEATURE_UNSUPPORTED;
     record=detail::texturePointer(input.devPtr);
     width=input.width; height=input.height; pitch=input.pitchInBytes;
     size_t row_bytes=0,bytes=0;
@@ -400,8 +414,20 @@ inline aclError cudaCreateTextureObject(cudaTextureObject_t *output,
         !record || pitch!=record->pitch || bytes>record->bytes) return ACL_ERROR_RT_PARAM_INVALID;
   } else return ACL_ERROR_FEATURE_UNSUPPORTED;
   if(!record || !detail::textureOwned(*record,device,context)) return ACL_ERROR_RT_PARAM_INVALID;
-  if(unsigned_element && texture->filterMode!=cudaFilterModePoint)
-    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  detail::TextureSampleKind sample_kind=detail::TextureSampleFloat;
+  if(channel_kind==detail::TextureChannelRGBA) {
+    sample_kind=texture->readMode==cudaReadModeNormalizedFloat
+        ? detail::TextureSampleRGBANormalized : detail::TextureSampleRGBAElement;
+    if(sample_kind==detail::TextureSampleRGBAElement && texture->filterMode!=cudaFilterModePoint)
+      return ACL_ERROR_FEATURE_UNSUPPORTED;
+  } else {
+    if(texture->readMode!=cudaReadModeElementType || channel_kind==detail::TextureChannelInvalid)
+      return ACL_ERROR_FEATURE_UNSUPPORTED;
+    if(channel_kind==detail::TextureChannelUnsigned) {
+      if(texture->filterMode!=cudaFilterModePoint) return ACL_ERROR_FEATURE_UNSUPPORTED;
+      sample_kind=detail::TextureSampleUnsigned;
+    }
+  }
   detail::TextureHandle *slot=nullptr;
   for(auto &handle:detail::textureRegistry().handles) if(!handle.descriptor) {slot=&handle;break;}
   if(!slot) return ACL_ERROR_BAD_ALLOC;
@@ -417,8 +443,10 @@ inline aclError cudaCreateTextureObject(cudaTextureObject_t *output,
   value.normalized=texture->normalizedCoords;
   value.wrap_x=value.normalized && texture->addressMode[0]==cudaAddressModeWrap;
   value.wrap_y=value.normalized && texture->addressMode[1]==cudaAddressModeWrap;
-  value.linear=texture->filterMode==cudaFilterModeLinear;
-  value.unsigned_element=unsigned_element;
+  value.linear=texture->filterMode==cudaFilterModeLinear
+      ? detail::TextureFilterLinear : detail::TextureFilterPoint;
+  value.unsigned_element=sample_kind;
+  value.abi_version=detail::TextureDescriptorVersion;
   value.error=reinterpret_cast<uint64_t>(descriptor)+sizeof(value);
   unsigned char image[96]={};std::memcpy(image,&value,sizeof(value));
   status=::aclrtMemcpy(descriptor,sizeof(image),image,sizeof(image),ACL_MEMCPY_HOST_TO_DEVICE);
@@ -457,11 +485,17 @@ inline aclError cudaDestroyTextureObject(cudaTextureObject_t texture) {
 
 template<typename T>
 __aicore__ ASCIFY_FORCEINLINE T tex2D(cudaTextureObject_t texture,float x,float y) {
-  static_assert(std::is_same<T,float>::value || std::is_same<T,unsigned int>::value,
-                "Ascify texture fetch requires float32 or unsigned int32");
+  static_assert(detail::textureFetchType<T>::value,
+                "Ascify texture fetch requires float32, unsigned int32 or admitted native RGBA vectors");
 #if defined(ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS) && defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
   if constexpr (std::is_same<T,unsigned int>::value)
     return detail::textureSampleUnsigned(texture,x,y,0,false);
+#if defined(ASCIFY_SIMT_LEGACY_HAS_VECTOR_CONSTRUCTORS)
+  else if constexpr (detail::textureRGBAElementType<T>::value)
+    return detail::textureSampleRGBAElement(texture,x,y,0,false);
+  else if constexpr (detail::textureRGBAFloatType<T>::value)
+    return detail::textureSampleRGBANormalized(texture,x,y,0,false);
+#endif
   else
     return detail::textureSampleFloat(texture,x,y,0,false);
 #else
@@ -471,11 +505,17 @@ __aicore__ ASCIFY_FORCEINLINE T tex2D(cudaTextureObject_t texture,float x,float 
 }
 template<typename T>
 __aicore__ ASCIFY_FORCEINLINE T tex2DLayered(cudaTextureObject_t texture,float x,float y,int layer) {
-  static_assert(std::is_same<T,float>::value || std::is_same<T,unsigned int>::value,
-                "Ascify texture fetch requires float32 or unsigned int32");
+  static_assert(detail::textureFetchType<T>::value,
+                "Ascify texture fetch requires float32, unsigned int32 or admitted native RGBA vectors");
 #if defined(ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS) && defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
   if constexpr (std::is_same<T,unsigned int>::value)
     return detail::textureSampleUnsigned(texture,x,y,layer,true);
+#if defined(ASCIFY_SIMT_LEGACY_HAS_VECTOR_CONSTRUCTORS)
+  else if constexpr (detail::textureRGBAElementType<T>::value)
+    return detail::textureSampleRGBAElement(texture,x,y,layer,true);
+  else if constexpr (detail::textureRGBAFloatType<T>::value)
+    return detail::textureSampleRGBANormalized(texture,x,y,layer,true);
+#endif
   else
     return detail::textureSampleFloat(texture,x,y,layer,true);
 #else
@@ -485,11 +525,17 @@ __aicore__ ASCIFY_FORCEINLINE T tex2DLayered(cudaTextureObject_t texture,float x
 }
 template<typename T>
 __aicore__ ASCIFY_FORCEINLINE T tex2DFast(cudaTextureObject_t texture,float x,float y) {
-  static_assert(std::is_same<T,float>::value || std::is_same<T,unsigned int>::value,
-                "Ascify texture fetch requires float32 or unsigned int32");
+  static_assert(detail::textureFetchType<T>::value,
+                "Ascify texture fetch requires float32, unsigned int32 or admitted native RGBA vectors");
 #if defined(ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS) && defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
   if constexpr (std::is_same<T,unsigned int>::value)
     return detail::textureSampleUnsigned(texture,x,y,0,false);
+#if defined(ASCIFY_SIMT_LEGACY_HAS_VECTOR_CONSTRUCTORS)
+  else if constexpr (detail::textureRGBAElementType<T>::value)
+    return detail::textureSampleRGBAElement(texture,x,y,0,false);
+  else if constexpr (detail::textureRGBAFloatType<T>::value)
+    return detail::textureSampleRGBANormalized<true>(texture,x,y,0,false);
+#endif
   else
     return detail::textureSampleFloat<true>(texture,x,y,0,false);
 #else
@@ -499,11 +545,17 @@ __aicore__ ASCIFY_FORCEINLINE T tex2DFast(cudaTextureObject_t texture,float x,fl
 }
 template<typename T>
 __aicore__ ASCIFY_FORCEINLINE T tex2DLayeredFast(cudaTextureObject_t texture,float x,float y,int layer) {
-  static_assert(std::is_same<T,float>::value || std::is_same<T,unsigned int>::value,
-                "Ascify texture fetch requires float32 or unsigned int32");
+  static_assert(detail::textureFetchType<T>::value,
+                "Ascify texture fetch requires float32, unsigned int32 or admitted native RGBA vectors");
 #if defined(ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS) && defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
   if constexpr (std::is_same<T,unsigned int>::value)
     return detail::textureSampleUnsigned(texture,x,y,layer,true);
+#if defined(ASCIFY_SIMT_LEGACY_HAS_VECTOR_CONSTRUCTORS)
+  else if constexpr (detail::textureRGBAElementType<T>::value)
+    return detail::textureSampleRGBAElement(texture,x,y,layer,true);
+  else if constexpr (detail::textureRGBAFloatType<T>::value)
+    return detail::textureSampleRGBANormalized<true>(texture,x,y,layer,true);
+#endif
   else
     return detail::textureSampleFloat<true>(texture,x,y,layer,true);
 #else

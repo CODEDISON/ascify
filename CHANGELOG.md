@@ -8,6 +8,11 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Experimental authenticated RGBA8 texture channels: normalized `float4`
+  Point/Linear reads and element-type `uchar4` Point reads on bounded 2D and
+  layered resources. Numerical, coordinate and validation limits are recorded
+  in [the texture contract](docs/texture-compatibility.md); original Sample
+  support is not implied by the source extension.
 - Experimental authenticated CUDA float3/uint3/int3 lowering to explicit 12-byte
   scalar-local records. Arrays, GM, external ABI, templates and native vec3
   interoperability remain guarded. See [the bounded contract](docs/cuda-vec3-local-layout.md).
@@ -52,6 +57,10 @@ for supported domains and experimental paths.
 
 ### Changed
 
+- Private texture descriptor ABI v2 rejects incompatible channel/filter/version
+  tags before texel reads. Rebuild all texture-using TUs, libraries and probes
+  with one complete helper installation and recreate handles, including existing
+  float32/unsigned-int32 consumers. Do not mix old and new descriptor helpers.
 - CLI help, diagnostics, and dependencies consistently describe CUDA-to-Ascend
   conversion. Inactive legacy switches and unimplemented generators were removed.
 - Standalone CMake builds respect the selected compiler and use target-scoped

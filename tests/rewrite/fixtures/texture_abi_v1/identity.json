@@ -1,0 +1,13 @@
+{
+  "base_commit": "42cf75d02639c3e2f228759a7aafd0effab84477",
+  "sampling_source": "include/ascify/texture_sampling.hpp",
+  "sampling_sha256": "57bf3e4f2752f125f509311cc12cf9a678682bbf5e9bfbb4bd359344837ea171",
+  "wrappers_source": "include/ascify/texture_compat.hpp",
+  "wrappers_source_sha256": "5fde11cb55c3f04e59d6ad67b0e5cdb4c4df7d418ebe2d0724e6b2de3f1e5ffc",
+  "wrappers_exact_source_slice": [
+    22808,
+    25622
+  ],
+  "wrappers_sha256": "2bdc5d62541bcc3b64b0b8792f7ce378e79c8d1fae821eeadb164d654afa8c3e",
+  "purpose": "Unmodified previous-generation actual sampler and public wrapper bodies for dual-ABI rejection tests. Compiled only in a test-renamed namespace."
+}

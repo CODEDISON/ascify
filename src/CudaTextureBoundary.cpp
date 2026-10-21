@@ -3,6 +3,7 @@
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/ParentMapContext.h"
 #include "clang/AST/RecursiveASTVisitor.h"
+#include "clang/AST/RecordLayout.h"
 #include "clang/AST/TypeLoc.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Lex/Lexer.h"
@@ -36,6 +37,42 @@ bool sdkDeclaration(const clang::Decl *declaration, clang::SourceManager &source
 }
 const clang::Expr *strip(const clang::Expr *expression) {
   return expression == nullptr ? nullptr : expression->IgnoreParenImpCasts();
+}
+bool sdkTextureVectorType(clang::QualType type, llvm::StringRef expected,
+    clang::ASTContext &context, const std::set<unsigned> &sdk) {
+  if (type.isNull() || type.hasQualifiers()) return false;
+  const auto *recordType = type->getAs<clang::RecordType>();
+  if (recordType == nullptr) return false;
+  const auto *record = recordType->getDecl()->getDefinition();
+  auto &source = context.getSourceManager();
+  if (record == nullptr || record->getName() != expected || record->isUnion() ||
+      !record->getDeclContext()->isTranslationUnit()) return false;
+  // Identity is tied to the authenticated SDK buffers, not a matching name,
+  // namespace, apparent size, #line spelling or copied header contents.
+  for (const auto *redeclaration : record->redecls())
+    if (!sdkDeclaration(redeclaration, source, sdk)) return false;
+  const auto *cxx = llvm::dyn_cast<clang::CXXRecordDecl>(record);
+  if (cxx == nullptr || cxx->getNumBases() || !cxx->isStandardLayout() ||
+      !cxx->isTriviallyCopyable() || !cxx->isAggregate()) return false;
+  const bool bytes = expected == "uchar4";
+  if (!bytes && expected != "float4") return false;
+  const auto scalar = bytes ? context.UnsignedCharTy : context.FloatTy;
+  const unsigned componentBits = bytes ? 8 : 32;
+  const auto &layout = context.getASTRecordLayout(record);
+  const unsigned recordBytes = bytes ? 4 : 16;
+  if (layout.getSize().getQuantity() != recordBytes ||
+      layout.getAlignment().getQuantity() != recordBytes) return false;
+  unsigned index = 0;
+  const char *names[] = {"x", "y", "z", "w"};
+  for (const auto *field : record->fields()) {
+    if (index == 4 || field->getName() != names[index] || field->isBitField() ||
+        field->hasInClassInitializer() || field->getAccess() == clang::AS_private ||
+        field->getAccess() == clang::AS_protected || !sdkDeclaration(field, source, sdk) ||
+        !context.hasSameType(field->getType(), scalar) ||
+        layout.getFieldOffset(index) != index * componentBits) return false;
+    ++index;
+  }
+  return index == 4;
 }
 }
 
@@ -208,10 +245,17 @@ bool ValidateCudaTextureBoundary(clang::ASTContext &context,
         if (call==nullptr || call->getDirectCallee()!=function || strip(call->getCallee())!=reference)
           return fail(reference->getExprLoc(),"texture function is not a direct call");
         if (const auto *arguments=function->getTemplateSpecializationArgs()) {
-          if (arguments->size()!=1 || arguments->get(0).getKind()!=clang::TemplateArgument::Type ||
-              (!context.hasSameType(arguments->get(0).getAsType(),context.FloatTy) &&
-               !context.hasSameType(arguments->get(0).getAsType(),context.UnsignedIntTy)))
-            return fail(reference->getExprLoc(),"texture template requires exact float32 or unsigned int32");
+          if (arguments->size()!=1 || arguments->get(0).getKind()!=clang::TemplateArgument::Type)
+            return fail(reference->getExprLoc(),"texture template requires one exact admitted SDK type");
+          const auto type=arguments->get(0).getAsType();
+          const bool scalar=context.hasSameType(type,context.FloatTy) ||
+                            context.hasSameType(type,context.UnsignedIntTy);
+          const bool factory=function->getName()=="cudaCreateChannelDesc";
+          const bool fetch=function->getName()=="tex2D" || function->getName()=="tex2DLayered";
+          const bool rgba=(factory || fetch) && sdkTextureVectorType(type,"uchar4",context,sdk);
+          const bool normalized=fetch && sdkTextureVectorType(type,"float4",context,sdk);
+          if (!scalar && !rgba && !normalized)
+            return fail(reference->getExprLoc(),"texture template requires exact scalar32 or authenticated RGBA SDK vector");
         }
         if ((function->getName()=="tex2D" && call->getNumArgs()!=3) ||
             (function->getName()=="tex2DLayered" && call->getNumArgs()!=4))

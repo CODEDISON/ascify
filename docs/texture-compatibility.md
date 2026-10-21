@@ -1,6 +1,65 @@
-# Bounded scalar texture conversion
+# Bounded texture conversion
 
-The texture adapter is under validation. Earlier float engineering probes have passed on Ascend950DT with CANN 9.1. The unsigned-int extension described below has not yet passed target compilation or device validation; it adds no original CUDA Sample success.
+The texture adapter is under validation. Earlier scalar engineering evidence
+does not establish acceptance of a later candidate. The RGBA8 extension and
+descriptor ABI v2 described below have not yet completed their new host,
+target or device gates; they add no original CUDA Sample success.
+
+## Experimental RGBA8 extension
+
+An authenticated SDK `uchar4` channel factory, or an explicit
+`{8,8,8,8,cudaChannelFormatKindUnsigned}` description, selects four unsigned
+byte channels. Array, layered-2D array and adapter-owned Pitch2D resources use
+four bytes per texel. NormalizedFloat reads return native `float4`, with every
+channel including alpha divided by 255, using Point or Linear filtering.
+ElementType reads return native `uchar4` with exact byte values and require
+Point filtering. No color-space conversion, channel reordering or alpha
+replacement occurs. A Pitch2D view does not change the allocation's other
+views. Return-type/read-mode mismatches report a sticky error.
+
+The frontend proves canonical SDK identity, all redeclarations, global owner,
+four component fields and their exact layout. Aliases of that same SDK type
+are admitted; copied SDK headers, caller records, redeclarations and structural
+lookalikes gain no authority. This rule does not grant general record-layout
+reflection. `cudaCreateChannelDesc<float4>`, U8 scalar, signed/16-bit channels,
+3D, mipmaps, surfaces and sRGB remain outside this extension. Native vector
+template support requires the admitted pure-SIMT header/compiler domain;
+ordinary host C++ and public-8.5 scalar includes receive no synthetic vectors.
+
+RGBA interpolation has a separate coordinate and arithmetic contract. The
+planned `2^-21` absolute-error gate compares against double interpolation at
+the **same FP32-transformed coordinates**; it is not a bound on normalized
+coordinate rounding or on selecting a different texel. Point normalization is
+checked to one ULP of the correctly rounded reference, with exact 0/1 endpoints.
+Arbitrary CUDA hardware quantization, tie handling and bitwise equivalence are
+not promised. Original image tolerances must remain unchanged.
+
+For a negative normalized-wrap coordinate, FP32 subtraction can round its
+wrapped fraction to 1. For example, the exact fraction for `-2^-149` is
+`1-2^-149`: Point should select the final texel, while rounding to 1 and wrapping
+again would select the first. RGBA rejects this unresolved case before a texel
+load in both precise and fast modes. Legacy F32/U32 coordinate behavior is
+preserved. Negative zero selects texel zero; clamp bounds large finite inputs
+before integer conversion. NaN/Inf and transformed values outside the bounded
+coordinate domain are rejected. CUDA equivalence claims require an input domain
+whose coordinate transformation and texel selection have been independently
+established; merely passing a software interpolation tolerance is insufficient.
+
+## Descriptor ABI v2: rebuild all consumers
+
+The private descriptor remains 72 bytes, aligned to 8, with its sticky-error
+pointer at offset64 in a 96-byte allocation. Its channel and filter fields now
+carry nonzero versioned tags and the former padding at offset60 is an explicit
+version. These tags apply to **all F32, U32 and RGBA textures**. New samplers
+validate them before loading texels; old float and U32 samplers reject v2 tags
+through their existing guards. Old zero-padding v1 descriptors are rejected by
+new samplers. Such rejection is a compatibility safeguard, not permission to
+mix installations.
+
+Rebuild every translated TU, linked library and raw-descriptor probe that uses
+texture helpers against one complete installation. Recreate texture handles;
+do not carry live descriptors between versions. Bind the full installed helper
+inventory as well as the converter binary when collecting acceptance evidence.
 
 ## Unsigned 32-bit element extension
 
@@ -31,7 +90,7 @@ separate gates. No sample source, algorithm, input or oracle is modified.
 
 The frontend requires physical CUDA SDK declarations and direct literal references. The SDK `cudaArrayLayered` macro is materialized as its exact `0x01` literal, retaining its int prvalue type; unproved enclosing macro observers are rejected. Texture calls inside `checkCudaErrors` require the authenticated frozen helper and its successfully committed rewrite transaction. It maps single-component float32 or unsigned-int32 arrays, layered 2D arrays, owned pitched allocations, and corresponding `tex2D`/`tex2DLayered` calls. Descriptor fields retain their CUDA meanings; descriptor binary layout is private. User declarations, indirect function calls, macro-generated names, general layout/reflection, and dependent texture fetches are rejected. Literal zero initialization and a narrowly proved native `memset` of exactly the same whole descriptor are admitted.
 
-The public APIs include array/pitch allocation and free, 2D row copies and memset, copies to an array, array/pointer `cudaMemcpy3D`, texture creation/destruction, and the associated descriptors. Width/height/layer extents are positive and at most 2^20. Pitches and pointer offsets are bytes; an array endpoint makes the copy extent width count 32-bit elements. Bounds and multiplication overflow are checked. Arrays support float32 or unsigned-int32 with no flags except the layered flag for layered allocation. Resource views, mipmaps, normalized integer reads, sRGB, mirror/border addressing, and other unsupported descriptor settings return an explicit error.
+The public APIs include array/pitch allocation and free, 2D row copies and memset, copies to an array, array/pointer `cudaMemcpy3D`, texture creation/destruction, and the associated descriptors. Width/height/layer extents are positive and at most 2^20. Pitches and pointer offsets are bytes; an array endpoint makes the copy extent width count four-byte texels. Bounds and multiplication overflow are checked. Arrays support float32, unsigned-int32 and the experimental RGBA8 format, with no flags except the layered flag for layered allocation. Resource views, mipmaps, normalized integer reads outside RGBA8, sRGB, mirror/border addressing, and other unsupported descriptor settings return an explicit error.
 
 When the explicit frontend compatibility profile is enabled, the texture record audit recognizes its exact product-owned, forced host-math include. Only that inclusion's unchanged dependent template declarations receive the utility exception; actual macro expansions in it disable the exception. Every entered include instance is audited separately, so a caller that undefines the include guard and includes the same physical header again does not inherit the forced inclusion's exception. Caller templates, copied or shadow headers, and concrete texture-layout observations remain subject to the same audit.
 
@@ -58,6 +117,14 @@ If any descriptor invalidation fails, the backing allocation is retained and the
 The registry currently bounds simultaneously retained allocations and texture objects to 128 each; capacity exhaustion is an explicit allocation error. Blocking APIs may synchronize the entire device while texture objects exist. Invalid arbitrary raw device tokens remain outside the valid handle precondition.
 
 ## Validation status
+
+The records below describe predecessor engineering builds. They are not a
+validation claim for the new descriptor ABI v2 or RGBA8 implementation. The new
+gates include actual-helper CPU arithmetic/lifecycle tests, exact old/new ABI
+consumer bodies, protected-page rejection checks, original-source syntax,
+atomic publication, native CCEC layout/return compilation and later independent
+installed-helper device readback. CPU stubs are not ACL/NPU evidence. Full
+original Sample builds and numerical acceptance remain separate requirements.
 
 The native v2 registry probe passed real two-TU compilation, library/ELF checks and NPU execution: 32 listed fetch values, 36 array readbacks, padding, nine initial host rejections, three released-storage rejections, three nonfinite-texel rejections, 130 retirement cycles, sticky propagation and two resets. Earlier v1 evidence remains preserved with its superseded lifetime restriction.
 
