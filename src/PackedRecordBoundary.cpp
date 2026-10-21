@@ -167,7 +167,10 @@ bool PackedRecordBoundary::pragma(clang::CompilerInstance &ci,
     std::vector<std::pair<unsigned, llvm::StringRef>> lines;
     while (previous && lines.size() < 3) {
       const unsigned before = previous - 1;
-      const unsigned first = before ? lineBegin(bytes, before - 1) : 0;
+      // StringRef::rfind excludes its From offset. Exclude this terminating
+      // newline exactly once; subtracting again skips an adjacent empty line
+      // and joins it onto the preceding directive, hiding the owned prefix.
+      const unsigned first = lineBegin(bytes, before);
       const auto line = bytes.slice(first, previous);
       previous = first;
       if (!line.trim().empty()) lines.emplace_back(first, line);

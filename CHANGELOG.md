@@ -12,6 +12,8 @@ for supported domains and experimental paths.
   with configuration guards, target layout witnesses and final edit protection.
   Packed pointers, arrays, templates and arbitrary packing state remain outside
   this proof; target compilation and complete sample validation are required.
+  Inactive push-prefix recognition preserves intervening blank lines. Plain-char
+  signedness must match the source toolchain and is checked by target witnesses.
 
 - Contextual local headers can retain literal unroll pragmas and normalize a
   single pragma once after physical include-entry proof. Ordered payload and

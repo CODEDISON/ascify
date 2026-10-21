@@ -38,12 +38,18 @@ def main():
     for name in ('binary','cuda-path','resource-dir','evidence-dir','clang'):
         p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--ccec',type=Path)
+    p.add_argument('--helper-root',type=Path,default=HELPERS)
+    p.add_argument('--target-arg',action='append',default=[])
     p.add_argument('--target-include',action='append',default=[])
     a=p.parse_args(); out=a.evidence_dir.resolve();out.mkdir()
-    fixture=inventory(HELPERS)
+    helpers=a.helper_root.resolve()
+    fixture=inventory(helpers)
     cases=[
         ('plain', True, HELPER+OPEN+BODY+RESET+TAIL, None, []),
         ('conditional', True, HELPER+PREFIX+OPEN+BODY+FOOTER+TAIL, None, []),
+        ('conditional_no_gap', True, HELPER+PREFIX.rstrip('\n')+'\n'+OPEN+BODY+FOOTER+TAIL, None, []),
+        ('conditional_two_gaps', True, HELPER+PREFIX+'\n'+OPEN+BODY+FOOTER+TAIL, None, []),
+        ('conditional_whitespace_crlf', True, HELPER+PREFIX.replace('\n','\r\n')+' \t\r\n'+OPEN+BODY+FOOTER+TAIL, None, []),
         ('context_once', True, HELPER+'#include "record.cuh"\nint main(){checked();return sizeof(FileRecord)==14?0:1;}\n',
             '#pragma once\n'+PREFIX+OPEN+BODY+FOOTER+'inline void checked(){getLastCudaError("context packed");}\n', []),
         ('direct_char', True, HELPER+OPEN+'struct FileRecord { char x; unsigned char y; signed char z; };\n'+RESET+TAIL, None, []),
@@ -87,7 +93,7 @@ def main():
         if header is not None: (inputs/'record.cuh').write_text(header)
         initial=inventory(inputs)
         syntax=run([a.clang,'-x','cuda','--cuda-host-only','-nocudalib','--cuda-path='+str(a.cuda_path),
-            '-resource-dir='+str(a.resource_dir),'-std=c++17','-I'+str(HELPERS),'-I'+str(inputs),*extra,'-fsyntax-only',src],case/'source_syntax')
+            '-resource-dir='+str(a.resource_dir),'-std=c++17','-I'+str(helpers),'-I'+str(inputs),*extra,'-fsyntax-only',src],case/'source_syntax')
         assert syntax.returncode==0,(name,syntax.stderr.decode(errors='replace'))
         output=case/'published.cce';bundle=Path(str(output)+'.headers')
         if not success:
@@ -98,24 +104,27 @@ def main():
         for index,destination in enumerate(destinations):
             command=[a.binary,src,'--cuda-path='+str(a.cuda_path),'--clang-resource-directory='+str(a.resource_dir),
                 '--frontend-compat=ascify-admitted-v1','--target-policy=dav-c310-vec','--simt-math=fast',
-                '--default-preprocessor','--local-headers-recursive','-I'+str(HELPERS),'-I'+str(inputs),'-o',destination,
-                '--','-std=c++17','-I'+str(HELPERS),'-I'+str(inputs),*extra]
+                '--default-preprocessor','--local-headers-recursive','-I'+str(helpers),'-I'+str(inputs),'-o',destination,
+                '--','-std=c++17','-I'+str(helpers),'-I'+str(inputs),*extra]
             if name=='retain_excluded_standalone':
                 command.remove('--default-preprocessor')
             result=run(command,case/('convert_'+str(index)))
             assert inventory(inputs)==initial,(name,'original input mutation')
             if success:
                 assert result.returncode==0,(name,result.stderr.decode(errors='replace'))
-                generated=destination.read_text()
+                generated=destination.read_bytes().decode()
                 assert BODY in generated or name=='direct_char',name
                 assert 'Ascify preserved packed' in generated and 'Ascify packed layout witness syntax' in generated,name
-                if name in ('conditional','context_once'):
-                    assert PREFIX in generated and FOOTER in generated,name
+                if name.startswith('conditional') or name=='context_once':
+                    prefix = (PREFIX.rstrip('\n')+'\n' if name=='conditional_no_gap' else
+                              PREFIX+'\n' if name=='conditional_two_gaps' else
+                              PREFIX.replace('\n','\r\n')+' \t\r\n' if name=='conditional_whitespace_crlf' else PREFIX)
+                    assert prefix in generated and FOOTER in generated,name
                     assert 'requires the original inactive configuration' in generated,name
                 if a.ccec:
                     obj=case/'target.o'
                     target=run([a.ccec,'-O2','-std=c++17','-x','dpp','--cce-aicore-arch=dav-c310-vec',
-                        '-c',destination,'-o',obj,*sum((['-I',x] for x in a.target_include),[])],case/'target_compile')
+                        *a.target_arg,'-c',destination,'-o',obj,*sum((['-I',x] for x in a.target_include),[])],case/'target_compile')
                     assert target.returncode==0 and obj.read_bytes().startswith(b'\x7fELF'),(name,target.stderr.decode(errors='replace'))
             else:
                 assert result.returncode!=0,(name,'unexpected admission')
@@ -124,7 +133,7 @@ def main():
                 if destination!=output: assert not destination.exists() and not Path(str(destination)+'.headers').exists()
             assert not list(case.glob('.ascify-local-closure*')),(name,'staging leaked')
         rows.append({'name':name,'source_syntax_passed':True,'expected_acceptance':success,'passed':True})
-    assert inventory(HELPERS)==fixture
+    assert inventory(helpers)==fixture
     (out/'summary.json').write_text(json.dumps({'passed':True,'cases':rows,'total':len(rows),'device_executed':False},indent=2)+'\n')
     print('packed record preservation:',len(rows),'syntax-first cases PASS; no NPU')
 

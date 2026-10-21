@@ -204,3 +204,23 @@ original source syntax before every conversion, preserves old outputs on
 rejection, and can compile all positive outputs with actual CCEC. This source
 feature is still awaiting those checks and complete original DCT verification;
 it is not a new numeric Sample result.
+
+## Packed integer record regions
+
+With the default preprocessor, literal `#pragma pack(1)` regions can preserve
+closed, same-file records containing only proved 8-, 16- or 32-bit integer
+fields. Layout witnesses retain each source size, alignment, offset and integer
+signedness. Pointers, arrays, bitfields, templates, nested packing and arbitrary
+packing state remain outside this path.
+
+An optional inactive `pack(push)` prefix and `pack(pop)` footer must use the
+same literal disjunction of undefined names. Blank lines between the prefix
+and opener retain their original bytes; directives, macro histories and final
+edits remain subject to the existing proof. No inactive pack directive is
+accepted merely because it is near a supported region.
+
+Target compilation must retain the source's plain-char signedness. For the
+verified AArch64 CUDA compiler configurations whose plain `char` is unsigned,
+CCEC requires explicit `-funsigned-char`; a mismatched target mode fails the
+generated signedness witness. This is a configuration-specific build option,
+not a global reinterpretation of `char` or removal of source assertions.
