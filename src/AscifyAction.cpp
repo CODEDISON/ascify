@@ -1833,6 +1833,116 @@ static bool isConfiguredCudaRuntimeApiPath(llvm::StringRef path,
 #endif
 }
 
+static bool verifiedFrontendCgFile(
+    clang::FileID file, clang::CompilerInstance &compiler,
+    const ascify::FrontendCompatibilityConfig &profile) {
+  auto &source = compiler.getSourceManager();
+  if (file.isInvalid()) return false;
+  const auto *entry = source.getFileEntryForID(file);
+  const auto path = source.getFilename(source.getLocForStartOfFile(file));
+  bool invalid = false;
+  const auto bytes = source.getBufferData(file, &invalid);
+  return !invalid && entry != nullptr &&
+      ascify::IsVerifiedFrontendCooperativeGroupsInput(
+          profile, path.str(), bytes.str()) &&
+      physicalSourceFileMatches(path, *entry, source);
+}
+
+static bool frontendCgMacroTokens(
+    const clang::MacroInfo &macro, clang::Preprocessor &preprocessor,
+    std::initializer_list<llvm::StringRef> expected, bool parameter = false) {
+  if (macro.isFunctionLike() != parameter || macro.isC99Varargs() ||
+      macro.isGNUVarargs() || macro.getNumTokens() != expected.size())
+    return false;
+  if (parameter && (macro.getNumParams() != 1 ||
+                    (*macro.param_begin())->getName() != "a"))
+    return false;
+  auto token = macro.tokens_begin();
+  for (const auto spelling : expected)
+    if (preprocessor.getSpelling(*token++) != spelling) return false;
+  return true;
+}
+
+static bool trustedFrontendCgCudaControl(
+    llvm::StringRef name, const clang::MacroInfo *macro,
+    clang::CompilerInstance &compiler) {
+  if (macro == nullptr ||
+      !frontendCgMacroTokens(*macro, compiler.getPreprocessor(), {"1"}))
+    return false;
+  auto &source = compiler.getSourceManager();
+  const auto definition = source.getSpellingLoc(macro->getDefinitionLoc());
+  const auto file = source.getFileID(definition);
+  const bool builtin = definition.isValid() &&
+      file == compiler.getPreprocessor().getPredefinesFileID() &&
+      source.isWrittenInBuiltinFile(definition) &&
+      !source.isWrittenInCommandLineFile(definition);
+  return builtin || (name == "__CUDACC__" &&
+                     isOwnedCudaCompilerInput(file, compiler));
+}
+
+static bool frontendCgControlName(llvm::StringRef name) {
+  return name == "__CUDA__" || name == "__CUDACC__" ||
+      name == "ASCIFY_FRONTEND_COMPAT_DEVICE_" ||
+      name == "ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_" ||
+      name == "ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_COOPERATIVE_GROUPS_H_" ||
+      name == "ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_REDUCE_H_";
+}
+
+static bool trustedFrontendCgControlOwner(
+    llvm::StringRef name, clang::SourceLocation location,
+    clang::CompilerInstance &compiler,
+    const ascify::FrontendCompatibilityConfig &profile) {
+  auto &source = compiler.getSourceManager();
+  const auto written = source.getSpellingLoc(location);
+  if (written.isInvalid()) return false;
+  const auto file = source.getFileID(written);
+  if (name == "__CUDA__" || name == "__CUDACC__")
+    return (file == compiler.getPreprocessor().getPredefinesFileID() &&
+            source.isWrittenInBuiltinFile(written) &&
+            !source.isWrittenInCommandLineFile(written)) ||
+        (name == "__CUDACC__" && isOwnedCudaCompilerInput(file, compiler));
+  return verifiedFrontendCgFile(file, compiler, profile);
+}
+
+static bool frontendCgMacroExpansionMatches(
+    llvm::StringRef name, const clang::MacroInfo *macro,
+    clang::FileID useFile, clang::CompilerInstance &compiler,
+    const ascify::FrontendCompatibilityConfig &profile) {
+  if (macro == nullptr) return false;
+  auto &source = compiler.getSourceManager();
+  auto &preprocessor = compiler.getPreprocessor();
+  const auto definition = source.getSpellingLoc(macro->getDefinitionLoc());
+  if (definition.isInvalid()) return false;
+  const auto file = source.getFileID(definition);
+  if (name == "ASCIFY_FRONTEND_COMPAT_DEVICE_" ||
+      name == "ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_")
+    return file == useFile && verifiedFrontendCgFile(file, compiler, profile) &&
+        frontendCgMacroTokens(*macro, preprocessor, {"__device__"});
+  // The Linux CUDA SDK expands device through three exact macros. Do not
+  // trust their names alone, copied definitions, or a caller redefinition.
+  const auto path = source.getFilename(definition);
+  const auto *entry = source.getFileEntryForID(file);
+  llvm::SmallString<256> expected(CudaPath.getValue()), actualPath, expectedPath;
+  llvm::sys::path::append(expected, "include", "crt", "host_defines.h");
+  if (entry == nullptr || !compiler.getTarget().getTriple().isOSLinux() ||
+      !isConfiguredCudaSdkDependencyRole(path) ||
+      llvm::sys::fs::real_path(path, actualPath) ||
+      llvm::sys::fs::real_path(expected, expectedPath) ||
+      actualPath != expectedPath ||
+      !physicalSourceFileMatches(path, *entry, source))
+    return false;
+  if (name == "__device__")
+    return frontendCgMacroTokens(*macro, preprocessor,
+                                 {"__location__", "(", "device", ")"});
+  if (name == "__location__")
+    return frontendCgMacroTokens(*macro, preprocessor,
+                                 {"__annotate__", "(", "a", ")"}, true);
+  if (name == "__annotate__")
+    return frontendCgMacroTokens(*macro, preprocessor,
+                                 {"__attribute__", "(", "(", "a", ")", ")"}, true);
+  return false;
+}
+
 // The Linux stdio entry may use the product's stdarg header even though it is
 // outside the forced CUDA wrapper ancestry. This proves only that exact file,
 // not ownership of its resource directory or any other inquiry in the file.
@@ -4277,6 +4387,18 @@ void AscifyAction::FileChanged(
     return;
   }
   enteredSourceFileIds.insert(file);
+  if (frontendCompatibility.enabled() &&
+      verifiedFrontendCgFile(file, getCompilerInstance(), frontendCompatibility)) {
+    auto &compiler = getCompilerInstance();
+    auto &preprocessor = compiler.getPreprocessor();
+    if (compiler.getLangOpts().CUDA &&
+        !compiler.getPreprocessorOpts().RetainExcludedConditionalBlocks &&
+        trustedFrontendCgCudaControl("__CUDA__", preprocessor.getMacroInfo(
+            preprocessor.getIdentifierInfo("__CUDA__")), compiler) &&
+        trustedFrontendCgCudaControl("__CUDACC__", preprocessor.getMacroInfo(
+            preprocessor.getIdentifierInfo("__CUDACC__")), compiler))
+      verifiedFrontendCgEntryFileIds.insert(file.getHashValue());
+  }
   if (localHeaderContext != nullptr &&
       localHeaderContext->inputEvidence != nullptr) {
     auto &evidence = *localHeaderContext->inputEvidence;
@@ -7892,6 +8014,13 @@ void AscifyAction::Defined(const clang::Token &MacroNameTok,
 void AscifyAction::MacroUndefined(
     const clang::Token &MacroNameTok,
     const clang::MacroDefinition &MD) {
+  if (frontendCompatibility.enabled() &&
+      MacroNameTok.getIdentifierInfo() != nullptr &&
+      frontendCgControlName(MacroNameTok.getIdentifierInfo()->getName()) &&
+      !trustedFrontendCgControlOwner(
+          MacroNameTok.getIdentifierInfo()->getName(), MacroNameTok.getLocation(),
+          getCompilerInstance(), frontendCompatibility))
+    frontendCgControlModified = true;
   if (MacroNameTok.getIdentifierInfo() != nullptr &&
       MacroNameTok.getIdentifierInfo()->getName() == "__CUDACC__") {
     auto &compiler = getCompilerInstance();
@@ -7930,6 +8059,10 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
       getCompilerInstance().getSourceManager();
   const auto definitionFile = sourceManager.getFileID(
       sourceManager.getSpellingLoc(MacroNameTok.getLocation()));
+  if (frontendCompatibility.enabled() && frontendCgControlName(name) &&
+      !trustedFrontendCgControlOwner(name, MacroNameTok.getLocation(),
+                                    getCompilerInstance(), frontendCompatibility))
+    frontendCgControlModified = true;
   if (name == "__CUDACC__" &&
       (definitionFile != getCompilerInstance().getPreprocessor().getPredefinesFileID() ||
        !sourceManager.isWrittenInBuiltinFile(MacroNameTok.getLocation())) &&
@@ -8391,6 +8524,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
   auto &source = compiler.getSourceManager();
   std::set<unsigned> auditedFiles, nativeFiles;
   std::set<unsigned> frozenTextureUtilityFiles;
+  std::set<unsigned> frozenTextureCgFiles;
   // A physical file may be entered more than once with different include
   // parents or macro contexts. translateFile returns only its first FileID;
   // retain that inventory, but audit every observed inclusion independently.
@@ -8407,6 +8541,18 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     if (textureOnly) {
       if (frozenNvidiaSampleHelperFileRole(source, begin) != 0)
         frozenTextureUtilityFiles.insert(file.getHashValue());
+      // CG SFINAE utilities belong to the explicitly selected product profile.
+      // Admit only their physical, byte-identical inclusion with the proved
+      // CUDA controls and exact device-attribute expansion chain. This set is
+      // used solely for dependent utility types; concrete instances and all
+      // texture layout observations retain the ordinary checks below.
+      if (!frontendCgControlModified && !cudaAttributeControlModified &&
+          verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
+          !macroAlteredFrontendCgFileIds.count(file.getHashValue()) &&
+          verifiedFrontendCgFile(file, compiler, frontendCompatibility)) {
+        frozenTextureUtilityFiles.insert(file.getHashValue());
+        frozenTextureCgFiles.insert(file.getHashValue());
+      }
       // exception.h is the one templated dependency outside the five existing
       // helper roles. Require its exact parsed bytes and the authenticated
       // immediate helper_functions include instance; a basename is not proof.
@@ -8447,11 +8593,26 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     RecordAudit(clang::ASTContext &context, clang::SourceManager &source,
                 const std::set<unsigned> &sdk,
                 const std::set<unsigned> &audited,
-                const std::set<unsigned> &native, const std::set<unsigned> &frozenTextureUtilityFiles, bool textureOnly)
+                const std::set<unsigned> &native, const std::set<unsigned> &frozenTextureUtilityFiles,
+                const std::set<unsigned> &frozenTextureCgFiles, bool textureOnly)
         : context(context), source(source), sdk(sdk), audited(audited), native(native), frozenTextureUtilityFiles(frozenTextureUtilityFiles),
+          frozenTextureCgFiles(frozenTextureCgFiles),
           textureOnly(textureOnly) {}
     bool shouldVisitTemplateInstantiations() const { return true; }
     bool shouldVisitImplicitCode() const { return true; }
+    bool VisitNamespaceDecl(clang::NamespaceDecl *declaration) {
+      const auto location = source.getExpansionLoc(declaration->getLocation());
+      if (location.isValid() &&
+          frozenTextureCgFiles.count(source.getFileID(location).getHashValue()) &&
+          declaration->getName() == "cooperative_groups" &&
+          !declaration->getDeclContext()->isTranslationUnit()) {
+        badLocation = location;
+        badName = "cooperative_groups";
+        badReason = "product CG header included outside translation-unit namespace";
+        return false;
+      }
+      return true;
+    }
     bool TraverseInitListExpr(clang::InitListExpr *expression) {
       // An empty adapter initializer zero-initializes the published fields.
       // Its semantic form also contains SDK-only subobject initializers whose
@@ -8943,7 +9104,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       // native implementation templates remain independently audited.
       if (type->isDependentType() &&
           !native.count(source.getFileID(location).getHashValue())) {
-        // Exact parsed bytes identify the already reviewed Sample helpers.
+        // Exact parsed bytes identify the reviewed Sample/profile utilities.
         // Their uninstantiated generic utilities do not establish a texture
         // layout; concrete instantiations still traverse the ordinary checks.
         // User templates and the full Runtime removal gate remain unchanged.
@@ -9049,10 +9210,11 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     const std::set<unsigned> &audited;
     const std::set<unsigned> &native;
     const std::set<unsigned> &frozenTextureUtilityFiles;
+    const std::set<unsigned> &frozenTextureCgFiles;
     const bool textureOnly;
     std::set<const clang::RecordDecl *> reflectedRecords;
     std::set<const clang::VarDecl *> inquiryVariables;
-  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, textureOnly);
+  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, frozenTextureCgFiles, textureOnly);
   if (!records.TraverseDecl(compiler.getASTContext().getTranslationUnitDecl()))
     {
       const auto diagnostic = compiler.getDiagnostics().getCustomDiagID(
@@ -9112,6 +9274,14 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
       getCompilerInstance().getSourceManager();
   const clang::MacroInfo *macroInfo = MD.getMacroInfo();
   const auto profileUse = sourceManager.getExpansionLoc(MacroNameTok.getLocation());
+  if (frontendCompatibility.enabled() && profileUse.isValid()) {
+    const auto file = sourceManager.getFileID(profileUse);
+    if (verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
+        !frontendCgMacroExpansionMatches(
+            MacroNameTok.getIdentifierInfo()->getName(), macroInfo, file,
+            getCompilerInstance(), frontendCompatibility))
+      macroAlteredFrontendCgFileIds.insert(file.getHashValue());
+  }
   if (frontendCompatibility.enabled() && profileUse.isValid() &&
       sourceManager.getFilename(profileUse) ==
           frontendCompatibility.canonicalRoot + "/host_math.h")

@@ -220,6 +220,14 @@ unlisted files, and unadmitted cooperative-group subheaders are rejected.
 An installed or relocated executable cannot replace a missing/damaged installed
 profile with an unrelated source-tree copy.
 
+Texture projection may retain the uninstantiated SFINAE utilities in the two
+exact product CG headers. Each physical inclusion must preserve the CUDA
+controls, the verified SDK device-attribute expansion chain, and the global
+`cooperative_groups` namespace. Foreign macro expansions or control changes
+keep the texture audit closed. This exception does not admit caller templates,
+skip concrete template instances or SDK layout observations, or change the full
+Runtime-header removal gate.
+
 The current profile includes thread-block operations, a restricted 32-thread
 tile, typed reductions, and a distinct scratch-reduction projection. Target
 implementations live in the compatibility headers; parsing declarations alone

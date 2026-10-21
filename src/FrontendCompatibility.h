@@ -47,4 +47,11 @@ bool IsVerifiedFrontendHostMathInput(
     const std::string& path,
     const std::string& parsedContents);
 
+// Identifies only the two exact product CG parser headers. This is byte/path
+// identity, not preprocessing or AST admission; callers must prove those too.
+bool IsVerifiedFrontendCooperativeGroupsInput(
+    const FrontendCompatibilityConfig& config,
+    const std::string& path,
+    const std::string& parsedContents);
+
 }  // namespace ascify

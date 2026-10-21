@@ -107,6 +107,9 @@ private:
   std::set<unsigned> preservedHostMathCalleeOffsets;
   bool frontendHostMathBuiltinMacroDefined = false;
   std::set<unsigned> macroAlteredFrontendHostMathFileIds;
+  std::set<unsigned> verifiedFrontendCgEntryFileIds;
+  std::set<unsigned> macroAlteredFrontendCgFileIds;
+  bool frontendCgControlModified = false;
   std::set<clang::FileID> enteredSourceFileIds;
   std::map<std::string, clang::SourceLocation> Ifndefs;
   std::vector<clang::SourceRange> SkippedSourceRanges;
