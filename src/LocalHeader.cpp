@@ -1112,6 +1112,61 @@ bool ascifySourceWithLocalHeaderClosure(
               prior.filenameOffset == edge.filenameOffset;
         });
       };
+      // Flattening a once-protected provider removes its physical once state.
+      // A retained sibling may otherwise enter that provider a second time,
+      // even if the sibling uses no parent declaration or helper macro. Close
+      // over those already-selected root siblings before constructing edits.
+      // This does not admit active nested includes or arbitrary include trees.
+      const auto samePhysicalEdge = [](const LocalHeaderEdge &a,
+                                       const LocalHeaderEdge &b) {
+        return a.parentSourcePath == b.parentSourcePath &&
+            a.childSourcePath == b.childSourcePath &&
+            a.originalSpelling == b.originalSpelling &&
+            a.sourceOffset == b.sourceOffset &&
+            a.filenameOffset == b.filenameOffset &&
+            a.directLiteral == b.directLiteral &&
+            a.isAngled == b.isAngled &&
+            a.physicallySkipped == b.physicallySkipped;
+      };
+      const auto singleRootEntry = [&](const LocalHeaderInputEvidence &evidence,
+                                        const std::string &path) {
+        const LocalHeaderEdge *found = nullptr;
+        for (const auto &edge : evidence.originalEdges) {
+          if (edge.parentSourcePath != originalPlan.rootSourcePath() ||
+              edge.childSourcePath != path) continue;
+          if (found != nullptr) return static_cast<const LocalHeaderEdge *>(nullptr);
+          found = &edge;
+        }
+        return found != nullptr && found->directLiteral && !found->isAngled &&
+            !found->physicallySkipped ? found : nullptr;
+      };
+      if (requireHelperTransaction) {
+        bool added = true;
+        while (added) {
+          added = false;
+          for (const auto &edge : originalEvidence.originalEdges) {
+            const auto &parent = edge.parentSourcePath;
+            if (!contextualHeaders.count(edge.childSourcePath) ||
+                contextualHeaders.count(parent) || parent == originalPlan.rootSourcePath())
+              continue;
+            const auto *originalRootEdge = singleRootEntry(originalEvidence, parent);
+            const auto *discoveryRootEdge = singleRootEntry(discoveryEvidence, parent);
+            if (!skippedInBothParses(edge) ||
+                originalEvidence.fileEntries[parent] != 1 ||
+                discoveryEvidence.fileEntries[parent] != 1 ||
+                discoveryEvidence.fileEntries[edge.childSourcePath] != 1 ||
+                !originalPlan.isSelectedRootHeader(parent) ||
+                !plan.isSelectedRootHeader(parent) ||
+                originalRootEdge == nullptr || discoveryRootEdge == nullptr ||
+                !samePhysicalEdge(*originalRootEdge, *discoveryRootEdge)) {
+              plan.fail("contextual skipped provider requires an identical selected root sibling: " + parent);
+              return false;
+            }
+            contextualHeaders.insert(parent);
+            added = true;
+          }
+        }
+      }
       for (const auto &path : contextualHeaders) {
         const LocalHeaderEdge *selected = nullptr;
         unsigned rootEdgeCount = 0;

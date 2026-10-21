@@ -128,6 +128,14 @@ position evidence. Existing pragma-free context rules are unaffected.
 The unique original entry and every skipped re-entry must pass the existing
 include proof in both original parses. Only the exact once line is blanked in
 the virtual input, preserving line boundaries; original files stay unchanged.
+If a retained sibling would re-enter a flattened provider, helper context
+conversion also selects that sibling for contextual expansion. This is a finite
+closure over already selected direct root headers: both original parses must
+agree on the one real entry and the exact literal, physically skipped include.
+Every added sibling still passes the existing raw-input, pragma and nested-include
+checks. Real nested entries, macro/angle includes and unselected parents remain
+rejected. This also covers siblings that use no provider symbol or helper macro.
+
 All non-once active pragma events have an ordered digest of their complete
 physical line and presumed source location. This digest must match discovery,
 original and joint parsing, alongside expanded tokens, final macros and input

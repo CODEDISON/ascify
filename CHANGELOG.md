@@ -6,6 +6,9 @@ for supported domains and experimental paths.
 
 ## Unreleased
 
+- Preserve once-protected contextual providers across independent selected root
+  siblings, with the same two-parse skipped-edge and strict joint proof.
+
 ### Added
 
 - Recursive inherited-helper discovery can collect original context before

@@ -78,6 +78,27 @@ def main():
         ('retained_preprocessor', SOURCE, HEADER, False, ['retained_preprocessor'], True),
         ('malformed_source', SOURCE + '\nvoid malformed( {\n', HEADER, False, [], False),
     ]
+    independent = '#pragma once\n#include "context.cuh"\ninline int independent_sibling_value() { return 7; }\n'
+    siblings = {
+        'once_independent_sibling': {'sibling.cuh': independent},
+        'once_two_independent_siblings': {'sibling.cuh': independent,
+            'second.cuh': independent.replace('independent_sibling_value', 'second_sibling_value')},
+        'once_packed_sibling': {'sibling.cuh': independent},
+        'once_sibling_real_nested_entry': {'sibling.cuh': independent + '#include "extra.cuh"\n',
+            'extra.cuh': 'constexpr int extra_value = 3;\n'},
+        'once_sibling_include_level': {'sibling.cuh': independent + 'constexpr int observed_level = __INCLUDE_LEVEL__;\n'},
+        'once_sibling_duplicate_root': {'sibling.cuh': independent},
+        'once_sibling_macro_include': {'sibling.cuh': independent.replace('#include "context.cuh"',
+            '#define CONTEXT_HEADER "context.cuh"\n#include CONTEXT_HEADER')},
+        'once_sibling_angle_include': {'sibling.cuh': independent.replace('"context.cuh"', '<context.cuh>')},
+        'once_sibling_not_direct_root': {'sibling.cuh': '#include "nested.cuh"\n', 'nested.cuh': independent},
+    }
+    for label, extra in siblings.items():
+        prefix = '#include "context.cuh"\n#include "sibling.cuh"\n'
+        if label == 'once_two_independent_siblings': prefix += '#include "second.cuh"\n'
+        if label == 'once_sibling_duplicate_root': prefix += '#include "sibling.cuh"\n'
+        cases.append((label, prefix + BODY, HEADER + (PACK if label == 'once_packed_sibling' else ''),
+            label in ('once_independent_sibling', 'once_two_independent_siblings', 'once_packed_sibling'), [], True))
     rows = []
 
     def run(argv, directory):
@@ -101,6 +122,8 @@ def main():
         (inputs / 'context.cuh').write_text(header)
         if label == 'nested_real_entry':
             (inputs / 'extra.cuh').write_text('constexpr int extra_value = 3;\n')
+        for name, content in siblings.get(label, {}).items():
+            (inputs / name).write_text(content)
         initial = inventory(inputs)
         syntax = run([a.clang, '-x', 'cuda', '--cuda-host-only', '-nocudalib',
             '--cuda-path=' + str(a.cuda_path), '-resource-dir=' + str(a.resource_dir),
@@ -140,7 +163,12 @@ def main():
                     assert 'context_input=' + str(path) + '\t' + sha(path) + '\n' in marker, label
                 assert '#include "context.cuh"' not in text and '#include <helper_cuda.h>' not in text, label
                 assert 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS' in text, label
-                if label == 'transitive_packed_texture':
+                if label.startswith('once_'):
+                    assert 'independent_sibling_value' in text and '#include \"sibling.cuh\"' not in text, label
+                    for name in siblings[label]:
+                        path = inputs / name
+                        assert 'context_inline=' + str(path) + '\t' in marker, label
+                if label in ('transitive_packed_texture', 'once_packed_sibling'):
                     assert PACK in text and 'Ascify preserved packed' in text, label
                 if a.ccec:
                     obj = case / 'target.o'
