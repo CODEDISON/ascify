@@ -55,6 +55,8 @@ run_check "packed unsigned-byte SAD host arithmetic" \
   sh "$rewrite_dir/check_packed_sad_host.sh"
 run_check "unsigned texture host arithmetic and type rejection" \
   sh "$rewrite_dir/check_texture_unsigned_host.sh"
+run_check "ordinary malloc texture ownership and lifecycle" \
+  sh "$rewrite_dir/check_texture_malloc_host.sh"
 run_check "dependent sample-helper emitted type domain" \
   "$python" -B "$rewrite_dir/check_sample_helper_template_domain.py"
 run_check "narrow cooperative-groups compatibility contract" \

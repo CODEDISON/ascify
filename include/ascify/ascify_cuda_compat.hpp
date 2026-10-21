@@ -397,6 +397,32 @@ struct RuntimeTextureHooks {
 };
 inline std::atomic<const RuntimeTextureHooks *> runtimeTextureHooks{nullptr};
 
+// Requested extents for ordinary cudaMalloc allocations, recorded before any
+// texture exists. An exhausted table only makes a future texture view
+// unprovable; it must never turn a successful ordinary allocation into failure.
+// Lock order is allocation registry -> texture registry. Texture callbacks
+// never acquire this lock, and no ACL API returns an inferred rounded extent.
+struct RuntimeAllocation {
+  void *pointer = nullptr;
+  size_t bytes = 0;
+  int32_t device = -1;
+  void *context = nullptr;
+};
+struct RuntimeAllocationRegistry {
+  RuntimeLock lock;
+  RuntimeAllocation records[128] = {};
+};
+inline RuntimeAllocationRegistry &runtimeAllocationRegistry() {
+  static RuntimeAllocationRegistry registry;
+  return registry;
+}
+inline RuntimeAllocation *runtimeAllocationLocked(const void *pointer) {
+  if (!pointer) return nullptr;
+  for (auto &record : runtimeAllocationRegistry().records)
+    if (record.pointer == pointer) return &record;
+  return nullptr;
+}
+
 // CUDA initializes its runtime and a device's primary context lazily. ACL has
 // two separate process/device operations instead: aclInit is process-wide and
 // aclrtSetDevice creates the calling thread's default context. Keep that state
@@ -837,10 +863,13 @@ inline aclError cudaDeviceReset() {
     return detail::rememberLifecycleError(status);
   }
   detail::selectedDeviceForThread() = current;
+  detail::RuntimeLockGuard allocationGuard(detail::runtimeAllocationRegistry().lock);
   status = detail::runtime_manager.resetDevice(current);
   if (status == ACL_SUCCESS) {
     const auto *hooks = detail::runtimeTextureHooks.load(std::memory_order_acquire);
     if (hooks) hooks->afterReset(current);
+    for (auto &record : detail::runtimeAllocationRegistry().records)
+      if (record.pointer && record.device == current) record = {};
   }
   return detail::rememberLifecycleError(status);
 }
@@ -854,7 +883,19 @@ inline aclError cudaMalloc(void** device_pointer, size_t bytes) {
   *device_pointer = nullptr;
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
-  return aclrtMalloc(device_pointer, bytes, ACL_MEM_MALLOC_HUGE_FIRST);
+  detail::RuntimeLockGuard allocationGuard(detail::runtimeAllocationRegistry().lock);
+  const aclError status = aclrtMalloc(device_pointer, bytes, ACL_MEM_MALLOC_HUGE_FIRST);
+  if (status != ACL_SUCCESS || !*device_pointer || !bytes) return status;
+  for (auto &record : detail::runtimeAllocationRegistry().records) {
+    if (record.pointer) continue;
+    void *context = nullptr;
+    // Readiness already established the actual current device on this thread.
+    // A failed optional context query denies provenance, not the allocation.
+    if (aclrtGetCurrentContext(&context) == ACL_SUCCESS && context)
+      record = {*device_pointer, bytes, detail::selectedDeviceForThread(), context};
+    break;
+  }
+  return status;
 }
 
 template<typename T>
@@ -873,13 +914,20 @@ inline aclError cudaFree(void* device_pointer) {
   if (device_pointer == nullptr) { return ACL_SUCCESS; }
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
+  detail::RuntimeLockGuard allocationGuard(detail::runtimeAllocationRegistry().lock);
+  auto *allocation = detail::runtimeAllocationLocked(device_pointer);
   const auto *hooks = detail::runtimeTextureHooks.load(std::memory_order_acquire);
   if (hooks) {
     bool handled = false;
     const aclError status = hooks->freeAllocation(device_pointer, &handled);
-    if (handled || status != ACL_SUCCESS) return status;
+    if (handled || status != ACL_SUCCESS) {
+      if (handled && status == ACL_SUCCESS && allocation) *allocation = {};
+      return status;
+    }
   }
-  return aclrtFree(device_pointer);
+  const aclError status = aclrtFree(device_pointer);
+  if (status == ACL_SUCCESS && allocation) *allocation = {};
+  return status;
 }
 
 inline aclError cudaMallocHost(void** host_pointer, size_t bytes) {

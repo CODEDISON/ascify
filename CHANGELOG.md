@@ -11,6 +11,11 @@ for supported domains and experimental paths.
 - Experimental lowering of one literal unsigned packed-byte SAD accumulate
   instruction, with private uint32 operands and modulo-32-bit arithmetic.
   Other inline assembly remains outside this rewrite; target validation is required.
+
+- Proposed bounded Pitch2D views over recorded ordinary cudaMalloc allocations,
+  with requested-size, ownership and lifetime checks. This path awaits target
+  validation and adds no original sample acceptance by itself.
+
 - Texture projection can retain uninstantiated utilities from the exact selected
   product cooperative-groups profile after physical-input, CUDA-control and
   device-attribute macro proofs. Concrete instances, caller templates and SDK

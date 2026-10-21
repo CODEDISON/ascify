@@ -4,6 +4,14 @@ The texture adapter is under validation. Earlier float engineering probes have p
 
 ## Unsigned 32-bit element extension
 
+An additional ordinary-allocation path is under development, with no target
+validation claimed yet. It accepts exact-base `cudaMalloc` storage only when
+the adapter recorded its requested extent and device/context ownership. Pitch2D
+views may use independent valid geometries. Interior, foreign and untracked
+pointers are rejected; failed proof never fabricates a size. The owner registry
+has 128 slots and does not limit successful ordinary allocations. See
+[the lifecycle decision](decisions/001-requested-allocation-texture-views.md).
+
 The additional channel is the exact CUDA `unsigned int` type, with a 32-bit
 single-component unsigned channel description. Array and layered-array storage,
 and an existing adapter-owned `cudaMallocPitch` allocation, retain the same

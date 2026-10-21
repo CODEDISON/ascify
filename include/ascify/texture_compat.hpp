@@ -17,6 +17,7 @@ struct TextureAllocation {
   void *context = nullptr;
   unsigned references = 0;
   bool array = false, layered = false, unsigned_element = false;
+  bool borrowed = false;
 };
 struct TextureHandle {
   void *descriptor = nullptr;
@@ -136,6 +137,12 @@ inline void textureAfterReset(int32_t device) {
     if (record.device == device) record = {};
 }
 
+inline void textureInstallHooks() {
+  static const RuntimeTextureHooks hooks={textureCheckPending,textureFreeAllocation,
+                                          textureAfterReset};
+  runtimeTextureHooks.store(&hooks,std::memory_order_release);
+}
+
 inline aclError textureAllocate(TextureAllocation **result, size_t width,
     size_t height, size_t layers, bool array, bool layered, bool unsigned_element = false) {
   // Bounds also keep all sampler integer conversions and float extents exact.
@@ -149,12 +156,11 @@ inline aclError textureAllocate(TextureAllocation **result, size_t width,
   }
   if (!textureMultiply(pitch,height,plane) || !textureMultiply(plane,layers,bytes))
     return ACL_ERROR_RT_PARAM_INVALID;
+  RuntimeLockGuard allocationGuard(runtimeAllocationRegistry().lock);
   int32_t device = -1; void *context = nullptr;
   aclError status = textureCurrent(device,context);
   if (status != ACL_SUCCESS) return status;
-  static const RuntimeTextureHooks hooks={textureCheckPending,textureFreeAllocation,
-                                          textureAfterReset};
-  runtimeTextureHooks.store(&hooks,std::memory_order_release);
+  textureInstallHooks();
   TextureLock guard;
   TextureAllocation *slot = nullptr;
   for (auto &record : textureRegistry().allocations)
@@ -374,6 +380,9 @@ inline aclError cudaCreateTextureObject(cudaTextureObject_t *output,
   for(unsigned i=0;i<4;++i) if(texture->borderColor[i]!=0) return ACL_ERROR_FEATURE_UNSUPPORTED;
   for(unsigned i=0;i<3;++i) if(texture->addressMode[i]!=cudaAddressModeWrap &&
       texture->addressMode[i]!=cudaAddressModeClamp) return ACL_ERROR_FEATURE_UNSUPPORTED;
+  // Hold owner provenance stable until the descriptor is published. cudaFree
+  // and cudaDeviceReset take this same lock before invoking texture callbacks.
+  detail::RuntimeLockGuard allocationGuard(detail::runtimeAllocationRegistry().lock);
   int32_t device=-1; void *context=nullptr;
   aclError status=detail::textureCurrent(device,context);
   if(status!=ACL_SUCCESS) return status;
@@ -397,7 +406,25 @@ inline aclError cudaCreateTextureObject(cudaTextureObject_t *output,
     if(!width || !height || width>(1U<<20) || height>(1U<<20) ||
         !detail::textureMultiply(width,sizeof(float),row_bytes) ||
         !detail::textureRowsRange(pitch,row_bytes,height,bytes) ||
-        !record || pitch!=record->pitch || bytes>record->bytes) return ACL_ERROR_RT_PARAM_INVALID;
+        reinterpret_cast<uintptr_t>(input.devPtr)%alignof(uint32_t) ||
+        pitch%sizeof(uint32_t)) return ACL_ERROR_RT_PARAM_INVALID;
+    if(unsigned_element && texture->filterMode!=cudaFilterModePoint)
+      return ACL_ERROR_FEATURE_UNSUPPORTED;
+    if(!record) {
+      const auto *owner=detail::runtimeAllocationLocked(input.devPtr);
+      if(!owner || owner->device!=device || owner->context!=context || bytes>owner->bytes)
+        return ACL_ERROR_RT_PARAM_INVALID;
+      for(auto &candidate:detail::textureRegistry().allocations)
+        if(!candidate.storage && !candidate.references) {record=&candidate;break;}
+      if(!record) return ACL_ERROR_BAD_ALLOC;
+      // Each descriptor owns its geometry; one ordinary allocation can back
+      // multiple distinct valid pitches. The host slot pins the generation
+      // until all its descriptors are destroyed, even after storage is freed.
+      *record={owner->pointer,owner->bytes,0,0,0,1,device,context,0,false,false,false,true};
+      detail::textureInstallHooks();
+    }
+    if((!record->borrowed && pitch!=record->pitch) || bytes>record->bytes)
+      return ACL_ERROR_RT_PARAM_INVALID;
   } else return ACL_ERROR_FEATURE_UNSUPPORTED;
   if(!record || !detail::textureOwned(*record,device,context)) return ACL_ERROR_RT_PARAM_INVALID;
   if(unsigned_element && texture->filterMode!=cudaFilterModePoint)

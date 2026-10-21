@@ -1,4 +1,5 @@
 #define __aicore__
+#define ASCIFY_TEST_CUSTOM_CURRENT_CONTEXT
 #define ASCIFY_TEST_CONTROLLABLE_PROFILER_EXIT_REGISTRATION
 int ascify_test_register_profiler_exit_cleanup(void (*)());
 #include <ascify/ascify_cuda_compat.hpp>
