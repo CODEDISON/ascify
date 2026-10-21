@@ -9954,14 +9954,17 @@ bool AscifyAction::ownedPreservedMaxLocation(clang::SourceLocation location) {
     const auto physical = llvm::MemoryBuffer::getFile(localHeaderContext->sourcePath);
     return !invalid && physical && (*physical)->getBuffer() == bytes;
   }
-  if (entry == nullptr || !physicalSourceFileMatches(
-          source.getFilename(location), *entry, source)) return false;
-  // This is the current physical root or a selected original local header,
-  // not an arbitrary -isystem file or a provider selected by its basename.
-  return file == source.getMainFileID() ||
+  // Reject unselected headers before the expensive physical-buffer proof.
+  // CUB/SDK macro observations never acquire ownership from file identity.
+  const bool selected = file == source.getMainFileID() ||
       (localHeaderContext != nullptr && localHeaderContext->plan != nullptr &&
        localHeaderContext->plan->isSelectedRootHeader(
            source.getFilename(location).str()));
+  if (!selected) return false;
+  // The current physical root and selected original headers still require
+  // the same complete UID and parsed/physical-buffer identity proof.
+  return entry != nullptr && physicalSourceFileMatches(
+      source.getFilename(location), *entry, source);
 }
 
 bool AscifyAction::recordPreservedMaxFallback(
