@@ -19,6 +19,18 @@
 
 namespace ascify {
 namespace {
+// Obtain the record type through the available ASTContext API. Newer Clang
+// lazily creates tag types and explicitly deletes TagDecl::getTypeForDecl.
+template <class Context, class Record>
+auto packedRecordType(Context &context, const Record *record, int)
+    -> decltype(context.getRecordType(record), clang::QualType()) {
+  return context.getRecordType(record);
+}
+template <class Context, class Record>
+auto packedRecordType(Context &context, const Record *record, long)
+    -> decltype(context.getCanonicalTagType(record), clang::QualType()) {
+  return context.getCanonicalTagType(record);
+}
 unsigned lineBegin(llvm::StringRef b, unsigned p) {
   const auto at = b.rfind('\n', p);
   return at == llvm::StringRef::npos ? 0 : at + 1;
@@ -276,9 +288,11 @@ bool PackedRecordBoundary::prove(clang::CompilerInstance &ci,
         }
         const auto *record = llvm::dyn_cast<clang::RecordDecl>(d);
         if (!record || !record->isCompleteDefinition() || !record->isStruct() ||
-            record->isDependentContext() || record->getTypeForDecl()->isDependentType()) {
+            record->isDependentContext()) {
           good = false; return true;
         }
+        const auto type = packedRecordType(ast, record, 0);
+        if (type.isNull() || type->isDependentType()) { good = false; return true; }
         for (const auto *attribute : record->attrs()) {
           const auto *pack = llvm::dyn_cast<clang::MaxFieldAlignmentAttr>(attribute);
           if (!pack || !pack->isImplicit() || pack->getAlignment() != 8) good = false;
