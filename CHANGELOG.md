@@ -8,6 +8,10 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Bounded `cudaMemcpy2DToArray` for non-layered scalar32 arrays, with byte-unit
+  pitches, whole-element rectangles, ownership checks and real synchronous ACL
+  row copies. Real-device validation remains required for this addition.
+
 - Experimental lowering of one literal unsigned packed-byte SAD accumulate
   instruction, with private uint32 operands and modulo-32-bit arithmetic.
   Other inline assembly remains outside this rewrite; target validation is required.

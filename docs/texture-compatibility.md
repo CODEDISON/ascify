@@ -57,6 +57,18 @@ Interpolation uses float arithmetic over finite participating texels. The adapte
 
 ## Ownership and lifetime
 
+`cudaMemcpy2DToArray` adds a bounded synchronous rectangle upload to an existing
+non-layered FP32 or unsigned-int32 array. X offsets, width and source pitch use
+bytes; Y offsets and height use rows. This adapter requires X and width to be
+multiples of four, admits only explicit host-to-device or device-to-device
+directions, and checks the complete source span and destination rectangle before
+writing. Source padding and untouched destination bytes are retained. Context
+ownership, sticky texture errors and default-stream ordering follow the existing
+copy rules. The first ACL copy error is returned; rows already copied are not
+rolled back. Layered arrays, subword rectangles, other channels and inferred
+directions remain outside this addition. Host memory-model checks do not establish
+target support; this addition still requires separate real-device validation.
+
 Allocations, device descriptors and sticky words use real ACL memory. The registry is process-wide across translation units and records device/context ownership. API operations propagate actual allocation, copy, synchronization and free errors. Copies preserve row padding and expose backing updates to later fetches. Non-host-to-host copies and row memset wait for the real default stream before issuing immediate ACL operations, even before a texture object is created; synchronization errors are returned before writing destination data.
 
 Freeing an array or an owned pitched allocation synchronizes pending device work, invalidates every referring device descriptor, and frees the backing GM allocation. It does not silently destroy the separately owned texture objects or defer the backing free. A retired registry slot remains reserved while its texture objects exist. A later destroy frees that object's descriptor and recycles the retired slot after the final reference. Using a texture after its backing has been freed is outside the valid CUDA resource precondition; this adapter detects it before reading backing memory and reports a sticky error. No claim is made that CUDA itself defines such a fetch.

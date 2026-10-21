@@ -102,6 +102,8 @@ int main() {
   assert(ascify::cudaDeviceSynchronize() == ACL_SUCCESS);
   assert(std::isnan(ascify::tex2D<float>(token, 0, 0)));
   assert(ascify::cudaDeviceSynchronize() == ACL_ERROR_FEATURE_UNSUPPORTED);
+  assert(ascify::cudaMemcpy2DToArray(array,0,0,values,row_bytes,row_bytes,2,
+      ACL_MEMCPY_HOST_TO_DEVICE) == ACL_ERROR_FEATURE_UNSUPPORTED);
   assert(ascify::cudaDeviceSynchronize() == ACL_ERROR_FEATURE_UNSUPPORTED);
   assert(ascify::cudaDestroyTextureObject(token) == ACL_ERROR_FEATURE_UNSUPPORTED);
   assert(ascify::cudaFreeArray(array) == ACL_SUCCESS);

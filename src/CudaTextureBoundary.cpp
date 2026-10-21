@@ -13,7 +13,7 @@ namespace ascify {
 namespace {
 constexpr const char *Names[] = {
   "cudaMallocPitch", "cudaMallocArray", "cudaMalloc3DArray", "cudaFreeArray",
-  "cudaMemcpy2D", "cudaMemset2D", "cudaMemcpyToArray", "cudaMemcpy3D",
+  "cudaMemcpy2D", "cudaMemset2D", "cudaMemcpyToArray", "cudaMemcpy2DToArray", "cudaMemcpy3D",
   "cudaCreateTextureObject", "cudaDestroyTextureObject", "cudaCreateChannelDesc",
   "make_cudaExtent", "make_cudaPos", "make_cudaPitchedPtr", "tex2D", "tex2DLayered",
   "cudaArray", "cudaArray_t", "cudaArray_const_t", "cudaTextureObject_t",

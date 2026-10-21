@@ -869,7 +869,7 @@ bool isAdmittedCudaRuntimeStatusCall(
   static const char *const admittedNames[] = {
       "cudaMalloc", "cudaFree", "cudaMemcpy", "cudaMemcpyAsync",
       "cudaMallocPitch", "cudaMallocArray", "cudaMalloc3DArray", "cudaFreeArray",
-      "cudaMemcpy2D", "cudaMemset2D", "cudaMemcpyToArray", "cudaMemcpy3D",
+      "cudaMemcpy2D", "cudaMemset2D", "cudaMemcpyToArray", "cudaMemcpy2DToArray", "cudaMemcpy3D",
       "cudaCreateTextureObject", "cudaDestroyTextureObject",
       "cudaMemset", "cudaMemsetAsync", "cudaMallocHost",
       "cudaProfilerStart", "cudaProfilerStop",
