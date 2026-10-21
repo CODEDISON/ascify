@@ -1323,6 +1323,91 @@ std::string findConventionalMainOuterGuard(
   return spellings[2];
 }
 
+// The prefix recognizer above is also used for output-header shielding; it
+// does not prove that a conditional encloses the whole input. Runtime-header
+// admission needs that stronger property before treating one guard level as
+// an unconditional part of a selected local header. Keep the original guard
+// and all its source tokens: this is not a guessed parent macro environment.
+bool hasCompleteMainOuterGuard(clang::CompilerInstance &compiler) {
+  const std::string guard = findConventionalMainOuterGuard(compiler);
+  if (guard.empty() || isAscifyCudaCompatPublishedMacro(guard) ||
+      isNvidiaSampleHelperObservableMacro(guard))
+    return false;
+  auto &source = compiler.getSourceManager();
+  bool invalid = false;
+  const auto buffer = source.getBufferData(source.getMainFileID(), &invalid);
+  if (invalid) return false;
+  clang::Lexer lexer(source.getLocForStartOfFile(source.getMainFileID()),
+                     compiler.getLangOpts(), buffer.begin(), buffer.begin(),
+                     buffer.end());
+  struct RawToken { std::string spelling; bool startsLine; bool isHash; };
+  std::vector<RawToken> tokens;
+  clang::Token token;
+  lexer.LexFromRawLexer(token);
+  while (token.isNot(clang::tok::eof)) {
+    if (token.isNot(clang::tok::comment)) {
+      bool bad = false;
+      const auto spelling = clang::Lexer::getSpelling(
+          token, source, compiler.getLangOpts(), &bad);
+      if (bad || token.is(clang::tok::unknown)) return false;
+      // Pragma operators can restore a macro without a textual #undef. Do
+      // not interpret strings or future replacement-list expansions here.
+      if (token.isAnyIdentifier() &&
+          (spelling == "_Pragma" || spelling == "__pragma"))
+        return false;
+      tokens.push_back({spelling, token.isAtStartOfLine(),
+                        token.is(clang::tok::hash)});
+    }
+    lexer.LexFromRawLexer(token);
+  }
+  unsigned depth = 0;
+  bool defined = false;
+  for (std::size_t i = 0; i < tokens.size();) {
+    // Directive identity comes from the token kind: the C++ digraph %:
+    // also denotes # and must not hide guard mutations or macro-stack ops.
+    if (!tokens[i].isHash || !tokens[i].startsLine) {
+      if (depth == 0 || !defined) return false;
+      ++i;
+      continue;
+    }
+    std::size_t end = i + 1;
+    while (end < tokens.size() && !tokens[end].startsLine) ++end;
+    if (end < i + 2) return false;
+    const auto &directive = tokens[i + 1].spelling;
+    const auto size = end - i;
+    if (i == 0) {
+      if (size != 3 || directive != "ifndef" ||
+          tokens[i + 2].spelling != guard) return false;
+      depth = 1;
+    } else if (!defined) {
+      if (i != 3 || size != 3 || directive != "define" ||
+          tokens[i + 2].spelling != guard) return false;
+      defined = true;
+    } else if (directive == "if" || directive == "ifdef" ||
+               directive == "ifndef") {
+      ++depth;
+    } else if (directive == "endif") {
+      if (depth == 0 || size != 2) return false;
+      --depth;
+      if (depth == 0) return end == tokens.size();
+    } else if (directive == "else" || directive == "elif" ||
+               directive == "elifdef" || directive == "elifndef") {
+      if (depth <= 1) return false;
+    } else if ((directive == "define" || directive == "undef") &&
+               size >= 3 && tokens[i + 2].spelling == guard) {
+      return false;
+    } else if (directive == "pragma" && size >= 3 &&
+               (tokens[i + 2].spelling == "push_macro" ||
+                tokens[i + 2].spelling == "pop_macro")) {
+      // Fail closed for every macro-stack operand, including escaped or
+      // macro-generated strings, rather than guessing which name it denotes.
+      return false;
+    }
+    i = end;
+  }
+  return false;
+}
+
 } // namespace
 
 void AscifyAction::RewriteString(StringRef s, clang::SourceLocation start) {
@@ -4414,7 +4499,16 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
     redundantCubIncludeCandidates.push_back(
         {hash_loc, filenameBegin, filenameEnd, resolved_file_name.str()});
   if (file_name == "cuda_runtime_api.h") {
-    if (!directRange || !directSpelling || preprocessorConditionalDepth != 0 ||
+    // A recursive closure translates a selected header as its own main file.
+    // Its ordinary whole-file guard is preserved in the emitted header. No
+    // arbitrary main-TU condition or nested local condition is admitted here.
+    const bool guardedLocalHeader =
+        preprocessorConditionalDepth == 1 && localHeaderContext != nullptr &&
+        localHeaderContext->plan != nullptr && localHeaderContext->depth != 0 &&
+        localHeaderContext->virtualInput == nullptr &&
+        hasCompleteMainOuterGuard(getCompilerInstance());
+    if (!directRange || !directSpelling ||
+        (preprocessorConditionalDepth != 0 && !guardedLocalHeader) ||
         !isConfiguredCudaRuntimeApiPath(resolved_file_name, SM)) {
       cudaRuntimeApiBoundaryFailed = true;
       const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(

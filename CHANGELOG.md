@@ -8,6 +8,9 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Direct physical CUDA Runtime includes inside proved whole-file guards of
+  selected local headers. Nested conditions, guard macro-stack operations and
+  conditional root-source includes remain outside this admission rule.
 - Transactional configuration guards for proved inactive Samples-helper branches;
   enabling an unsupported retained branch in the target produces an explicit error.
 - Generic 32-bit integer `atomicAdd` for proven device-helper parameters,

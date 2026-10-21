@@ -83,6 +83,26 @@ regression](../tests/rewrite/check_inherited_sample_helper_context.py). This pro
 preserves source context; it does not establish target API support or device
 correctness.
 
+## Runtime API includes inside a header guard
+
+A selected local header may directly include the physical configured
+`cuda_runtime_api.h` inside one conventional whole-file `#ifndef` / empty
+`#define` guard. This exception applies only while translating an actual
+selected header, not to conditional includes in the root translation unit.
+The guard remains unchanged in the output. The complete raw-token structure
+must end at its matching `#endif`, with no outer `else`/`elif`, guard mutation,
+or tokens outside the guard. Macro-stack pragmas and `_Pragma`/`__pragma`
+operators in the selected header are conservatively refused, including
+inactive source and macro replacement lists. An additional conditional around the Runtime
+include, a macro include, or a shadow SDK path still fails admission.
+
+This rule reuses the existing physical SDK identity and retained-source
+audits. It does not replay parent declarations/macros, authorize arbitrary
+conditional SDK inclusion, or prove a whole Sample can build or run. The
+[focused converter check](../tests/rewrite/check_local_runtime_api_guard.py)
+covers guarded positives, structural/conditional refusals, SDK shadows and
+preservation of previously published output on failure.
+
 ## Verification boundary
 
 The host model exercises path selection, canonicalization, parent-directory
