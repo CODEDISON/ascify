@@ -767,12 +767,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 70311)
+  if (contents.size() != 70413)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "d942deb16a767c87e783d3a90ecf1d04ee83672bb1af548802a224731d9d03de");
+      "0cc21c39f40d0e56092271c84f570b701638e7a7ac913f09deea7a676e280f08");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -799,12 +799,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 70311)
+  if (invalidBuffer || contents.size() != 70413)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "d942deb16a767c87e783d3a90ecf1d04ee83672bb1af548802a224731d9d03de");
+      "0cc21c39f40d0e56092271c84f570b701638e7a7ac913f09deea7a676e280f08");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -3498,13 +3498,178 @@ static bool proveNvidiaFindCudaDeviceCall(
   return true;
 }
 
+// Ignored leading attributes need not belong to Decl::getSourceRange(). Find
+// a conservative physical prefix from lexical declaration boundaries instead.
+// A directive is skippable only before any pending declaration tokens; an
+// interleaved directive rejects this proof rather than hiding an ATTR prefix
+// or allowing an inactive branch's punctuation to manufacture a boundary.
+static clang::SourceLocation physicalDeclarationPrefixBegin(
+    clang::SourceLocation declaredBegin, clang::Preprocessor &preprocessor) {
+  if (declaredBegin.isInvalid() || declaredBegin.isMacroID()) return {};
+  auto &source = preprocessor.getSourceManager();
+  const auto file = source.getFileID(declaredBegin);
+  const auto first = source.getLocForStartOfFile(file);
+  bool invalid = false;
+  const auto contents = source.getBufferData(file, &invalid);
+  if (invalid) return {};
+  clang::Lexer lexer(first, preprocessor.getLangOpts(), contents.begin(),
+                     contents.begin(), contents.end());
+  auto boundary = first;
+  bool directive = false, pending = false;
+  unsigned parentheses = 0, brackets = 0;
+  const auto target = source.getFileOffset(declaredBegin);
+  clang::Token token;
+  for (;;) {
+    lexer.LexFromRawLexer(token);
+    if (token.is(clang::tok::eof)) return {};
+    if (directive && token.isAtStartOfLine()) {
+      directive = false;
+      boundary = token.getLocation();
+    }
+    if (source.getFileOffset(token.getLocation()) >= target)
+      return !directive && parentheses == 0 && brackets == 0 ? boundary : clang::SourceLocation{};
+    if (directive) continue;
+    if (token.is(clang::tok::hash) && token.isAtStartOfLine()) {
+      if (pending || parentheses != 0 || brackets != 0) return {};
+      directive = true;
+      continue;
+    }
+    if (parentheses == 0 && brackets == 0 &&
+        (token.is(clang::tok::semi) || token.is(clang::tok::l_brace) ||
+         token.is(clang::tok::r_brace))) {
+      boundary = clang::Lexer::getLocForEndOfToken(
+          token.getLocation(), 0, source, preprocessor.getLangOpts());
+      if (boundary.isInvalid()) return {};
+      pending = false;
+      continue;
+    }
+    pending = true;
+    if (token.is(clang::tok::l_paren)) ++parentheses;
+    else if (token.is(clang::tok::r_paren)) {
+      if (parentheses == 0) return {};
+      --parentheses;
+    } else if (token.is(clang::tok::l_square)) ++brackets;
+    else if (token.is(clang::tok::r_square)) {
+      if (brackets == 0) return {};
+      --brackets;
+    }
+  }
+}
+
+// Prove the exact physical interval, including preprocessing syntax absent
+// from the AST. The one optional qualifier token has its own SDK-chain proof.
+static bool hasPhysicalMacroFreeRange(clang::SourceRange range,
+                                     clang::Preprocessor &preprocessor,
+                                     clang::SourceLocation allowedQualifier = {}) {
+  if (preprocessor.getPreprocessorOpts().RetainExcludedConditionalBlocks)
+    return false;
+  auto &source = preprocessor.getSourceManager();
+  const auto begin = range.getBegin(), last = range.getEnd();
+  if (begin.isInvalid() || last.isInvalid() || begin.isMacroID() || last.isMacroID() ||
+      source.getFileID(begin) != source.getFileID(last)) return false;
+  const auto file = source.getFileID(begin);
+  const auto *entry = source.getFileEntryForID(file);
+  if (entry == nullptr || !physicalSourceFileMatches(
+          source.getFilename(begin), *entry, source)) return false;
+  bool invalid = false;
+  const auto physical = llvm::MemoryBuffer::getFile(source.getFilename(begin));
+  const auto contents = source.getBufferData(file, &invalid);
+  if (!physical || invalid || contents != (*physical)->getBuffer()) return false;
+  const auto text = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(range), source,
+      preprocessor.getLangOpts(), &invalid);
+  if (invalid || text.empty()) return false;
+  const std::string owned = text.str();
+  clang::Lexer lexer(begin, preprocessor.getLangOpts(), owned.data(),
+                     owned.data(), owned.data() + owned.size());
+  clang::Token token;
+  bool previousLeftSquare = false;
+  for (;;) {
+    lexer.LexFromRawLexer(token);
+    if (token.is(clang::tok::eof)) return true;
+    if (token.needsCleaning() || token.is(clang::tok::hash) ||
+        token.is(clang::tok::hashhash)) return false;
+    if (previousLeftSquare && token.is(clang::tok::l_square)) return false;
+    previousLeftSquare = token.is(clang::tok::l_square);
+    const auto name = clang::Lexer::getSpelling(token, source, preprocessor.getLangOpts());
+    if (name == "_Pragma" || name == "__pragma" || name == "__attribute__" ||
+        name == "__attribute" || name == "__declspec" || name == "alignas") return false;
+    if (!token.isAnyIdentifier()) continue;
+    if (token.getLocation() == allowedQualifier && name == "__device__") continue;
+    const auto *identifier = preprocessor.getIdentifierInfo(name);
+    if (preprocessor.getMacroDefinitionAtLoc(identifier, token.getLocation()).getMacroInfo())
+      return false;
+  }
+}
+
+// A visible one-return host function forwards the Runtime result unchanged.
+// Its declared enum type alone is not a proof, and this never follows another
+// user wrapper or changes the API's arguments, return value or error handling.
+static bool isAdmittedHostRuntimeStatusForwarder(
+    const clang::Expr *expression, clang::ASTContext &context,
+    clang::Preprocessor &preprocessor,
+    const std::set<unsigned> &trustedSystemFileIds,
+    const LocalHeaderRewriteContext *localHeaders) {
+  const auto *call = llvm::dyn_cast_or_null<clang::CallExpr>(
+      stripParenAndImplicitCasts(expression));
+  const auto *function = call == nullptr ? nullptr : call->getDirectCallee();
+  if (function == nullptr || function->getIdentifier() == nullptr ||
+      !function->getDeclContext()->isFileContext() ||
+      function->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      function->isVariadic() || function->hasAttr<clang::CUDADeviceAttr>() ||
+      function->hasAttr<clang::CUDAGlobalAttr>()) return false;
+  const auto *reference = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
+      stripParenAndImplicitCasts(call->getCallee()));
+  if (reference == nullptr || reference->hasQualifier() ||
+      reference->hasExplicitTemplateArgs() || reference->getLocation().isMacroID() ||
+      reference->getDecl()->getCanonicalDecl() != function->getCanonicalDecl()) return false;
+  auto &source = context.getSourceManager();
+  const auto result = function->getReturnType();
+  const auto *enumeration = result->getAs<clang::EnumType>();
+  if (enumeration == nullptr || enumeration->getDecl()->getName() != "cudaError" ||
+      !enumeration->getDecl()->getDeclContext()->isTranslationUnit() ||
+      !locationComesFromInitiallyTrustedSystemFile(
+          source, enumeration->getDecl()->getLocation(), trustedSystemFileIds)) return false;
+  const clang::FunctionDecl *definition = nullptr;
+  if (!function->hasBody(definition) || definition == nullptr) return false;
+  for (const auto *declaration : function->redecls()) {
+    const auto prefix = physicalDeclarationPrefixBegin(
+        declaration->getBeginLoc(), preprocessor);
+    if (declaration->isImplicit() || declaration->getLocation().isInvalid() ||
+        locationComesFromInitiallyTrustedSystemFile(
+            source, declaration->getLocation(), trustedSystemFileIds) ||
+        prefix.isInvalid() || !hasPhysicalMacroFreeRange(
+            {prefix, declaration->getEndLoc()}, preprocessor)) return false;
+    // Merely parsing an external header does not promise its translation.
+    // A selected root header is published only with the closure transaction.
+    if (!source.isWrittenInMainFile(declaration->getLocation()) &&
+        (localHeaders == nullptr || localHeaders->plan == nullptr ||
+         localHeaders->plan->failed() ||
+         !localHeaders->plan->isSelectedRootHeader(
+             source.getFilename(declaration->getLocation()).str()))) return false;
+    for (const auto *attribute : declaration->attrs())
+      if (!attribute->isImplicit() ||
+          !llvm::isa<clang::CUDAHostAttr>(attribute)) return false;
+    for (const auto *parameter : declaration->parameters())
+      if (parameter->hasDefaultArg() || parameter->isParameterPack()) return false;
+  }
+  const auto *body = llvm::dyn_cast<clang::CompoundStmt>(definition->getBody());
+  if (body == nullptr || body->size() != 1) return false;
+  const auto *returned = llvm::dyn_cast<clang::ReturnStmt>(*body->body_begin());
+  return returned != nullptr && returned->getRetValue() != nullptr &&
+      context.hasSameType(result, returned->getRetValue()->getType()) &&
+      isAdmittedCudaRuntimeStatusCall(source, returned->getRetValue(), trustedSystemFileIds);
+}
+
 // The original sortingNetworks host stores each Runtime result immediately
 // before checking it. Prove that one definition-to-use edge; the variable's
 // spelling or enum type alone does not establish an ACL return domain.
 static bool isAdmittedNvidiaLocalStatusUse(
     const clang::CallExpr *check, clang::ASTContext &context,
     clang::SourceManager &sourceManager,
-    const std::set<unsigned> &trustedSystemFileIds) {
+    const std::set<unsigned> &trustedSystemFileIds,
+    clang::Preprocessor &preprocessor,
+    const LocalHeaderRewriteContext *localHeaders) {
   if (check == nullptr || check->getNumArgs() == 0)
     return false;
   const auto *reference = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
@@ -3556,8 +3721,10 @@ static bool isAdmittedNvidiaLocalStatusUse(
       !sourceManager.isWrittenInMainFile(assignment->getBeginLoc()) ||
       !referencesCanonicalValue(assignment->getLHS(), variable) ||
       !context.hasSameType(variable->getType(), assignment->getRHS()->getType()) ||
-      !isAdmittedCudaRuntimeStatusCall(
-          sourceManager, assignment->getRHS(), trustedSystemFileIds))
+      (!isAdmittedCudaRuntimeStatusCall(
+          sourceManager, assignment->getRHS(), trustedSystemFileIds) &&
+       !isAdmittedHostRuntimeStatusForwarder(
+          assignment->getRHS(), context, preprocessor, trustedSystemFileIds, localHeaders)))
     return false;
 
   // Audit the entire owning body, including later statements: an address or
@@ -3820,13 +3987,14 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
             std::vector<NvidiaSampleHelperMacroCandidate> &candidates,
             std::vector<NvidiaSampleFindDeviceCandidate> &findCandidates,
             std::vector<NvidiaSampleTemplateGuard> &templateGuards,
-            clang::Preprocessor &preprocessor)
+            clang::Preprocessor &preprocessor,
+            const LocalHeaderRewriteContext *localHeaders)
         : sourceManager(sourceManager), astContext(astContext),
           languageOptions(languageOptions),
           trustedSystemFileIds(trustedSystemFileIds),
           supportedRanges(supportedRanges),
           candidates(candidates), findCandidates(findCandidates),
-          templateGuards(templateGuards), preprocessor(preprocessor) {}
+          templateGuards(templateGuards), preprocessor(preprocessor), localHeaders(localHeaders) {}
 
     bool VisitCallExpr(clang::CallExpr *expression) {
       if (expression == nullptr)
@@ -3861,7 +4029,7 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
       candidate->statusDomainProven = isAdmittedCudaRuntimeStatusCall(
           sourceManager, expression->getArg(0), trustedSystemFileIds) ||
           isAdmittedNvidiaLocalStatusUse(
-              expression, astContext, sourceManager, trustedSystemFileIds);
+              expression, astContext, sourceManager, trustedSystemFileIds, preprocessor, localHeaders);
       // A dependent check/cudaMemcpy/cudaFree lookup cannot be proved by its
       // spelling. Remember the pattern and audit its instantiated ASTs below;
       // any accepted template receives an explicit output type-domain guard.
@@ -4193,6 +4361,7 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
     std::vector<NvidiaSampleFindDeviceCandidate> &findCandidates;
     std::vector<NvidiaSampleTemplateGuard> &templateGuards;
     clang::Preprocessor &preprocessor;
+    const LocalHeaderRewriteContext *localHeaders;
     std::map<const clang::FunctionTemplateDecl *, TemplatePatterns> templatePatterns;
     bool conflict = false;
     std::string name;
@@ -4204,7 +4373,7 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
             nvidiaSampleHelperMacroCandidates,
             nvidiaSampleFindDeviceCandidates,
             nvidiaSampleTemplateGuards,
-            getCompilerInstance().getPreprocessor());
+            getCompilerInstance().getPreprocessor(), localHeaderContext);
 
   visitor.TraverseDecl(
       getCompilerInstance().getASTContext().getTranslationUnitDecl());
@@ -7254,6 +7423,76 @@ bool AscifyAction::rewriteProvenGenericAtomicAddCall(
   return true;
 }
 
+// This is deliberately smaller than the general symbol-copy storage domain:
+// one directly spelled uint32 device counter, zero-initialized in this module.
+// The ordinary symbol resolver must also commit before publication.
+static const clang::VarDecl *provedAtomicIncDeviceCounter(
+    const clang::Expr *argument, clang::CompilerInstance &compiler,
+    const ascify::FrontendCompatibilityConfig &profile) {
+  const auto *address = llvm::dyn_cast_or_null<clang::UnaryOperator>(
+      stripParenAndImplicitCasts(argument));
+  const auto *reference = address == nullptr ? nullptr :
+      llvm::dyn_cast<clang::DeclRefExpr>(address->getSubExpr()->IgnoreParens());
+  const auto *variable = reference == nullptr ? nullptr :
+      llvm::dyn_cast<clang::VarDecl>(reference->getDecl());
+  if (address == nullptr || address->getOpcode() != clang::UO_AddrOf ||
+      reference == nullptr || reference->hasQualifier() ||
+      reference->hasExplicitTemplateArgs() || variable == nullptr ||
+      variable->isImplicit() || variable->getIdentifier() == nullptr ||
+      !variable->hasGlobalStorage() || !variable->getDeclContext()->isFileContext() ||
+      variable->isStaticDataMember() || variable->getDescribedVarTemplate() != nullptr ||
+      variable->isInline() || llvm::isa<clang::VarTemplateSpecializationDecl>(variable) ||
+      variable->getTLSKind() != clang::VarDecl::TLS_None ||
+      variable->getPreviousDecl() != nullptr || variable->getMostRecentDecl() != variable ||
+      variable->isThisDeclarationADefinition() == clang::VarDecl::DeclarationOnly ||
+      !variable->hasAttr<clang::CUDADeviceAttr>() ||
+      variable->hasAttr<clang::CUDAConstantAttr>() ||
+      variable->hasAttr<clang::CUDASharedAttr>() || variable->getType().hasQualifiers())
+    return nullptr;
+  const auto *builtin = llvm::dyn_cast<clang::BuiltinType>(variable->getType().getTypePtr());
+  auto &context = compiler.getASTContext();
+  if (builtin == nullptr || builtin->getKind() != clang::BuiltinType::UInt ||
+      context.getTypeSize(variable->getType()) != 32 ||
+      !admitsDeviceSymbolStorage(variable->getType(), context)) return nullptr;
+  for (const auto *attribute : variable->attrs())
+    if (!llvm::isa<clang::CUDADeviceAttr>(attribute)) return nullptr;
+  for (const auto *owner = variable->getDeclContext(); owner != nullptr; owner = owner->getParent())
+    if (const auto *space = llvm::dyn_cast<clang::NamespaceDecl>(owner))
+      if (space->isAnonymousNamespace()) return nullptr;
+  const auto *zero = llvm::dyn_cast_or_null<clang::IntegerLiteral>(
+      variable->getInit() == nullptr ? nullptr : variable->getInit()->IgnoreParenImpCasts());
+  if (zero == nullptr || !zero->getValue().isZero() ||
+      variable->getInitStyle() != clang::VarDecl::CInit) return nullptr;
+  auto &source = compiler.getSourceManager();
+  auto &preprocessor = compiler.getPreprocessor();
+  const auto qualifier = source.getExpansionLoc(
+      variable->getAttr<clang::CUDADeviceAttr>()->getLocation());
+  const auto name = variable->getLocation(), last = variable->getEndLoc();
+  if (qualifier.isInvalid() || name.isInvalid() || last.isInvalid() ||
+      name.isMacroID() || last.isMacroID() ||
+      !source.isWrittenInMainFile(qualifier) || !source.isWrittenInMainFile(name) ||
+      !source.isWrittenInMainFile(last) ||
+      !hasPhysicalMacroFreeRange(argument->getSourceRange(), preprocessor)) return nullptr;
+  clang::Token token;
+  if (clang::Lexer::getRawToken(qualifier, token, source, compiler.getLangOpts(), true) ||
+      token.needsCleaning() || clang::Lexer::getSpelling(token, source, compiler.getLangOpts()) != "__device__")
+    return nullptr;
+  const auto file = source.getFileID(qualifier);
+  for (const auto macro : {"__device__", "__location__", "__annotate__"}) {
+    const auto *identifier = preprocessor.getIdentifierInfo(macro);
+    if (!frontendCgMacroExpansionMatches(macro,
+            preprocessor.getMacroDefinitionAtLoc(identifier, qualifier).getMacroInfo(),
+            file, compiler, profile)) return nullptr;
+  }
+  for (const auto macro : {"__attribute__", "device"})
+    if (preprocessor.getMacroDefinitionAtLoc(
+            preprocessor.getIdentifierInfo(macro), qualifier).getMacroInfo()) return nullptr;
+  const auto prefix = physicalDeclarationPrefixBegin(qualifier, preprocessor);
+  if (prefix.isInvalid() ||
+      !hasPhysicalMacroFreeRange({prefix, last}, preprocessor, qualifier)) return nullptr;
+  return variable;
+}
+
 bool AscifyAction::rewriteProvenGlobalAtomicCall(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call =
@@ -7294,9 +7533,22 @@ bool AscifyAction::rewriteProvenGlobalAtomicCall(
             call->getArg(index)->getType(), context) != kind)
       return false;
   }
-  if (!isAddressRootedAtCurrentFunctionParameter(
-          call->getArg(0), kernel, context))
-    return false;
+  const clang::VarDecl *deviceCounter = nullptr;
+  if (!isAddressRootedAtCurrentFunctionParameter(call->getArg(0), kernel, context)) {
+    if (callee->getName() != "atomicInc" || kind != GlobalAtomicScalarKind::UInt32 ||
+        cudaAttributeControlModified) return false;
+    for (const auto *declaration : callee->redecls()) {
+      const auto location = sourceManager.getExpansionLoc(declaration->getLocation());
+      if (location.isInvalid() ||
+          !cudaRuntimeApiSdkFileIds.count(sourceManager.getFileID(location).getHashValue()))
+        return false;
+      for (const auto *attribute : declaration->attrs())
+        if (!llvm::isa<clang::CUDADeviceAttr>(attribute) &&
+            !llvm::isa<clang::AlwaysInlineAttr>(attribute)) return false;
+    }
+    deviceCounter = provedAtomicIncDeviceCounter(call->getArg(0), getCompilerInstance(), frontendCompatibility);
+    if (deviceCounter == nullptr) return false;
+  }
 
   const clang::Expr *calleeExpression =
       stripParenAndImplicitCasts(call->getCallee());
@@ -7304,6 +7556,9 @@ bool AscifyAction::rewriteProvenGlobalAtomicCall(
       llvm::dyn_cast_or_null<clang::DeclRefExpr>(calleeExpression);
   if (reference == nullptr || reference->getDecl()->getCanonicalDecl() !=
                                   callee->getCanonicalDecl())
+    return false;
+  if (deviceCounter != nullptr &&
+      (reference->hasQualifier() || reference->hasExplicitTemplateArgs()))
     return false;
   const clang::SourceLocation identifierLocation =
       reference->getLocation();
@@ -7349,6 +7604,8 @@ bool AscifyAction::rewriteProvenGlobalAtomicCall(
   Statistics::current().incrementCounter(
       counter, std::string("AST-proven ") + spec->cudaName);
   needsCudaCompatHeader = true;
+  if (deviceCounter != nullptr)
+    requiredAtomicSymbolOffsets.insert(sourceManager.getFileOffset(deviceCounter->getLocation()));
   return true;
 }
 
@@ -8365,7 +8622,8 @@ void AscifyAction::auditActiveAscifyCudaCompatMacrosAtInsertion() {
   }
 }
 
-void AscifyAction::observeCudaRuntimeApiMacroUse(const clang::Token &token) {
+void AscifyAction::observeCudaRuntimeApiMacroUse(
+    const clang::Token &token, const clang::MacroDefinition &definition) {
   if (token.getIdentifierInfo() == nullptr)
     return;
   auto &source = getCompilerInstance().getSourceManager();
@@ -8395,8 +8653,21 @@ void AscifyAction::observeCudaRuntimeApiMacroUse(const clang::Token &token) {
   if (ownership == cudaRuntimeApiCompilerInputAtExpansion.end())
     ownership = cudaRuntimeApiCompilerInputAtExpansion.emplace(
         identity, isOwnedCudaCompilerInput(file, getCompilerInstance())).first;
-  if (!ownership->second)
-    cudaRuntimeApiExternalMacroUses.insert(token.getIdentifierInfo()->getName().str());
+  if (!ownership->second) {
+    const auto name = token.getIdentifierInfo()->getName();
+    // Preserve the individual use until the final FileID/control audit. A
+    // same-named observation in caller code must never inherit this origin.
+    if (frontendCompatibility.enabled() &&
+        source.getFilename(location) ==
+            frontendCompatibility.canonicalRoot + "/cooperative_groups.h" &&
+        verifiedFrontendCgEntryFileIds.count(identity) &&
+        frontendCgMacroExpansionMatches(name, definition.getMacroInfo(), file,
+            getCompilerInstance(), frontendCompatibility)) {
+      cudaRuntimeApiCgMacroObservations.push_back({name.str(), file, location});
+    } else {
+      cudaRuntimeApiExternalMacroUses.insert(name.str());
+    }
+  }
 }
 
 bool AscifyAction::auditCudaProfilerApiSurface() {
@@ -8480,6 +8751,20 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
     return mapped != CUDA_RENAMES_MAP().end() &&
            !Statistics::isUnsupported(mapped->second);
   };
+  const auto provedCgFile = [&](clang::FileID file) {
+    return file.isValid() && !frontendCgControlModified &&
+        !cudaAttributeControlModified &&
+        verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
+        !macroAlteredFrontendCgFileIds.count(file.getHashValue()) &&
+        source.getFilename(source.getLocForStartOfFile(file)) ==
+            frontendCompatibility.canonicalRoot + "/cooperative_groups.h" &&
+        verifiedFrontendCgFile(file, compiler, frontendCompatibility);
+  };
+  for (const auto &observation : cudaRuntimeApiCgMacroObservations) {
+    if (!provedCgFile(observation.file))
+      return reject(observation.location,
+                    "unproved product CG macro provenance", observation.name);
+  }
   std::set<std::string> unprovedRetainedMacros = cudaRuntimeApiRetainedPasteMacros;
   unprovedRetainedMacros.insert(cudaRuntimeApiSdkMacros.begin(),
                                cudaRuntimeApiSdkMacros.end());
@@ -8566,8 +8851,23 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
   };
   std::set<unsigned> auditedFiles;
   std::set<unsigned> nativeFiles;
-  for (auto info = source.fileinfo_begin(); info != source.fileinfo_end(); ++info) {
-    const auto file = source.translateFile(info->first);
+  // Preserve the original fileinfo inventory exactly. The only additional
+  // inclusion instances needed by A1 are authenticated entries of the exact
+  // main product CG header. Adding every entered file would also rescan native
+  // and compiler headers under different include ancestry, changing unrelated
+  // Runtime rules. Synthetic buffers and all non-CG entries retain their old
+  // inventory and ownership rules; macro observations remain checked above.
+  std::set<clang::FileID> inputFiles;
+  for (auto info = source.fileinfo_begin(); info != source.fileinfo_end(); ++info)
+    inputFiles.insert(source.translateFile(info->first));
+  for (const auto file : enteredSourceFileIds)
+    if (file.isValid() &&
+        verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
+        source.getFilename(source.getLocForStartOfFile(file)) ==
+            frontendCompatibility.canonicalRoot + "/cooperative_groups.h" &&
+        verifiedFrontendCgFile(file, compiler, frontendCompatibility))
+      inputFiles.insert(file);
+  for (const auto file : inputFiles) {
     if (file.isInvalid() || cudaRuntimeApiSdkFileIds.count(file.getHashValue()))
       continue;
     const auto begin = source.getLocForStartOfFile(file);
@@ -8591,6 +8891,23 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
     const auto data = source.getBufferData(file, &invalid);
     if (invalid)
       return reject(begin, "cannot audit retained file", source.getFilename(begin));
+    const bool frozenCg = provedCgFile(file);
+    const auto provedCgControlToken = [&](llvm::StringRef name,
+                                          clang::SourceLocation location) {
+      if (!frozenCg) return false;
+      // These positions belong to the exact authenticated product bytes.
+      // Do not exempt the file: all other tokens retain the ordinary audit.
+      if (name == "ASCIFY_FRONTEND_COMPAT_DEVICE_") return true;
+      const auto offset = source.getFileOffset(location);
+      const auto start = data.rfind('\n', offset);
+      const auto end = data.find('\n', offset);
+      const auto line = data.slice(start == llvm::StringRef::npos ? 0 : start + 1,
+                                  end == llvm::StringRef::npos ? data.size() : end);
+      return ((name == "__CUDACC__" || name == "__CUDA__") &&
+              line == "#if defined(__CUDACC__) || defined(__CUDA__)") ||
+          (name == "__device__" &&
+           line == "#define ASCIFY_FRONTEND_COMPAT_DEVICE_ __device__");
+    };
     clang::Lexer lexer(begin, compiler.getLangOpts(), data.begin(), data.begin(), data.end());
     clang::Token token;
     bool directive = false;
@@ -8630,17 +8947,18 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
         const bool provedFalseNativeCondition = physicalNativeSystemHeader &&
             directive && name == "__CUDACC__" &&
             isFalseNativeStrictCondition(data, source.getFileOffset(token.getLocation()));
-        if (!provedFalseNativeCondition &&
+        const bool provedCgControl = provedCgControlToken(name, token.getLocation());
+        if (!provedFalseNativeCondition && !provedCgControl &&
             isSdkMacro(name) && (directive || !admittedCodeMacro(name)))
           return reject(token.getLocation(), "observes removed SDK macro", name);
-        if (!provedFalseNativeCondition && isCudaCompilerCondition(name) &&
+        if (!provedFalseNativeCondition && !provedCgControl && isCudaCompilerCondition(name) &&
             (directive || !admittedCodeMacro(name)))
           return reject(token.getLocation(), "observes CUDA compiler condition", name);
         // A caller need not spell ## itself: e.g. an unexpanded replacement
         // may call glibc __CONCAT through multiple aliases. Native paste
         // implementation files are retained, but their caller-side use has
         // no proof of the removed SDK observation or future expansion domain.
-        if (!physicalNativeSystemHeader &&
+        if (!physicalNativeSystemHeader && !provedCgControl &&
             unprovedRetainedMacros.count(name) &&
             (directive || !admittedCodeMacro(name)))
           return reject(token.getLocation(), "unproved retained macro dependency", name);
@@ -9411,7 +9729,7 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
                                 const clang::MacroDefinition &MD,
                                 clang::SourceRange Range,
                                 const clang::MacroArgs *Args) {
-  observeCudaRuntimeApiMacroUse(MacroNameTok);
+  observeCudaRuntimeApiMacroUse(MacroNameTok, MD);
   if (MacroNameTok.getIdentifierInfo() == nullptr)
     return;
   clang::SourceManager &sourceManager =
@@ -10635,6 +10953,14 @@ void AscifyAction::EndSourceFileAction() {
         getCompilerInstance().getASTContext().getTranslationUnitDecl());
   }
   finalizePendingNvidiaSampleHelperPragma();
+  for (const auto offset : requiredAtomicSymbolOffsets) {
+    if (registeredCudaSymbolOffsets.count(offset)) continue;
+    const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "Ascify cannot publish global atomic output without its same-module device symbol resolver");
+    getCompilerInstance().getDiagnostics().Report(diagnostic);
+    return;
+  }
   if (cudaDeviceSymbolGeneratedNameConflict) {
     const auto diagnostic =
         getCompilerInstance().getDiagnostics().getCustomDiagID(

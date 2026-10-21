@@ -8,6 +8,17 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Per-inclusion provenance for the admitted product CG qualifier macro chain
+  at the Runtime-header boundary. Full Runtime dependent CG types still fail
+  closed; this does not admit a complete thread-fence reduction project.
+- Adjacent helper status checks can recognize a visible, single-return host
+  wrapper around an already admitted Runtime status API. The complete helper
+  transaction and local-header publication checks remain required.
+- Experimental `atomicInc` address proof for a uniquely defined UInt32 device
+  counter initialized to zero, with a committed same-module symbol resolver.
+  Other object/address forms keep their existing behavior; target validation
+  and cross-block publication/reset checks remain pending.
+
 - Experimental lowering of one literal unsigned packed-byte SAD accumulate
   instruction, with private uint32 operands and modulo-32-bit arithmetic.
   Other inline assembly remains outside this rewrite; target validation is required.

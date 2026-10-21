@@ -183,6 +183,14 @@ run_check "sample adjacent local status definition and escape boundaries" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
 
+run_check "single-return host status and UInt32 device-counter boundaries" \
+  "$python" -B "$rewrite_dir/check_thread_fence_boundaries.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang++}" \
+    --evidence-dir "$work_dir/thread_fence_boundaries"
+
 run_check "CUDA ffs argument conversion and overload boundaries" \
   "$python" -B "$rewrite_dir/check_ffs_conversion.py" \
     --binary "$ASCIFY_BINARY" \

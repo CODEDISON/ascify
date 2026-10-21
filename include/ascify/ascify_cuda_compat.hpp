@@ -276,8 +276,9 @@ __aicore__ ASCIFY_FORCEINLINE T atomic_exch_generic(T *, V) {
 #endif
 
 // These wrappers are internal targets for AST-proven global atomic calls.
-// The frontend admits only addresses rooted at a parameter of the current
-// CUDA global kernel. The explicit cast supplies the address-space type that
+// The frontend admits addresses rooted at a parameter of the current CUDA
+// global kernel, or atomicInc on a separately proved same-module uint32 device
+// counter with a committed symbol resolver. The explicit cast supplies the address-space type that
 // coherent 9.1 device_atomic_functions.h requires; it must never be used as a
 // name-only rewrite for shared/local pointers.
 #if defined(ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS)

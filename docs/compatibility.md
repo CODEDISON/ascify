@@ -1,5 +1,39 @@
 # CUDA compatibility boundaries
 
+The admitted frontend profile's physical `cooperative_groups.h` can establish
+the origin of its exact CUDA device-qualifier macro chain and fixed CUDA control
+condition when a Runtime header is removed. Each include instance must retain
+the product bytes and authenticated macro context. Independent caller uses of
+the same SDK macro names remain rejected. This is only a preprocessing-origin
+proof: full Runtime dependent CG types, caller layout observations and other
+unproved Runtime surfaces keep their existing gates. It does not establish
+device execution or complete-project support.
+
+An adjacent local Runtime status assignment may also call a visible ordinary
+host function whose only statement returns an already admitted Runtime API
+status unchanged. Every declaration must belong to the physical main input or
+a selected local-header closure; the complete function range must be free of
+macros, directives and opaque pragma operators. Templates, indirect calls,
+default arguments, alternate result expressions and semantic/linkage
+attributes are not admitted. This proves the status domain only: the original
+API arguments and success/error values remain intact, and the existing full
+helper transaction, alias/capture audit and closure publication gates remain.
+The source check includes leading declaration tokens even when Clang ignores
+an attribute and omits it from the AST range. GNU/MS/C++ attribute spellings
+are rejected, as are externally defined macros in that prefix. The conservative
+prefix scan rejects a directive after pending declaration syntax; inactive
+branch punctuation cannot become a trusted declaration boundary.
+
+The global `atomicInc` mapping can additionally prove a directly addressed
+file-scope device counter with direct builtin `unsigned int` type, 32 bits,
+one complete definition and literal zero initialization. Its device qualifier
+must come from the actual configured CUDA SDK, and its declaration and address
+must have physical macro-free source evidence. Casts, aliases, arrays, shared
+or constant storage, qualifiers, redeclarations and variable templates remain
+outside this additional rule. A same-module symbol resolver must commit before
+output publication. This does not add new atomic/fence Runtime code or establish
+cross-block execution or repeated-reset correctness on a target device.
+
 This reference describes the implemented source and target contracts, including
 their limits. Experimental entries require target compilation and device
 validation before use. See the [conversion reference](conversion-reference.md)

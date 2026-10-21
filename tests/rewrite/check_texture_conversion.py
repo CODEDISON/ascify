@@ -123,6 +123,7 @@ def main():
     save()
     cases=[(name,code,expected,[],{}) for name,code,expected in CASES]
     recursive_cases={}
+    cg_entry_counts={}
     if a.frontend_compat=='ascify-admitted-v1':
         installed_host_math=a.binary.parent.parent/'libexec/ascify/frontend-compat/ascify-admitted-v1/host_math.h'
         profile_host_math=(a.profile_host_math or (installed_host_math if installed_host_math.is_file() else
@@ -148,6 +149,16 @@ def main():
             ('profile_cg_concrete_sdk_reflection',cg_include+'template<class T>size_t bytes(T*p){return sizeof(T);} size_t f(cudaTextureDesc*p){return bytes(p);}',None,{}),
             ('profile_cg_layout_observation',cg_include+cg_descriptor+'\nsize_t f(){return sizeof(cudaTextureDesc);}',None,{}),
             ('profile_cg_full_runtime','#include <cuda_runtime_api.h>\n'+cg_include+cg_descriptor,None,{}),
+            # A1 authenticates only the product's macro/control provenance.
+            # Full Runtime dependent-type admission remains a separate gate.
+            ('runtime_cg_plain','#include <cuda_runtime_api.h>\n'+cg_include+'int retained;',None,{}),
+            ('runtime_cg_caller_observation','#include <cuda_runtime_api.h>\n'+cg_include+'__annotate__(unused) int retained;',None,{}),
+            ('runtime_cg_inactive_observation','#include <cuda_runtime_api.h>\n'+cg_include+'#if 0\n#if defined(__CUDACC__)\nint retained;\n#endif\n#endif',None,{}),
+            ('runtime_cg_late_control_restore','#include <cuda_runtime_api.h>\n'+cg_include+'#undef __CUDA__\n#define __CUDA__ 1\nint retained;',None,{}),
+            ('runtime_cg_late_pragma_restore','#include <cuda_runtime_api.h>\n'+cg_include+'#pragma push_macro("__CUDA__")\n#undef __CUDA__\n#pragma pop_macro("__CUDA__")\nint retained;',None,{}),
+            ('runtime_cg_changed_qualifier','#include <cuda_runtime_api.h>\n#undef __annotate__\n#define __annotate__(a) __attribute__((a))\n'+cg_include+'int retained;',None,{}),
+            ('runtime_cg_copy','#include <cuda_runtime_api.h>\n#include "cooperative_groups.h"\nint retained;',None,{'cooperative_groups.h':profile_cg.read_text()}),
+            ('runtime_cg_nested_namespace','#include <cuda_runtime_api.h>\n#include <type_traits>\nnamespace caller {\n'+cg_include+'}\nint retained;',None,{}),
             ('profile_cg_macro_empty','#define inline\n'+cg_include+'#undef inline\n'+cg_descriptor,None,{}),
             ('profile_cg_macro_namespace','#define cooperative_groups caller_groups\n'+cg_include+'#undef cooperative_groups\n'+cg_descriptor,None,{}),
             ('profile_cg_macro_method','#define shfl_up caller_shuffle\n'+cg_include+'#undef shfl_up\n'+cg_descriptor,None,{}),
@@ -163,11 +174,27 @@ def main():
             ('profile_cg_copy','#include "cooperative_groups.h"\n'+cg_descriptor,None,{'cooperative_groups.h':profile_cg.read_text()}),
             ('profile_cg_changed_copy','#include "cooperative_groups.h"\n'+cg_descriptor,None,{'cooperative_groups.h':profile_cg.read_text().replace('shfl_up(', 'caller_shuffle(')}),
         ]
+        # A clean second include is skipped by the immutable product guard.
+        # Real reentry requires changing that guard and is deliberately refused,
+        # even when the source restores CUDA control spelling before reentry.
+        cg_reentry = (cg_include+
+                      '#undef ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_COOPERATIVE_GROUPS_H_\n')
+        cg_reentry_tail = 'namespace repeated_cg {\n'+cg_include+'}\n'
+        cg_cases += [
+            ('profile_cg_repeat_guarded',cg_include+cg_include+cg_descriptor,['ascify::cudaTextureDesc descriptor'],{}),
+            ('runtime_cg_repeat_guarded','#include <cuda_runtime_api.h>\n'+cg_include+cg_include+'int retained;',None,{}),
+            ('profile_cg_reentry_guard',cg_reentry+cg_reentry_tail+cg_descriptor,None,{}),
+            ('runtime_cg_reentry_guard','#include <cuda_runtime_api.h>\n'+cg_reentry+cg_reentry_tail+'int retained;',None,{}),
+            ('runtime_cg_reentry_control_restore','#include <cuda_runtime_api.h>\n'+cg_reentry+'#undef __CUDA__\n#define __CUDA__ 1\n'+cg_reentry_tail+'int retained;',None,{}),
+        ]
+        cg_entry_counts = {'profile_cg_repeat_guarded':1,'runtime_cg_repeat_guarded':1,
+                           'profile_cg_reentry_guard':2,'runtime_cg_reentry_guard':2,
+                           'runtime_cg_reentry_control_restore':2}
         for name,code,expected,headers in cg_cases:
             # Root staging uses a temporary file. Preserve explicit quote
             # lookup so these two fixtures actually select the caller shadow.
             extra = cg_extra + (['-iquote{case}'] if name in
-                                ('profile_cg_copy','profile_cg_changed_copy') else [])
+                                ('profile_cg_copy','profile_cg_changed_copy','runtime_cg_copy') else [])
             cases.append((name,code,expected,extra,headers))
         cases += [
             ('profile_fake_host_math','#include <fake/host_math.h>\ncudaTextureDesc descriptor{};',None,['-I{case}'],{'fake/host_math.h':'template<class T>T caller_identity(T x){return x;}\n'}),
@@ -201,8 +228,17 @@ def main():
              'recursive':recursive_cases.get(name,a.frontend_compat=='ascify-admitted-v1')}
         summary['cases'].append(row);save()
         try:
-            z=run(directory,'syntax',[a.clang,source,'-x','cuda','-std=c++17','--cuda-host-only','-fsyntax-only','-nocudalib','--cuda-path='+str(a.cuda_path),'-resource-dir='+str(a.resource_dir),'-Wno-unknown-cuda-version','-I'+str(helpers),*extra])
+            z=run(directory,'syntax',[a.clang,source,'-x','cuda','-std=c++17','--cuda-host-only','-fsyntax-only','-nocudalib','--cuda-path='+str(a.cuda_path),'-resource-dir='+str(a.resource_dir),'-Wno-unknown-cuda-version','-I'+str(helpers),*extra,*(['-H'] if name in cg_entry_counts else [])])
             row['syntax_returncode']=z.returncode;save();assert z.returncode==0,(name,z.stderr)
+            if name in cg_entry_counts:
+                # -H reports entered headers, not textual includes skipped by
+                # their guards. Match the exact authenticated physical path.
+                entries=[match.group(1) for line in z.stderr.splitlines()
+                         if (match:=re.fullmatch(r'\.+ (.+)',line))]
+                row['syntax_cg_entry_count']=entries.count(str(profile_cg))
+                row['expected_syntax_cg_entry_count']=cg_entry_counts[name]
+                save()
+                assert row['syntax_cg_entry_count']==cg_entry_counts[name],(name,z.stderr)
             projection=['--local-headers-recursive'] if row['recursive'] else []
             z=run(directory,'convert',[a.binary,source,'--target-policy='+a.target_policy,'--simt-math='+a.simt_math,'--target-recipe=none','--default-preprocessor','--frontend-compat='+a.frontend_compat,'--cuda-path='+str(a.cuda_path),'--clang-resource-directory='+str(a.resource_dir),'--migration-receipt='+str(receipt),'-o',output,*projection,'--','-x','cuda','-std=c++17','-I'+str(helpers),*extra])
             row['conversion_returncode']=z.returncode;save()
@@ -211,6 +247,17 @@ def main():
                 assert z.returncode>0 and not output.exists() and not output.is_symlink() and not output_headers.exists() and not output_headers.is_symlink() and json.loads(receipt.read_text())['status']=='failed',(name,z.stderr)
                 assert any(marker in z.stderr for marker in ('CUDA texture boundary','CUDA runtime-API header boundary','Ascify cannot publish CUDA compatibility output','frontend compatibility')),(name,z.stderr)
                 assert 'fatal error:' not in z.stderr,(name,z.stderr)
+                if name in ('profile_cg_full_runtime','runtime_cg_plain','runtime_cg_repeat_guarded'):
+                    # The physical host_math Runtime condition rejects first; A2 is not reached.
+                    assert 'host_math.h:20:' in z.stderr,(name,z.stderr)
+                    assert "observes CUDA compiler condition '__CUDACC__'" in z.stderr,(name,z.stderr)
+                    assert 'unproved product CG macro provenance' not in z.stderr,(name,z.stderr)
+                if name in ('runtime_cg_reentry_guard','runtime_cg_reentry_control_restore'):
+                    assert 'unproved product CG macro provenance' in z.stderr,(name,z.stderr)
+                if name=='runtime_cg_caller_observation':
+                    assert "observes removed SDK macro '__annotate__'" in z.stderr,(name,z.stderr)
+                if name=='runtime_cg_inactive_observation':
+                    assert "observes CUDA compiler condition '__CUDACC__'" in z.stderr or "observes removed SDK macro '__CUDACC__'" in z.stderr,(name,z.stderr)
             else:
                 assert z.returncode==0 and json.loads(receipt.read_text())['status']=='succeeded',(name,z.stderr)
                 text=output.read_text();assert '#include <ascify/texture_compat.hpp>' in text,(name,text)

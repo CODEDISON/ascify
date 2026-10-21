@@ -64,6 +64,8 @@ def main():
         "isystem_observer": (INCLUDE + '#include <sys_observer.h>\n', False, "removed SDK macro"),
         "unexpanded_paste": (INCLUDE + '#define CAT_I(a,b) a##b\n#define LATER CAT_I(CUDART_,VERSION)\n', False, "unproved retained macro dependency"),
         "inactive_paste": (INCLUDE + '#if 0\n#define LATER_INACTIVE(a,b) a##b\n#endif\n', False, "unproved retained token paste"),
+        "retained_builtin_paste": (INCLUDE + '#define FUTURE_INTEGER __INTMAX_C(1)\n', False, "unproved retained macro dependency"),
+        "retained_builtin_line_spoof": (INCLUDE + '#line 1 "<built-in>"\n#define FUTURE_INTEGER __INTMAX_C(1)\n', False, "unproved retained macro dependency"),
         "native_unexpanded_paste": (INCLUDE + '#define GET_VERSION __CONCAT(CUDART_, VERSION)\n', False, "unproved retained macro dependency"),
         "native_nested_paste": (INCLUDE + '#define CONCAT_ALIAS __CONCAT\n#define GET_VERSION CONCAT_ALIAS(CUDART_, VERSION)\n', False, "unproved retained macro dependency"),
         "native_future_version": (INCLUDE + '#define FUTURE_VERSION __CONCAT(CUDART_, VERSION)\ntemplate<class T> int version() { return FUTURE_VERSION; }\n', False, "runtime-API header boundary"),

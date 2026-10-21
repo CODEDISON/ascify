@@ -197,6 +197,12 @@ private:
   std::set<unsigned> cudaRuntimeApiSdkFileIds;
   std::set<std::string> cudaRuntimeApiSdkMacros;
   std::set<std::string> cudaRuntimeApiExternalMacroUses;
+  struct RuntimeCgMacroObservation {
+    std::string name;
+    clang::FileID file;
+    clang::SourceLocation location;
+  };
+  std::vector<RuntimeCgMacroObservation> cudaRuntimeApiCgMacroObservations;
   std::map<unsigned, bool> cudaRuntimeApiCompilerInputAtExpansion;
   std::map<std::string, std::set<std::string>> cudaRuntimeApiRetainedMacroDependencies;
   std::set<std::string> cudaRuntimeApiRetainedPasteMacros;
@@ -254,7 +260,8 @@ private:
       clang::SourceRange range, clang::SourceLocation endifLocation);
   void auditRawPublishedCompatTokensInFile(clang::FileID file);
   void auditActiveAscifyCudaCompatMacrosAtInsertion();
-  void observeCudaRuntimeApiMacroUse(const clang::Token &token);
+  void observeCudaRuntimeApiMacroUse(const clang::Token &token,
+                                    const clang::MacroDefinition &definition);
   bool auditCudaRuntimeApiSurface();
   bool auditCudaRuntimeApiRecords(bool textureOnly);
   bool auditCudaProfilerApiSurface();
@@ -292,6 +299,7 @@ public:
   bool lowerCudaGlobalScalarDoubleParam(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaDefaultDim3(const mat::MatchFinder::MatchResult &Result);
   std::set<unsigned> registeredCudaSymbolOffsets;
+  std::set<unsigned> requiredAtomicSymbolOffsets;
   bool registerCudaDeviceSymbol(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaHalf2DirectInit(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaHalf2Operator(const mat::MatchFinder::MatchResult &Result);
