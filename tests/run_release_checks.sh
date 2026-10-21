@@ -143,6 +143,9 @@ run_check "real CUDA runtime-API header admission and refusal" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
 
+run_check "explicit host C++ input and mixed-TU contract" \
+  "$python" -B "$rewrite_dir/check_host_cxx_input.py"
+
 run_check "selected local-header Runtime guard admission and refusal" \
   "$python" -B "$rewrite_dir/check_local_runtime_api_guard.py" \
     --binary "$ASCIFY_BINARY" \

@@ -33,6 +33,7 @@ extern cl::opt<std::string> OutputFilename;
 extern cl::opt<std::string> OutputDir;
 extern cl::opt<std::string> TemporaryDir;
 extern cl::opt<std::string> CudaPath;
+extern cl::opt<std::string> InputLanguage;
 extern cl::opt<std::string> ClangResourceDir;
 extern cl::list<std::string> IncludeDirs;
 extern cl::list<std::string> MacroNames;

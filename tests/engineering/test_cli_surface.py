@@ -37,6 +37,7 @@ class CliSurfaceTests(unittest.TestCase):
         self.assertIn("CUDA to Ascend source translator options", result.stdout)
         for option in (
             "--target-policy",
+            "--input-language",
             "--target-recipe",
             "--migration-receipt",
             "--print-stats-csv",

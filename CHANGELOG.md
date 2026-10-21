@@ -8,6 +8,10 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Explicit host C++ input mode and compiler `-x c++` selection, retaining AST
+  translation and local-header proofs without implicit CUDA headers or CUDA
+  language predefines. The default without a language remains CUDA; conflicting
+  device options fail. See [the input contract](docs/host-cxx-input.md).
 - Direct physical CUDA Runtime includes inside proved whole-file guards of
   selected local headers. Nested conditions, guard macro-stack operations and
   conditional root-source includes remain outside this admission rule.

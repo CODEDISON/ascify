@@ -145,6 +145,11 @@ bool pragma_once_outside_header() {
 void RetainExcludedConditionalBlocks(clang::CompilerInstance &CI) {
 #if LLVM_VERSION_MAJOR > 9
   clang::PreprocessorOptions &PPOpts = CI.getPreprocessorOpts();
+  if (!CI.getLangOpts().CUDA) {
+    // An explicitly selected host TU must observe ordinary C++ conditionals.
+    PPOpts.RetainExcludedConditionalBlocks = false;
+    return;
+  }
   if (SkipExcludedPPConditionalBlocks) {
     PPOpts.RetainExcludedConditionalBlocks = !SkipExcludedPPConditionalBlocks;
   } else if (DefaultPreprocessor) {

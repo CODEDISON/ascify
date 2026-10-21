@@ -22,6 +22,7 @@ THE SOFTWARE.
 
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <set>
 #include <utility>
@@ -48,6 +49,7 @@ THE SOFTWARE.
 #include "LocalHeader.h"
 #include "ImplicitCudaHeaders.h"
 #include "FrontendCompatibility.h"
+#include "FrontendLanguage.h"
 #include "MigrationReceipt.h"
 #include "MigrationReceiptIO.h"
 
@@ -198,7 +200,8 @@ bool appendArgumentsAdjusters(
     ct::RefactoringTool &Tool,
     const std::string &sSourceAbsPath,
     const char *ascify_exe,
-    ascify::FrontendCompatibilityConfig &frontendCompatibility) {
+    ascify::FrontendCompatibilityConfig &frontendCompatibility,
+    bool hostCxx) {
   if (!setLLVM(Tool, ascify_exe)) {
     llvm::errs() << "\n" << sAscify << sError
                  << "Clang CUDA parsing resources are unavailable. Install the "
@@ -218,7 +221,7 @@ bool appendArgumentsAdjusters(
       Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster("-D", ct::ArgumentInsertPosition::BEGIN));
     }
   }
-  // Default C++ standard for CUDA parsing
+  // Default C++ standard; explicit compiler standards remain later arguments.
   llcompat::setStdCPP(Tool);
   std::string sInclude = "-I" + sys::path::parent_path(sSourceAbsPath).str();
   Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster(sInclude.c_str(), ct::ArgumentInsertPosition::BEGIN));
@@ -226,21 +229,29 @@ bool appendArgumentsAdjusters(
   if (llcompat::pragma_once_outside_header()) {
     Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster("-Wno-pragma-once-outside-header", ct::ArgumentInsertPosition::BEGIN));
   }
-  Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster("--cuda-host-only", ct::ArgumentInsertPosition::BEGIN));
-  if (!CudaGpuArch.empty()) {
-    std::string sCudaGpuArch = "--cuda-gpu-arch=" + CudaGpuArch;
-    Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster(sCudaGpuArch.c_str(), ct::ArgumentInsertPosition::BEGIN));
-  }
-  if (!CudaPath.empty()) {
-    std::string sCudaPath = "--cuda-path=" + CudaPath;
-    Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster(sCudaPath.c_str(), ct::ArgumentInsertPosition::BEGIN));
-  }
+  if (!hostCxx) {
+    Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster("--cuda-host-only", ct::ArgumentInsertPosition::BEGIN));
+    if (!CudaGpuArch.empty()) {
+      std::string sCudaGpuArch = "--cuda-gpu-arch=" + CudaGpuArch;
+      Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster(sCudaGpuArch.c_str(), ct::ArgumentInsertPosition::BEGIN));
+    }
+    if (!CudaPath.empty()) {
+      std::string sCudaPath = "--cuda-path=" + CudaPath;
+      Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster(sCudaPath.c_str(), ct::ArgumentInsertPosition::BEGIN));
+    }
 
-  // Implicit CUDA headers to mimic nvcc behavior
-  ascify::addImplicitCudaHeaders(Tool);
+    // Only CUDA parsing mimics nvcc's implicit header behavior.
+    ascify::addImplicitCudaHeaders(Tool);
+  } else if (!CudaPath.empty()) {
+    // Clang's CUDA driver classifies its explicit SDK include root as a
+    // system search path. Preserve that provenance for ordinary host C++
+    // includes without injecting a header or enabling CUDA language macros.
+    const ct::CommandLineArguments include = {
+        "-isystem", (std::filesystem::path(std::string(CudaPath)) / "include").string()};
+    Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster(
+        include, ct::ArgumentInsertPosition::END));
+  }
   llcompat::addTargetIfNeeded(Tool);
-  Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster("cuda", ct::ArgumentInsertPosition::BEGIN));
-  Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster("-x", ct::ArgumentInsertPosition::BEGIN));
   std::string frontendCompatibilityError;
   if (!ascify::ConfigureFrontendCompatibility(
           Tool, FrontendCompat, ascify_exe, frontendCompatibility,
@@ -264,30 +275,58 @@ bool ascifySingleSource(const std::string &srcPath,
                                const std::string &mainContextPath,
                                bool preserveTemp,
                                LocalHeaderRewriteContext *localHeaderContext) {
-  if (localHeaderContext != nullptr &&
-      localHeaderContext->virtualInput != nullptr) {
+  // The legacy raw database parameter is retained for closure call sites;
+  // OptionsParser owns the effective database with --extra-arg adjustments.
+  (void)compDB;
+  // Resolve from the original root, including CommonOptionsParser's compiler
+  // argument adjusters. Header and contextual reparses inherit this command.
+  const std::string languageRoot =
+      localHeaderContext != nullptr && localHeaderContext->plan != nullptr
+          ? localHeaderContext->plan->rootSourcePath() : mainContextPath;
+  ascify::FrontendLanguageDatabase languageDatabase;
+  std::string languageError;
+  if (!languageDatabase.initialize(OptionsParserPtr->getCompilations(),
+                                   languageRoot, languageError)) {
+    llvm::errs() << sAscify << sError << languageError << "\n";
+    return false;
+  }
+  const bool contextualInput = localHeaderContext != nullptr &&
+                              localHeaderContext->virtualInput != nullptr;
+  if (contextualInput || languageDatabase.hostCxx()) {
     // Reparse a verified contextual input at the original root identity.
     // No physical source is overwritten: only apply edits to the memory
     // buffer, then write the existing unpublished staging destination.
-    ct::RefactoringTool Tool(
-        compDB ? *compDB : OptionsParserPtr->getCompilations(), srcPath);
-    Tool.mapVirtualFile(srcPath, *localHeaderContext->virtualInput);
-    ct::Replacements &edits = llcompat::getReplacements(Tool, srcPath);
+    // Tooling and its replacement map use the absolute original identity,
+    // including when the user spelled the positional input relatively.
+    const std::string parsePath = mainContextPath;
+    std::string hostInput;
+    if (!contextualInput) {
+      std::ifstream input(parsePath, std::ios::binary);
+      if (!input) return false;
+      hostInput.assign(std::istreambuf_iterator<char>(input),
+                       std::istreambuf_iterator<char>());
+      if (input.bad()) return false;
+    }
+    const std::string &input = contextualInput
+        ? *localHeaderContext->virtualInput : hostInput;
+    ct::RefactoringTool Tool(languageDatabase, parsePath);
+    Tool.mapVirtualFile(parsePath, input);
+    ct::Replacements &edits = llcompat::getReplacements(Tool, parsePath);
     ascify::FrontendCompatibilityConfig frontendCompatibility;
     if (!appendArgumentsAdjusters(Tool, mainContextPath, ascify_exe_path,
-                                  frontendCompatibility))
+                                  frontendCompatibility, languageDatabase.hostCxx()))
       return false;
     ReplacementsFrontendActionFactory<AscifyAction> factory(
         &edits, localHeaderContext, frontendCompatibility);
     if (Tool.run(&factory))
       return false;
-    auto rewritten = ct::applyAllReplacements(
-        *localHeaderContext->virtualInput, edits);
+    auto rewritten = ct::applyAllReplacements(input, edits);
     if (!rewritten) {
       llvm::errs() << sAscify << sError << llvm::toString(rewritten.takeError())
                    << "\n";
       return false;
     }
+    if (dstPath.empty()) return true;
     std::error_code writeError;
     llvm::raw_fd_ostream out(dstPath, writeError);
     if (writeError)
@@ -318,13 +357,13 @@ bool ascifySingleSource(const std::string &srcPath,
   // RefactoringTool operates on the file in-place. Giving it the output path is no good,
   // because that'll break relative includes, and we don't want to overwrite the input file.
   // So what we do is operate on a copy, which we then move to the output.
-  ct::RefactoringTool Tool((compDB ? *compDB : OptionsParserPtr->getCompilations()),
-                           std::string(tmpFile.c_str()));
+  ct::RefactoringTool Tool(languageDatabase, std::string(tmpFile.c_str()));
   ct::Replacements &replacementsToUse = llcompat::getReplacements(Tool, tmpFile.c_str());
   ascify::FrontendCompatibilityConfig frontendCompatibility;
 
   if (!appendArgumentsAdjusters(
-          Tool, mainContextPath, ascify_exe_path, frontendCompatibility)) {
+          Tool, mainContextPath, ascify_exe_path, frontendCompatibility,
+          languageDatabase.hostCxx())) {
     llvm::errs() << "\n" << sAscify << sError 
                  << "LLVM/resource config failed for: " << srcPath << "\n";
     if (!SaveTemps && !preserveTemp) sys::fs::remove(tmpFile);
