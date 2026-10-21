@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real frontend CUDA vec3 rejection and output-preservation checks."""
+"""CUDA vec3 closed-local admission, retained rejection and output preservation."""
 import argparse
 import hashlib
 import json
@@ -127,6 +127,14 @@ def main():
     cases["unreviewed_provider_builtin_scalar"] = ("__global__ void observer(float* p){p[0]=1;}", True, [])
     cases["unreviewed_provider_builtin_vec3"] = ("__global__ void observer(){float3 v={1,2,3};}", True, [])
 
+    # Only these seven previously refused cases meet the new closed-local
+    # contract. Pointer/array/record/template/external-ABI cases stay negative.
+    # A #line changes diagnostics, not the physical authenticated SDK identity.
+    for name in ("local_float3", "local_uint3", "qualified_elaborated", "helper_auto",
+                 "sizeof", "line_spoof", "real_cub_caller_sdk_vec3"):
+        body, _, extra = cases[name]
+        cases[name] = (body, True, extra)
+
     def run(command, dest):
         dest.mkdir(parents=True)
         result = subprocess.run(command, capture_output=True, text=True, timeout=90, env=env)
@@ -224,7 +232,7 @@ def main():
             rows.append(row)
             print(name + (": accepted" if accepted else ": rejected, previous output preserved"))
         summary = {"passed": True, "cases": rows, "device_execution_performed": False,
-                   "scope": "Frozen CUDA13.4.1 record uses; no automatic type adaptation or corpus gain"}
+                   "scope": "Frozen CUDA13.4.1 closed scalar-local type adaptation only; no arrays/GM/external ABI or corpus gain"}
         (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     finally:
         if temporary:

@@ -10400,6 +10400,8 @@ void AscifyAction::EndSourceFileAction() {
   std::string includes;
   if (needsCudaCompatHeader && !hasCudaCompatHeader)
     includes += "#include <ascify/ascify_cuda_compat.hpp>\n";
+  if (needsCudaVec3LayoutHeader)
+    includes += "#include <ascify/cuda_vec3_layout.hpp>\n";
   if (needsCudaTextureHeader)
     includes += "#include <ascify/texture_compat.hpp>\n";
   const bool useSimdTargetRecipe =
@@ -10744,15 +10746,78 @@ void AscifyAction::ExecuteAction() {
   }
   std::string vec3AbiError;
   clang::SourceLocation vec3AbiLocation;
+  ascify::CudaVec3LayoutPlan vec3Layout;
+  const bool vec3RootInput = localHeaderContext == nullptr || localHeaderContext->depth == 0;
+  if (vec3RootInput) Statistics::current().cudaVec3LayoutEvidence.clear();
+  if (TargetPolicy == "dav-c310-vec" && TargetRecipe == "none" &&
+      !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks) {
+    const auto selectedVec3Header = [&](clang::SourceLocation use) {
+      return use.isFileID() && localHeaderContext != nullptr &&
+          localHeaderContext->depth == 0 && localHeaderContext->plan != nullptr &&
+          localHeaderContext->plan->isSelectedRootHeader(SM.getFilename(use).str());
+    };
+    const auto literalVec3Use = [&](clang::SourceLocation use) {
+      if (!use.isFileID() || !SM.isWrittenInMainFile(use)) return false;
+      const auto file = SM.getFileID(use);
+      const auto offset = SM.getFileOffset(use);
+      for (const auto& range : cudaLaneIdMacroRanges)
+        if (range.file == file && range.beginOffset <= offset && offset < range.endOffset)
+          return false;
+      return true;
+    };
+    if (!ascify::ProveCudaVec3LocalLayout(getCompilerInstance().getASTContext(),
+            CudaPath.getValue(), ownedClangResourceDirectory(), mappedCubIncludes, selectedVec3Header,
+            literalVec3Use, vec3Layout, vec3AbiError, vec3AbiLocation)) {
+      const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error, "CUDA vec3 ABI boundary: %0");
+      getCompilerInstance().getDiagnostics().Report(vec3AbiLocation, diagnostic) << vec3AbiError;
+      return;
+    }
+  }
   if (!ascify::ValidateCudaVec3AbiBoundary(
           getCompilerInstance().getASTContext(), CudaPath.getValue(),
-          mappedCubIncludes, vec3AbiError, vec3AbiLocation)) {
+          mappedCubIncludes, vec3AbiError, vec3AbiLocation, &vec3Layout)) {
     const auto diagnostic =
         getCompilerInstance().getDiagnostics().getCustomDiagID(
             clang::DiagnosticsEngine::Error, "CUDA vec3 ABI boundary: %0");
     getCompilerInstance().getDiagnostics().Report(vec3AbiLocation, diagnostic)
         << vec3AbiError;
     return;
+  }
+  if (!vec3Layout.uses.empty()) {
+    ct::Replacements staged(*replacements);
+    std::vector<SemanticRewriteRange> ranges;
+    for (const auto& edit : vec3Layout.edits) {
+      const auto position = SM.getDecomposedLoc(edit.location);
+      for (const auto& range : SemanticRewriteRanges)
+        if (range.file == position.first && position.second < range.endOffset &&
+            range.beginOffset < position.second + edit.length)
+          vec3AbiError = "vec3 edit overlaps an existing semantic transaction";
+      if (!vec3AbiError.empty() || !llcompat::insertReplacement(staged,
+              ct::Replacement(SM, edit.location, edit.length, edit.replacement), &vec3AbiError)) {
+        vec3AbiLocation = edit.location;
+        break;
+      }
+      ranges.push_back({position.first, position.second, position.second + edit.length});
+    }
+    if (!vec3AbiError.empty()) {
+      const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error, "CUDA vec3 ABI boundary: %0");
+      getCompilerInstance().getDiagnostics().Report(vec3AbiLocation, diagnostic) << vec3AbiError;
+      return;
+    }
+    *replacements = std::move(staged);
+    SemanticRewriteRanges.insert(SemanticRewriteRanges.end(), ranges.begin(), ranges.end());
+    for (const auto& path : vec3Layout.contextualHeaders)
+      localHeaderContext->plan->requireInheritedSourceContext(path);
+    needsCudaCompatHeader = true;
+    needsCudaVec3LayoutHeader = true;
+    auditActiveAscifyCudaCompatMacrosAtInsertion();
+    auto& evidence = Statistics::current().cudaVec3LayoutEvidence;
+    evidence.insert(evidence.end(), vec3Layout.evidence.begin(), vec3Layout.evidence.end());
+    llvm::errs() << "Ascify CUDA vec3 local layout v1: edits=" << vec3Layout.edits.size()
+                 << ", uses=" << vec3Layout.uses.size()
+                 << ", contextual_headers=" << vec3Layout.contextualHeaders.size() << "\n";
   }
   ascify::UniformBlockReductionStats uniformReduction;
   std::string uniformReductionError;

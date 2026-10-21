@@ -817,6 +817,7 @@ int main(int argc, const char **argv) {
     receiptInput.stage = ascify::MigrationReceiptStage::SourceConversion;
     receiptInput.boundedDeviceTemplateDefinitions = conversionOk
         ? Statistics::current().boundedDeviceTemplateDefinitions : 0;
+    if (conversionOk) receiptInput.cudaVec3LayoutEvidence = Statistics::current().cudaVec3LayoutEvidence;
     receiptInput.diagnosticSummary =
         conversionOk
             ? "source conversion completed; later pipeline stages are outside this receipt"

@@ -8,6 +8,9 @@ for supported domains and experimental paths.
 
 ### Added
 
+- Experimental authenticated CUDA float3/uint3/int3 lowering to explicit 12-byte
+  scalar-local records. Arrays, GM, external ABI, templates and native vec3
+  interoperability remain guarded. See [the bounded contract](docs/cuda-vec3-local-layout.md).
 - Explicit host C++ input mode and compiler `-x c++` selection, retaining AST
   translation and local-header proofs without implicit CUDA headers or CUDA
   language predefines. The default without a language remains CUDA; conflicting

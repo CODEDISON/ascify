@@ -180,6 +180,7 @@ private:
   ascify::DavC310TargetRecipe davC310TargetRecipe;
   bool firstHeader = false;
   bool needsCudaCompatHeader = false;
+  bool needsCudaVec3LayoutHeader = false;
   bool needsCudaTextureHeader = false;
   std::set<unsigned> cudaTextureLiteralOffsets;
   std::set<unsigned> cudaTextureRequiredHelperOffsets;
