@@ -58,6 +58,7 @@ if(NOT ASCIFY_CLANG_TESTS_ONLY)
     src/DeviceMemoryLowering.cpp
     src/FrontendCompatibility.cpp
     src/FrontendLanguage.cpp
+    src/HostCxxRootInput.cpp
     src/ImplicitCudaHeaders.cpp
     src/LLVMCompat.cpp
     src/LocalHeader.cpp
@@ -174,6 +175,18 @@ if(ASCIFY_CLANG_TESTS OR ASCIFY_CLANG_TESTS_ONLY)
 
   include(CTest)
   enable_testing()
+
+  if(NOT ASCIFY_CLANG_TESTS_ONLY AND LLVM_VERSION_MAJOR GREATER_EQUAL 13 AND UNIX)
+    add_llvm_executable(ascify-host-cxx-root-input-test
+      src/HostCxxRootInput.cpp tests/rewrite/host_cxx_root_input_test.cpp)
+    target_compile_features(ascify-host-cxx-root-input-test PRIVATE cxx_std_17)
+    target_include_directories(ascify-host-cxx-root-input-test SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+    target_include_directories(ascify-host-cxx-root-input-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_options(ascify-host-cxx-root-input-test PRIVATE ${ASCIFY_LLVM_DEFINITIONS})
+    target_link_directories(ascify-host-cxx-root-input-test PRIVATE ${LLVM_LIBRARY_DIRS})
+    add_test(NAME ascify-host-cxx-root-input-witness
+      COMMAND ascify-host-cxx-root-input-test)
+  endif()
 
   find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
   find_program(ASCIFY_TEST_SHELL sh)

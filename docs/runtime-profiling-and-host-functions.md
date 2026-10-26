@@ -33,6 +33,16 @@ The actual lookup entry, active physical SDK read, builtin history and complete
 source ranges must agree. The flag retains its source name and definition;
 subsequent uses are limited to direct `ifdef`/`ifndef` or `if defined` controls.
 
+For an explicit Host C++ original root, the frontend's own unmodified main-file
+mapping may carry a dedicated witness for the canonical path, physical UID/size,
+original bytes and SHA256. These identities are rechecked around mapping, at
+the condition, at proof sealing and before publishing the rewritten buffer.
+Only the root may use this witness; selected headers, contextual/joint inputs,
+caller remaps, VFS overlays, PCH and modules do not acquire it. SDK lookup,
+entry and content checks retain their physical identity requirements.
+The witness is optional for ordinary Host C++ reads: failed capture keeps the
+original read path and leaves the conditional-profiler exception unavailable.
+
 That proved query becomes `__has_include(<acl/acl_prof.h>)`, with an explicit
 compile-time error alternative if the target header is absent. A transactional
 `#line` restores the valid original next-line position after the block; caller

@@ -101,6 +101,8 @@ private:
 
   ct::Replacements *replacements = nullptr;
   LocalHeaderRewriteContext *localHeaderContext = nullptr;
+  const ascify::HostCxxRootInputWitness *hostRootInput = nullptr;
+  bool isWitnessedProfilerHostRoot(clang::FileID file);
   std::set<std::string> siblingSourceMacroContextUsers;
   std::set<std::string> systemSourceMacroContextUsers;
   ascify::FrontendCompatibilityConfig frontendCompatibility;
@@ -359,10 +361,12 @@ public:
   explicit AscifyAction(
       ct::Replacements *replacements,
       LocalHeaderRewriteContext *context,
-      const ascify::FrontendCompatibilityConfig& compatibility):
+      const ascify::FrontendCompatibilityConfig& compatibility,
+      const ascify::HostCxxRootInputWitness *hostInput = nullptr):
     clang::ASTFrontendAction(),
     replacements(replacements),
     localHeaderContext(context),
+    hostRootInput(hostInput),
     frontendCompatibility(compatibility) {}
   // MatchCallback listeners
   bool lowerCudaGlobalScalarDoubleParam(const mat::MatchFinder::MatchResult &Result);

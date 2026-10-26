@@ -116,6 +116,20 @@ cases = [
      "#ifdef __CUDA_PROFILER_API_H__\nint observed;\n#endif\n",
      "cuda", True, True, True),
     ("shadow_identical_sdk", runtime + block + guarded_calls, "cuda", True, True, False),
+    ("host_cpp_recursive_root", "#include <cuda_runtime_api.h>\n" + block + guarded_calls,
+     "c++", False, True, True),
+    ("host_cpp_implicit_builtin_line", "#include <cuda_runtime_api.h>\n" + block +
+     'constexpr int observed=__builtin_LINE();\nstatic_assert(observed==6,"source position changed");\n' + guarded_calls,
+     "c++", False, True, False),
+    ("host_cpp_outer_condition", "#include <cuda_runtime_api.h>\n#if 1\n" +
+     block + "#endif\n" + guarded_calls, "c++", True, True, False),
+    ("host_cpp_shadow_identical_sdk", "#include <cuda_runtime_api.h>\n" + block + guarded_calls,
+     "c++", True, True, False),
+    ("host_cpp_contextual", '#define PARENT_FACTOR 3\n#include "caller_leaf.h"\n' +
+     "#include <cuda_runtime_api.h>\n" + block + guarded_calls,
+     "c++", True, True, True),
+    ("host_cpp_vfs_overlay", "#include <cuda_runtime_api.h>\n" + block + guarded_calls,
+     "c++", True, True, False),
 ]
 
 summary = {
@@ -151,7 +165,7 @@ try:
         original.write_text(source)
         converted, receipt = directory / "output.cce", directory / "receipt.json"
         extra = []
-        if name == "shadow_identical_sdk":
+        if name in ("shadow_identical_sdk", "host_cpp_shadow_identical_sdk"):
             # A private negative fixture only: identical bytes are not proof
             # that lookup selected the configured physical SDK provider.
             shadow = directory / "caller_include"
@@ -159,9 +173,22 @@ try:
             (shadow / "cuda_profiler_api.h").write_bytes(
                 (args.cuda_path / "include/cuda_profiler_api.h").read_bytes())
             extra = ["-I" + str(shadow)]
+        if name == "host_cpp_contextual":
+            (directory / "caller_leaf.h").write_text(
+                "#ifndef ORIGINAL_CALLER_LEAF_H\n#define ORIGINAL_CALLER_LEAF_H\n"
+                "constexpr int inherited=PARENT_FACTOR;\n#endif\n")
+        if name == "host_cpp_vfs_overlay":
+            shadow = directory / "caller_root.cpp"
+            shadow.write_text(source)
+            overlay = directory / "caller_overlay.json"
+            overlay.write_text(json.dumps({"version": 0, "use-external-names": False,
+                "roots": [{"type": "file", "name": str(original),
+                           "external-contents": str(shadow)}]}))
+            extra = ["-ivfsoverlay", str(overlay)]
+        input_hashes = {str(p): sha(p) for p in directory.rglob("*") if p.is_file()}
         common = ["-x", language, "-std=c++17", *extra,
                   "-I" + str(args.cuda_path / "include"),
-                  "--cuda-path=" + str(args.cuda_path),
+                  *(["--cuda-path=" + str(args.cuda_path)] if language == "cuda" else []),
                   "-resource-dir=" + str(args.resource_dir)]
         syntax = [args.clang, original, *common, "-fsyntax-only",
                   "-Wno-unknown-cuda-version"]
@@ -202,7 +229,7 @@ try:
                         'ACL profiler header"\n#endif') in text, (name, text)
                 resume_line = source[:source.index("#endif\n") + len("#endif\n")].count("\n") + 1
                 assert "#line " + str(resume_line) + "\n" in text, (name, text)
-                if name == "implicit_builtin_line":
+                if name in ("implicit_builtin_line", "host_cpp_implicit_builtin_line"):
                     assert 'static_assert(observed==6,"source position changed")' in text, text
                 assert "ascify::cudaProfilerStart()" in text and "ascify::cudaProfilerStop()" in text, text
                 flag_name = "MY_LOCAL_CAPTURE" if name == "commented_fresh_flag" else "ORIGINAL_PROFILE_FLAG"
@@ -220,6 +247,7 @@ try:
                 row["output_sha256"] = sha(converted)
             row["receipt_sha256"] = sha(receipt)
         assert sha(original) == row["source_sha256"]
+        assert all(sha(Path(path)) == digest for path, digest in input_hashes.items())
         row["passed"] = True
         save()
         print(name, "PASS", flush=True)

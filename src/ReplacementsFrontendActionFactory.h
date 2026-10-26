@@ -30,6 +30,7 @@ THE SOFTWARE.
 namespace ct = clang::tooling;
 
 struct LocalHeaderRewriteContext;
+namespace ascify { class HostCxxRootInputWitness; }
 
 /**
   * A FrontendActionFactory that propagates a set of Replacements into the FrontendAction.
@@ -42,25 +43,30 @@ class ReplacementsFrontendActionFactory : public ct::FrontendActionFactory {
   ct::Replacements *replacements = nullptr;
   LocalHeaderRewriteContext *localHeaderContext = nullptr;
   ascify::FrontendCompatibilityConfig frontendCompatibility;
+  const ascify::HostCxxRootInputWitness *hostRootInput = nullptr;
 
 public:
   explicit ReplacementsFrontendActionFactory(
       ct::Replacements *r,
       LocalHeaderRewriteContext *context,
-      const ascify::FrontendCompatibilityConfig& compatibility):
+      const ascify::FrontendCompatibilityConfig& compatibility,
+      const ascify::HostCxxRootInputWitness *hostInput = nullptr):
     ct::FrontendActionFactory(),
     replacements(r),
     localHeaderContext(context),
-    frontendCompatibility(compatibility) {}
+    frontendCompatibility(compatibility),
+    hostRootInput(hostInput) {}
 
 #if LLVM_VERSION_MAJOR < 10
   clang::FrontendAction *create() override {
-    return new T(replacements, localHeaderContext, frontendCompatibility);
+    return new T(replacements, localHeaderContext, frontendCompatibility,
+                 hostRootInput);
   }
 #else
   std::unique_ptr <clang::FrontendAction> create() override {
     return std::unique_ptr<clang::FrontendAction>(
-        new T(replacements, localHeaderContext, frontendCompatibility));
+        new T(replacements, localHeaderContext, frontendCompatibility,
+              hostRootInput));
   }
 #endif
 };

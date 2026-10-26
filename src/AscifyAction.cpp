@@ -62,6 +62,7 @@ THE SOFTWARE.
 #include "LLVMCompat.h"
 #include "ArgParse.h"
 #include "LocalHeader.h"
+#include "HostCxxRootInput.h"
 #include "ImplicitCudaHeaders.h"
 #include "CUDA2DPP.h"
 #include "StringUtils.h"
@@ -4970,6 +4971,45 @@ void AscifyAction::HasInclude(
       {location, resolvedPath.str(), entry, physical});
 }
 
+bool AscifyAction::isWitnessedProfilerHostRoot(clang::FileID file) {
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  const auto &pp = compiler.getPreprocessorOpts();
+  const auto &lang = compiler.getLangOpts();
+  if (hostRootInput == nullptr || lang.CUDA || file.isInvalid() ||
+      file != source.getMainFileID() || lang.Modules || lang.CPlusPlusModules ||
+      !compiler.getHeaderSearchOpts().VFSOverlayFiles.empty() ||
+      !pp.RemappedFiles.empty() || !pp.RemappedFileBuffers.empty() ||
+      !pp.ImplicitPCHInclude.empty() || !pp.PCHThroughHeader.empty() ||
+      pp.PrecompiledPreambleBytes.first != 0 || pp.PrecompiledPreambleBytes.second ||
+      !compiler.getFrontendOpts().ModuleFiles.empty() ||
+      compiler.getASTContext().getExternalSource() != nullptr)
+    return false;
+  if (localHeaderContext != nullptr &&
+      (localHeaderContext->depth != 0 || localHeaderContext->virtualInput != nullptr ||
+       localHeaderContext->plan == nullptr ||
+       localHeaderContext->sourcePath != localHeaderContext->plan->rootSourcePath() ||
+       localHeaderContext->sourcePath != hostRootInput->path()))
+    return false;
+  const auto *entry = source.getFileEntryForID(file);
+  const auto origin = source.getLocForStartOfFile(file);
+#if LLVM_VERSION_MAJOR >= 15
+  const auto entryRef = source.getFileEntryRefForID(file);
+  if (!entryRef || &entryRef->getFileEntry() != entry ||
+      entryRef->getName() != hostRootInput->path()) return false;
+#else
+  if (entry == nullptr || entry->getName() != hostRootInput->path()) return false;
+#endif
+  bool invalid = false;
+  const auto bytes = source.getBufferData(file, &invalid);
+  // The VFS main entry was created by main.cpp, so its UID need not equal the
+  // real file's UID. Bind that entry's name/size and exact parsed bytes to our
+  // explicit witness; the witness still rechecks the physical UID and SHA.
+  return entry != nullptr && !source.isFileOverridden(entry) && !invalid &&
+      hostRootInput->matchesParsed(source.getFilename(origin), bytes,
+                                   entry->getSize());
+}
+
 void AscifyAction::If(clang::SourceLocation location,
                      clang::SourceRange condition,
                      clang::PPCallbacks::ConditionValueKind value) {
@@ -5014,7 +5054,8 @@ void AscifyAction::If(clang::SourceLocation location,
       !compiler.getFrontendOpts().ModuleFiles.empty() ||
       compiler.getASTContext().getExternalSource() != nullptr ||
       mainEntry == nullptr || source.isFileOverridden(mainEntry) ||
-      !physicalSourceFileMatches(source.getFilename(location), *mainEntry, source) ||
+      (!physicalSourceFileMatches(source.getFilename(location), *mainEntry, source) &&
+       !isWitnessedProfilerHostRoot(file)) ||
       (localHeaderContext != nullptr &&
        (localHeaderContext->depth != 0 || localHeaderContext->virtualInput != nullptr))) {
     fail(); return;
@@ -5230,7 +5271,8 @@ bool AscifyAction::sealProfilerAvailabilityProof() {
   const auto origin = source.getLocForStartOfFile(candidate.file);
   const auto *entry = source.getFileEntryForID(candidate.file);
   if (entry == nullptr || source.isFileOverridden(entry) ||
-      !physicalSourceFileMatches(source.getFilename(origin), *entry, source))
+      (!physicalSourceFileMatches(source.getFilename(origin), *entry, source) &&
+       !isWitnessedProfilerHostRoot(candidate.file)))
     return reject();
   const auto operand = origin.getLocWithOffset(candidate.operandBegin);
   const auto endif = origin.getLocWithOffset(candidate.endifBegin);
