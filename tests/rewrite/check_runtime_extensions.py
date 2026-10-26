@@ -65,10 +65,10 @@ for name in ['cudaDeviceCanAccessPeer','cudaStreamQuery','cudaStreamWaitEvent']:
  cases.append(('runtime_macro_collision_'+name,'#include <cuda_runtime.h>\n#define '+name+' user_shadow\nint main(){int count=0;return cudaGetDeviceCount(&count);}\n',[],[],True))
 for name, code, expected, absent in [
  ('peer_query','int main(){int supported=7;return cudaDeviceCanAccessPeer(&supported,0,1);}', ['ascify::cudaDeviceCanAccessPeer(&supported,0,1)'], []),
- ('peer_enable_default','int main(){return cudaDeviceEnablePeerAccess(1);}', ['ascify::cudaDeviceEnablePeerAccess(1)'], []),
+ ('peer_enable_zero_flags','int main(){return cudaDeviceEnablePeerAccess(1, 0);}', ['ascify::cudaDeviceEnablePeerAccess(1, 0)'], []),
  ('peer_enable_flags_once','int main(){unsigned flags=0;return cudaDeviceEnablePeerAccess(1,flags++);}', ['ascify::cudaDeviceEnablePeerAccess(1,flags++)'], []),
  ('peer_disable','int main(){return cudaDeviceDisablePeerAccess(1);}', ['ascify::cudaDeviceDisablePeerAccess(1)'], []),
- ('peer_checked','int main(){int supported=7;checkCudaErrors(cudaDeviceCanAccessPeer(&supported,0,1));checkCudaErrors(cudaDeviceEnablePeerAccess(1));checkCudaErrors(cudaDeviceDisablePeerAccess(1));}', ['ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaDeviceCanAccessPeer(&supported,0,1))','ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaDeviceEnablePeerAccess(1))','ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaDeviceDisablePeerAccess(1))'], ['#include <helper_cuda.h>']),
+ ('peer_checked','int main(){int supported=7;checkCudaErrors(cudaDeviceCanAccessPeer(&supported,0,1));checkCudaErrors(cudaDeviceEnablePeerAccess(1, 0));checkCudaErrors(cudaDeviceDisablePeerAccess(1));}', ['ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaDeviceCanAccessPeer(&supported,0,1))','ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaDeviceEnablePeerAccess(1, 0))','ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaDeviceDisablePeerAccess(1))'], ['#include <helper_cuda.h>']),
 ]:
  cases.append((name,'#include <cuda_runtime.h>\n'+('#include <helper_cuda.h>\n' if name=='peer_checked' else '')+code+'\n',expected,absent,False))
 for name, code, expected, absent in [
