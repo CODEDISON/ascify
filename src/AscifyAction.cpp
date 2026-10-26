@@ -72,6 +72,7 @@ THE SOFTWARE.
 #include "CudaTextureBoundary.h"
 #include "BoundedDeviceTemplateInlining.h"
 #include "Scalar64Lowering.h"
+#include "NttpVoidCall.h"
 
 using namespace ascify;
 
@@ -8583,6 +8584,7 @@ bool AscifyAction::insertSemanticReplacement(
 std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::CompilerInstance &CI, StringRef) {
   Finder.reset(new mat::MatchFinder);
   scalar64Plan = {};
+  nttpVoidCallPlan = {};
   davC310TargetRecipe.reset();
   if (!NoLowerDeviceDoubleParams) {
     Finder->addMatcher(
@@ -9873,11 +9875,12 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
                 const std::set<unsigned> &native, const std::set<unsigned> &frozenTextureUtilityFiles,
                 const std::set<unsigned> &frozenTextureCgFiles,
                 const std::set<unsigned> &frozenRuntimePatternFiles, bool textureOnly,
-                const ascify::Scalar64Plan& scalar64)
+                const ascify::Scalar64Plan& scalar64,
+                const ascify::NttpVoidCallPlan& nttpVoid)
         : context(context), source(source), sdk(sdk), audited(audited), native(native), frozenTextureUtilityFiles(frozenTextureUtilityFiles),
           frozenTextureCgFiles(frozenTextureCgFiles),
           frozenRuntimePatternFiles(frozenRuntimePatternFiles),
-          textureOnly(textureOnly), scalar64(scalar64) {}
+          textureOnly(textureOnly), scalar64(scalar64), nttpVoid(nttpVoid) {}
     bool shouldVisitTemplateInstantiations() const { return true; }
     bool shouldVisitImplicitCode() const { return true; }
     bool TraverseDecl(clang::Decl *declaration) {
@@ -10047,6 +10050,9 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       // Exact expression/type facts from the guarded builtin scalar family,
       // never a void-NTTP, class, inquiry or whole-body exemption.
       if (scalar64.scalarExpressions.count(expression)) return true;
+      // Only the exact call/lookup pair proved with every caller instance and
+      // a transactional global qualification. Never a void/record/body bypass.
+      if (nttpVoid.expressions.count(expression)) return true;
       // A fixed scalar NTTP call can retain a dependent Expr type until
       // overload resolution, even though no SDK record can enter its type.
       // Prove only this expression; normal traversal still visits its body,
@@ -10805,6 +10811,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     const std::set<unsigned> &frozenRuntimePatternFiles;
     const bool textureOnly;
     const ascify::Scalar64Plan& scalar64;
+    const ascify::NttpVoidCallPlan& nttpVoid;
     unsigned runtimePatternDepth = 0;
     unsigned runtimeInstanceDepth = 0;
     std::vector<const clang::TemplateTypeParmDecl *> runtimePatternParameters;
@@ -10812,7 +10819,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     std::vector<std::pair<unsigned, const clang::TagDecl *>> runtimeIdentityArguments;
     std::set<const clang::RecordDecl *> reflectedRecords;
     std::set<const clang::VarDecl *> inquiryVariables;
-  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, frozenTextureCgFiles, frozenRuntimePatternFiles, textureOnly, scalar64Plan);
+  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, frozenTextureCgFiles, frozenRuntimePatternFiles, textureOnly, scalar64Plan, nttpVoidCallPlan);
   if (!records.TraverseDecl(compiler.getASTContext().getTranslationUnitDecl()))
     {
       const auto diagnostic = compiler.getDiagnostics().getCustomDiagID(
@@ -13041,6 +13048,49 @@ void AscifyAction::ExecuteAction() {
     cudaRuntimeApiBoundaryFailed = true;
     return;
   }
+  const auto nttpCgFile = [&](clang::SourceLocation location) {
+    if (location.isInvalid() || cudaAttributeControlModified ||
+        deviceTemplateAttributeMacroConflict || frontendCgControlModified) return false;
+    const auto file = SM.getFileID(SM.getSpellingLoc(location));
+    return verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
+        !macroAlteredFrontendCgFileIds.count(file.getHashValue()) &&
+        verifiedFrontendCgFile(file, getCompilerInstance(), frontendCompatibility);
+  };
+  const auto nttpCgRecord = [&](const clang::CXXRecordDecl* record) {
+    if (!record || record->getQualifiedNameAsString() != "cooperative_groups::thread_block" ||
+        !record->getDefinition()) return false;
+    for (const auto* declaration : record->redecls())
+      if (!nttpCgFile(declaration->getLocation())) return false;
+    return true;
+  };
+  std::string nttpVoidError;
+  clang::SourceLocation nttpVoidLocation;
+  if (!ascify::ProveNttpVoidCalls(getCompilerInstance().getASTContext(),
+          [&](clang::SourceLocation location) { return ownedPreservedMaxLocation(location); },
+          nttpCgRecord,
+          [&](const clang::FunctionDecl* function) {
+            return function && function->hasAttr<clang::CUDADeviceAttr>() &&
+                nttpCgFile(function->getLocation());
+          },
+          [&](llvm::StringRef name, clang::SourceLocation location) {
+            return !PP.getMacroDefinitionAtLoc(PP.getIdentifierInfo(name), location);
+          }, !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks &&
+              TargetPolicy == "dav-c310-vec" && TargetRecipe == "none",
+          nttpVoidCallPlan, nttpVoidLocation, nttpVoidError)) {
+    const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error, "NTTP void call boundary: %0");
+    getCompilerInstance().getDiagnostics().Report(nttpVoidLocation, diagnostic) << nttpVoidError;
+    cudaRuntimeApiBoundaryFailed = true;
+    return;
+  }
+  if (nttpVoidCallPlan.used() && (cudaAttributeControlModified ||
+      deviceTemplateAttributeMacroConflict || frontendCgControlModified)) {
+    const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error, "NTTP void call boundary: device/profile control provenance was modified");
+    getCompilerInstance().getDiagnostics().Report(diagnostic);
+    cudaRuntimeApiBoundaryFailed = true;
+    return;
+  }
   if (cudaRuntimeApiHeaderAdmitted && !auditCudaRuntimeApiRecords(false)) {
     cudaRuntimeApiBoundaryFailed = true;
     return;
@@ -13286,6 +13336,43 @@ void AscifyAction::ExecuteAction() {
       !auditCudaRuntimeApiRecords(true)) {
     cudaRuntimeApiBoundaryFailed = true;
     return;
+  }
+  if (nttpVoidCallPlan.used()) {
+    ct::Replacements staged(*replacements);
+    std::vector<SemanticRewriteRange> ranges;
+    for (const auto location : nttpVoidCallPlan.qualifications) {
+      if (!location.isFileID() || !SM.isWrittenInMainFile(location) ||
+          !ownedPreservedMaxLocation(location)) {
+        nttpVoidError = "qualification has no literal main-file owner";
+        break;
+      }
+      const auto position = SM.getDecomposedLoc(location);
+      for (const auto& range : SemanticRewriteRanges)
+        if (range.file == position.first && range.beginOffset <= position.second &&
+            position.second < range.endOffset)
+          nttpVoidError = "qualification overlaps another semantic transaction";
+      if (!nttpVoidError.empty() || !llcompat::insertReplacement(staged,
+              ct::Replacement(SM, location, 0U, "::"), &nttpVoidError)) break;
+      ranges.push_back({position.first, position.second, position.second + 1});
+    }
+    if (!nttpVoidCallPlan.contextualHeaders.empty() &&
+        (localHeaderContext == nullptr || localHeaderContext->plan == nullptr))
+      nttpVoidError = "qualification in a local header requires its source-context transaction";
+    if (!nttpVoidError.empty()) {
+      const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error, "NTTP void call boundary: %0");
+      getCompilerInstance().getDiagnostics().Report(diagnostic) << nttpVoidError;
+      cudaRuntimeApiBoundaryFailed = true;
+      return;
+    }
+    *replacements = std::move(staged);
+    SemanticRewriteRanges.insert(SemanticRewriteRanges.end(), ranges.begin(), ranges.end());
+    for (const auto& path : nttpVoidCallPlan.contextualHeaders)
+      localHeaderContext->plan->requireInheritedSourceContext(path);
+    llvm::errs() << "Ascify closed NTTP void calls v1: patterns=" << nttpVoidCallPlan.patterns
+                 << ", concrete_calls=" << nttpVoidCallPlan.concreteCalls
+                 << ", qualifications=" << nttpVoidCallPlan.qualifications.size()
+                 << ", contextual_headers=" << nttpVoidCallPlan.contextualHeaders.size() << "\n";
   }
   if (TargetPolicy == "dav-c310-vec" && SimtMathMode == "fast") {
     if (TargetRecipe == ascify::DavC310TargetRecipe::SimdRecipeName) {

@@ -64,6 +64,7 @@ if(NOT ASCIFY_CLANG_TESTS_ONLY)
     src/LocalHeader.cpp
     src/MigrationReceipt.cpp
     src/MigrationReceiptIO.cpp
+    src/NttpVoidCall.cpp
     src/Statistics.cpp
     src/Scalar64Lowering.cpp
     src/StringUtils.cpp

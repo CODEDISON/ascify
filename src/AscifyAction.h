@@ -39,6 +39,7 @@ THE SOFTWARE.
 #include "ReplacementsFrontendActionFactory.h"
 #include "Statistics.h"
 #include "Scalar64Lowering.h"
+#include "NttpVoidCall.h"
 
 namespace ct = clang::tooling;
 namespace mat = clang::ast_matchers;
@@ -121,6 +122,7 @@ private:
   std::vector<clang::SourceRange> SkippedSourceRanges;
   std::vector<SemanticRewriteRange> SemanticRewriteRanges;
   ascify::Scalar64Plan scalar64Plan;
+  ascify::NttpVoidCallPlan nttpVoidCallPlan;
   std::vector<SemanticRewriteRange> cudaLaneIdMacroRanges;
   std::set<unsigned> rewrittenCudaLaneIdOffsets;
   std::set<unsigned> rewrittenCudaPackedSadOffsets;
