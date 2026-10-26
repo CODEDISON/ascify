@@ -10321,6 +10321,48 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
         MacroNameTok.getLocation(), MacroNameTok, "expansion");
   auditFrozenNvidiaSampleHelperMacroDependency(
       MacroNameTok.getLocation(), MacroNameTok, MD, "expansion");
+  // EXIT_WAIVED is a host-side sample policy constant, not a CUDA capability.
+  // Retain its original object-macro contract when the helper is removed.
+  // Authenticate both the exact provider and the active token body; a copied
+  // spelling, command-line definition, alias expansion, or overridden buffer
+  // must not borrow the frozen helper's provenance.
+  if (MacroNameTok.getIdentifierInfo()->getName() == "EXIT_WAIVED" &&
+      macroInfo != nullptr && Args == nullptr &&
+      MacroNameTok.getLocation().isFileID() &&
+      Range.getBegin().isFileID() && Range.getEnd().isFileID() &&
+      sourceManager.isWrittenInMainFile(MacroNameTok.getLocation()) &&
+      activeFrozenHelperFunctionsProviderMacroBodyMatches(
+          "EXIT_WAIVED", *macroInfo,
+          getCompilerInstance().getPreprocessor())) {
+    const auto definition =
+        sourceManager.getSpellingLoc(macroInfo->getDefinitionLoc());
+    const auto definitionFile = definition.isValid()
+        ? sourceManager.getFileID(definition) : clang::FileID();
+    const auto *entry = definitionFile.isValid()
+        ? sourceManager.getFileEntryForID(definitionFile) : nullptr;
+    const unsigned definitionRole = definition.isValid()
+        ? frozenNvidiaSampleHelperFileRole(sourceManager, definition)
+        : FrozenNvidiaSampleHelperNone;
+    const bool frozenCoreProvider =
+        entry != nullptr && !sourceManager.isFileOverridden(entry) &&
+        (definitionRole == FrozenOfficialNvidiaSampleHelperCuda ||
+         definitionRole == FrozenOfficialNvidiaSampleHelperString) &&
+        physicalSourceFileMatches(sourceManager.getFilename(definition),
+                                  *entry, sourceManager);
+    const bool frozenImageProvider =
+        frozenOfficialNvidiaSampleHelperFunctionsSeen &&
+        isDirectFrozenFunctionsImageProviderInstance(definition);
+    bool invalid = false;
+    const auto spelling = clang::Lexer::getSourceText(
+        clang::CharSourceRange::getTokenRange(Range), sourceManager,
+        getCompilerInstance().getLangOpts(), &invalid);
+    if (!invalid && spelling == "EXIT_WAIVED" &&
+        (frozenCoreProvider || frozenImageProvider)) {
+      nvidiaSampleHelperNormalMacroOffsets.insert(
+          sourceManager.getFileOffset(MacroNameTok.getLocation()));
+      return;
+    }
+  }
   if (macroInfo == nullptr ||
       !locationComesFromRecognizedNvidiaSampleHelper(
           sourceManager, macroInfo->getDefinitionLoc()))
@@ -11260,7 +11302,14 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
       "#include <stdio.h>\n"
       "#include <stdlib.h>\n"
       "#include <string.h>\n"
-      "#include <helper_string.h>";
+      "#include <helper_string.h>\n"
+      // This is the exact public policy macro from every admitted helper
+      // profile. Preserve its definition timing and an existing definition,
+      // rather than replacing call sites by an enum/constant (which would
+      // change #if, defined(), and stringization semantics).
+      "#ifndef EXIT_WAIVED\n"
+      "#define EXIT_WAIVED 2\n"
+      "#endif";
   const bool helperNeedsCompat =
       !nvidiaSampleHelperMacroCandidates.empty() ||
       !nvidiaSampleFindDeviceCandidates.empty();
