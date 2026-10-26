@@ -1,6 +1,8 @@
 #ifndef ASCIFY_TEST_SCALAR64_CG_H
 #define ASCIFY_TEST_SCALAR64_CG_H
 // Only a host linkage model. It cannot establish warp scheduling or NPU ABI.
+// Real CANN CG imports device_types.h; reuse the existing native type model.
+#include "../../cooperative_stubs/legacy/simt_api/device_types.h"
 #include <simt_api/device_warp_functions.h>
 namespace cooperative_groups {
 struct thread_block {
