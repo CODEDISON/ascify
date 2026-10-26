@@ -69,9 +69,9 @@ class Inventory : public RecursiveASTVisitor<Inventory> {
     current = saved;
     return accepted;
   }
-  bool TraverseTypeLoc(TypeLoc type) {
+  bool TraverseTypeLoc(TypeLoc type, bool TraverseQualifier = true) {
     ++typeDepth;
-    const bool accepted = RecursiveASTVisitor<Inventory>::TraverseTypeLoc(type);
+    const bool accepted = RecursiveASTVisitor<Inventory>::TraverseTypeLoc(type, TraverseQualifier);
     --typeDepth;
     return accepted;
   }
