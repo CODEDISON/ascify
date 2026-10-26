@@ -6,6 +6,7 @@ refusal must first pass the independent original-CUDA syntax command. This
 script is intentionally not executed while its source review is pending.
 """
 import argparse
+from collections import Counter
 import hashlib
 import json
 from pathlib import Path
@@ -194,6 +195,70 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def published_sources(output):
+    """Follow only this published root's literal local bundle edges, including .dpp.
+
+    Fixture local includes are literal and unconditional. Angle includes belong
+    to the separately bound SDK/product inputs; they cannot supply fixture
+    qualifications. An unreferenced staged/bundle file is never inspected.
+    """
+    output = output.absolute()
+    bundle = Path(str(output) + '.headers')
+    assert output.is_file() and not output.is_symlink(), output
+    assert not bundle.is_symlink(), bundle
+    result, seen = [], set()
+
+    def visit(path):
+        path = path.resolve(strict=True)
+        if path in seen:
+            return
+        seen.add(path)
+        result.append(path)
+        text = path.read_text()
+        for spelling in re.findall(r'(?m)^[ \t]*#[ \t]*include[ \t]*"([^"\r\n]+)"', text):
+            relative = Path(spelling)
+            assert not relative.is_absolute(), ('absolute published local include', spelling)
+            candidate = path.parent / relative
+            target = candidate.resolve(strict=True)
+            try:
+                target.relative_to(bundle.resolve(strict=True))
+            except ValueError:
+                raise AssertionError(('published include escapes its bundle', spelling, target))
+            # Resolving inside the bundle is insufficient if an intermediate
+            # component is a symlink. The test requires actual owned artifacts.
+            for component in (candidate, *candidate.parents):
+                assert not component.is_symlink(), ('symlink in published include', component)
+                if component == bundle:
+                    break
+            assert target.is_file(), ('published include is not a regular file', target)
+            visit(target)
+
+    visit(output)
+    return result
+
+
+def launch_inventory(text):
+    # Runtime launch configuration may gain whitespace/type constructors.
+    # Match the complete literal kernel-template tuple immediately before <<<.
+    return Counter((name, int(size), flag == 'true') for name, size, flag in re.findall(
+        r'\b(first_kernel|second_kernel)\s*<\s*(\d+)\s*,\s*(false|true)\s*>\s*<<<', text))
+
+
+def check_all_launches(case, generated):
+    original = launch_inventory(case['source'] + '\n' + '\n'.join(case['files'].values()))
+    if not original:
+        return False
+    expected = Counter((name, size, flag)
+                       for name in ('first_kernel', 'second_kernel')
+                       for size in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512)
+                       for flag in (False, True))
+    assert original == expected and sum(original.values()) == 40, ('fixture launch inventory', case['name'])
+    actual = launch_inventory(generated)
+    assert actual == expected and sum(actual.values()) == 40, (
+        case['name'], 'published launch tuples/count changed', expected - actual, actual - expected)
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True)
@@ -258,9 +323,10 @@ def main():
             assert record['status'] == ('succeeded' if case['accepted'] else 'failed'), record
             if case['accepted']:
                 assert result.returncode == 0 and output.is_file(), (case['name'], result.stderr)
-                files = [p for p in directory.rglob('*') if p.is_file() and
-                         (p == output or p.name.endswith(('.cuh', '.h'))) and str(p) not in inputs]
+                files = published_sources(output)
+                assert all(str(p) not in inputs for p in files), ('original source used as output', files)
                 generated = '\n'.join(p.read_text() for p in files)
+                all40 = check_all_launches(case, generated)
                 for spelling in case['qualifiers']:
                     assert spelling in generated, (case['name'], 'qualification absent', spelling)
                 for spelling in case['retained']:
@@ -280,6 +346,8 @@ def main():
             summary['cases'].append(dict(name=case['name'], accepted=case['accepted'],
                 source_sha256=inputs[str(source)], original_returncode=original.returncode,
                 convert_returncode=result.returncode, input_unchanged=True,
+                all40_published_launches_verified=all40 if case['accepted'] else False,
+                published_sources=[dict(path=str(p), sha256=sha(p)) for p in files] if case['accepted'] else [],
                 output_sha256=sha(output) if output.exists() else None))
         assert all(sha(Path(p)) == value for p, value in before.items()), 'tool/SDK input changed'
         summary['passed'] = True
