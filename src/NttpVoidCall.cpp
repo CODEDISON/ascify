@@ -389,11 +389,28 @@ class Proof {
     }
     const auto* reference = dyn_cast<DeclRefExpr>(value);
     const auto* variable = reference ? dyn_cast<VarDecl>(reference->getDecl()) : nullptr;
-    if (!variable || !sameOwner(variable, owner) || !literal(variable->getLocation())) return false;
-    if (!isa<ParmVarDecl>(variable)) {
+    if (!variable || !literal(variable->getLocation())) return false;
+    if (isa<ParmVarDecl>(variable)) {
+      if (!sameOwner(variable, owner)) return false;
+    } else {
+      const auto* lexical = dyn_cast<FunctionDecl>(variable->getLexicalDeclContext());
       const auto* array = context.getAsArrayType(variable->getType());
-      if (!variable->isLocalVarDecl() || !array ||
+      if (!owner || !lexical || lexical->getCanonicalDecl() != owner->getCanonicalDecl() ||
+          !variable->isLocalVarDecl() || !array ||
           !context.hasSameUnqualifiedType(array->getElementType(), context.FloatTy)) return false;
+      if (variable->getStorageClass() == SC_Extern) {
+        // Instantiated block-scope extern shared roots have a nonlocal semantic
+        // context. Only this direct CUDA qualifier keeps their lexical owner;
+        // the existing Runtime qualifier/provider audits still apply.
+        const auto* shared = variable->getAttr<CUDASharedAttr>();
+        if (!shared) return false;
+        const auto location = source.getExpansionLoc(shared->getLocation());
+        Token token;
+        if (!literal(location) ||
+            Lexer::getRawToken(location, token, source, context.getLangOpts(), true) ||
+            token.getLocation() != location || token.isNot(tok::raw_identifier) || token.needsCleaning() ||
+            Lexer::getSpelling(token, source, context.getLangOpts()) != "__shared__") return false;
+      } else if (!sameOwner(variable, owner)) return false;
     }
     auto actual = expression->getType();
     if (!actual->isPointerType() || !floatPointer(actual) || !floatPointer(formal)) return false;

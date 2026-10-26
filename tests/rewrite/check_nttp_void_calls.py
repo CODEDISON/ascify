@@ -112,6 +112,10 @@ template<unsigned N> __device__ int leaf(float* p,float value,unsigned lane,thre
         'leaf<Width>(scratch,', 'leaf<Width>(static_cast<volatile float*>(scratch),')), accepted=False)
     yield case('foreign_array_root', complete(before='__device__ float foreign[512];\n',
         relay=RELAY.replace('leaf<Width>(scratch,', 'leaf<Width>(foreign,')), accepted=False)
+    yield case('extern_device_global_alias', complete(before='__device__ float foreign[512];\n',
+        relay=RELAY.replace('extern __shared__ float scratch[];',
+                            'extern __device__ float foreign[512];').replace('scratch', 'foreign')),
+        accepted=False)
     yield case('volatile_scalar_root', complete(relay=RELAY.replace(
         'const float value=', 'volatile float value=')), accepted=False)
     yield case('unknown_group_producer', complete(before='__device__ cg::thread_block manufacture();\n',
