@@ -156,6 +156,29 @@ template<int K> __global__ void late_kernel(float* p){other<K>(p);}
 void instantiate_late(float* p){late_kernel<3><<<1,1>>>(p);}
 '''
     yield case('late_family_atomicity', complete(after=late), accepted=False)
+    # UInt/Bool calls above engage the new plan. These extra calls reference
+    # the SAME admitted family, so an int/non-template caller cannot bypass
+    # closure merely because its literal call is already nondependent.
+    mixed_int = '''template<int Index> __global__ void mixed_int(float* p){
+  cg::thread_block block=cg::this_thread_block();
+  const unsigned lane=threadIdx.x;
+  const float value=p[lane];
+  leaf<64>(p,value,lane,block);
+}
+void instantiate_mixed_int(float* p){mixed_int<7><<<1,64>>>(p);}
+'''
+    yield case('mixed_int_fixed_call', complete(after=mixed_int), accepted=False)
+    yield case('mixed_int_dependent_lookup', complete(after=mixed_int.replace(
+        'leaf<64>', 'leaf<static_cast<unsigned>(Index)>')), accepted=False)
+    ordinary = '''__global__ void mixed_ordinary(float* p){
+  cg::thread_block block=cg::this_thread_block();
+  const unsigned lane=threadIdx.x;
+  const float value=p[lane];
+  leaf<64>(p,value,lane,block);
+}
+void instantiate_mixed_ordinary(float* p){mixed_ordinary<<<1,64>>>(p);}
+'''
+    yield case('mixed_ordinary_fixed_call', complete(after=ordinary), accepted=False)
     fake = '''#include <cuda_runtime.h>
 namespace cooperative_groups {
 class thread_block{};

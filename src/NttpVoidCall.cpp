@@ -48,6 +48,7 @@ class Inventory : public RecursiveASTVisitor<Inventory> {
   std::vector<Invocation> calls;
   std::set<const FunctionDecl*> functions;
   std::set<const Expr*> directCallees;
+  std::set<const Expr*> kernelLaunchCallees;
   std::vector<const DeclRefExpr*> references;
   std::vector<const UnresolvedLookupExpr*> lookups;
   std::vector<const Expr*> expressions;
@@ -99,6 +100,7 @@ class Inventory : public RecursiveASTVisitor<Inventory> {
     if (!seenCalls.emplace(current, call).second) return true;
     calls.push_back({current, call, typeDepth != 0 || observationDepth != 0});
     directCallees.insert(plain(call->getCallee()));
+    if (isa<CUDAKernelCallExpr>(call)) kernelLaunchCallees.insert(plain(call->getCallee()));
     return true;
   }
   bool VisitDeclRefExpr(DeclRefExpr* reference) {
@@ -508,16 +510,18 @@ class Proof {
         const auto* candidate = dyn_cast<FunctionTemplateDecl>(declaration);
         mentions |= candidate && families.count(candidate->getCanonicalDecl());
       }
+      if (inventory.kernelLaunchCallees.count(lookup)) continue; // Existing launch policy, no new fact.
       const auto owner = family(inventory.lookupOwners.at(lookup));
-      if (mentions && domain(owner) &&
-          (!patterns.count(site(lookup->getNameLoc())) || !inventory.directCallees.count(lookup)))
+      if (mentions && (!families.count(owner) ||
+          !patterns.count(site(lookup->getNameLoc())) || !inventory.directCallees.count(lookup)))
         return fail(lookup->getNameLoc(), "closed void template has an unproved lookup/using/observation");
     }
     for (const auto& invocation : inventory.calls) {
       const auto* callee = invocation.call->getDirectCallee();
       if (!callee || !families.count(family(callee)) || callee->hasAttr<CUDAGlobalAttr>()) continue;
       const auto owner = family(invocation.owner);
-      if (owner && !domain(owner)) continue; // No facts/qualification for an out-of-domain caller.
+      if (!families.count(owner))
+        return fail(invocation.call->getExprLoc(), "admitted void template is called outside its closed families");
       if (!invocation.owner || !sourceFunction(invocation.owner) || invocation.observation ||
           !discarded(invocation.call) || !actuals(invocation.call, callee, invocation.owner))
         return fail(invocation.call->getExprLoc(), "closed void template has an unproved concrete caller");
@@ -634,6 +638,7 @@ class Proof {
     inventory.TraverseDecl(context.getTranslationUnitDecl());
     for (const auto& invocation : inventory.calls) {
       const auto* call = invocation.call;
+      if (isa<CUDAKernelCallExpr>(call)) continue; // This proof does not project kernel launches.
       const auto* lookup = dyn_cast<UnresolvedLookupExpr>(plain(call->getCallee()));
       const auto callee = lookupFamily(lookup);
       const auto caller = family(invocation.owner);
