@@ -767,12 +767,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 72333)
+  if (contents.size() != 75259)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "170c521ce85826ccd3a5bb972dd3270581cbddb9f66ede2191f425cca79a23b5");
+      "92ae6d94c684ecf2c853d0d008f5cc4d006cd105aea8ea2584978f2b79707bbb");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -799,12 +799,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 72333)
+  if (invalidBuffer || contents.size() != 75259)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "170c521ce85826ccd3a5bb972dd3270581cbddb9f66ede2191f425cca79a23b5");
+      "92ae6d94c684ecf2c853d0d008f5cc4d006cd105aea8ea2584978f2b79707bbb");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -884,6 +884,7 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaFuncGetAttributes", "cudaFuncSetAttribute",
       "cudaStreamCreate", "cudaStreamCreateWithFlags",
       "cudaStreamDestroy", "cudaStreamSynchronize",
+      "cudaStreamQuery", "cudaStreamWaitEvent",
       "cudaEventCreate", "cudaEventDestroy", "cudaEventRecord",
       "cudaEventSynchronize", "cudaEventElapsedTime", "cudaEventQuery",
       "cudaGetLastError", "cudaPeekAtLastError",
@@ -2115,8 +2116,14 @@ static bool requiresCudaCompatHeader(llvm::StringRef name) {
          name == "cudaStreamCreateWithFlags" ||
          name == "cudaStreamDefault" ||
          name == "cudaStreamNonBlocking" ||
+         name == "cudaStreamLegacy" ||
+         name == "cudaStreamPerThread" ||
          name == "cudaStreamDestroy" ||
          name == "cudaStreamSynchronize" ||
+         name == "cudaStreamQuery" ||
+         name == "cudaStreamWaitEvent" ||
+         name == "cudaEventWaitDefault" ||
+         name == "cudaEventWaitExternal" ||
          name == "cudaEventCreate" ||
          name == "cudaEventDestroy" ||
          name == "cudaEventRecord" ||

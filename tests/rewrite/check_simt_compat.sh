@@ -357,6 +357,21 @@ if command -v "$cxx" >/dev/null 2>&1; then
     "$test_tmp/runtime-peer" "$peer_case"
   done
 
+  "$cxx" -std=c++17 -pthread \
+    -I"$repo_root/tests/rewrite/stubs" -I"$repo_root/include" \
+    "$repo_root/tests/rewrite/runtime_stream_wait_query_test.cpp" \
+    -o "$test_tmp/runtime-stream-wait-query"
+  for stream_case in invalid query wait lazy borrowed wrong-context init-failure bind-failure threads; do
+    "$test_tmp/runtime-stream-wait-query" "$stream_case"
+  done
+
+  "$cxx" -std=c++17 \
+    -I"$repo_root/tests/rewrite/stubs_public85" \
+    -I"$repo_root/tests/rewrite/stubs" -I"$repo_root/include" \
+    "$repo_root/tests/rewrite/runtime_stream_reject_family_test.cpp" \
+    -o "$test_tmp/runtime-stream-reject-family"
+  "$test_tmp/runtime-stream-reject-family"
+
   "$cxx" -std=c++17 \
     -I"$repo_root/tests/rewrite/stubs" \
     -I"$repo_root/include" \

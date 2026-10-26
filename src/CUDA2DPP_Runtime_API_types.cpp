@@ -41,8 +41,12 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_TYPE_NAME_MAP = [] {
   // ACL_STREAM_FAST_LAUNCH even though both numeric values are one.
   m["cudaStreamDefault"]         = {"ascify::cudaStreamDefault",         CONV_DEFINE, API_RUNTIME, SEC::STREAM};
   m["cudaStreamNonBlocking"]     = {"ascify::cudaStreamNonBlocking",     CONV_DEFINE, API_RUNTIME, SEC::STREAM};
+  m["cudaStreamLegacy"] = {"ascify::cudaStreamLegacy", CONV_DEFINE, API_RUNTIME, SEC::STREAM};
+  m["cudaStreamPerThread"] = {"ascify::cudaStreamPerThread", CONV_DEFINE, API_RUNTIME, SEC::STREAM};
   // Event type
   m["cudaEvent_t"]                = {"aclrtEvent",                       CONV_TYPE, API_RUNTIME, SEC::EVENT};
+  m["cudaEventWaitDefault"] = {"ascify::cudaEventWaitDefault", CONV_DEFINE, API_RUNTIME, SEC::EVENT};
+  m["cudaEventWaitExternal"] = {"ascify::cudaEventWaitExternal", CONV_DEFINE, API_RUNTIME, SEC::EVENT};
   // Device attributes. Values beyond VECTOR_CORE_NUM drift between public ACL
   // and frozen RTS headers, so generated code names only Ascify constants.
   m["cudaDeviceProp"] = {"ascify::cudaDeviceProp", CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};

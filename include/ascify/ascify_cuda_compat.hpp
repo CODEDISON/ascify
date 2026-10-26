@@ -125,6 +125,14 @@ float cuda_frexp_float(float, int*) = delete;
 
 inline constexpr unsigned int cudaStreamDefault = 0x00U;
 inline constexpr unsigned int cudaStreamNonBlocking = 0x01U;
+inline constexpr unsigned int cudaEventWaitDefault = 0x00U;
+inline constexpr unsigned int cudaEventWaitExternal = 0x01U;
+// Retain CUDA's reserved handle values for explicit rejection where an ACL
+// default stream cannot provide the corresponding implicit-stream ordering.
+inline const aclrtStream cudaStreamLegacy =
+    reinterpret_cast<aclrtStream>(static_cast<uintptr_t>(1));
+inline const aclrtStream cudaStreamPerThread =
+    reinterpret_cast<aclrtStream>(static_cast<uintptr_t>(2));
 
 namespace detail {
 
@@ -1142,6 +1150,60 @@ inline aclError cudaStreamSynchronize(aclrtStream stream) {
   if (status != ACL_SUCCESS) return status;
   const auto *hooks = detail::runtimeTextureHooks.load(std::memory_order_acquire);
   return hooks ? hooks->checkPending() : ACL_SUCCESS;
+}
+
+inline aclError cudaStreamQuery(aclrtStream stream) {
+  // ACL streams do not implement CUDA legacy default-stream barriers, and an
+  // ACL context default stream is not a CUDA per-thread default stream.
+  if (stream == nullptr || stream == cudaStreamLegacy ||
+      stream == cudaStreamPerThread) {
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  }
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3) && \
+    defined(ACL_MAJOR_VERSION) && defined(ACL_MINOR_VERSION) && \
+    defined(ACL_PATCH_VERSION) && ACL_MAJOR_VERSION == 1 && \
+    ACL_MINOR_VERSION == 17 && ACL_PATCH_VERSION == 0
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  aclrtStreamStatus result = ACL_STREAM_STATUS_RESERVED;
+  const aclError status = aclrtStreamQuery(stream, &result);
+  if (status == ACL_ERROR_RT_STREAM_NOT_COMPLETE) {
+    return ACL_ERROR_RT_EVENT_NOT_COMPLETE;
+  }
+  if (status != ACL_SUCCESS) { return status; }
+  if (result == ACL_STREAM_STATUS_COMPLETE) { return ACL_SUCCESS; }
+  if (result == ACL_STREAM_STATUS_NOT_READY) {
+    // cudaErrorNotReady already has this shared event/stream status mapping.
+    // Do not return the ACL state enum (1 is not an aclError result).
+    return ACL_ERROR_RT_EVENT_NOT_COMPLETE;
+  }
+#endif
+  return ACL_ERROR_FEATURE_UNSUPPORTED;
+}
+
+inline aclError cudaStreamWaitEvent(aclrtStream stream, aclrtEvent event,
+                                    unsigned int flags = 0) {
+  if (flags == cudaEventWaitExternal) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  if (flags != cudaEventWaitDefault || event == nullptr) {
+    return ACL_ERROR_RT_PARAM_INVALID;
+  }
+  if (stream == nullptr || stream == cudaStreamLegacy ||
+      stream == cudaStreamPerThread) {
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  }
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3) && \
+    defined(ACL_MAJOR_VERSION) && defined(ACL_MINOR_VERSION) && \
+    defined(ACL_PATCH_VERSION) && ACL_MAJOR_VERSION == 1 && \
+    ACL_MINOR_VERSION == 17 && ACL_PATCH_VERSION == 0
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  // cudaEventCreate uses Ex + SYNC events on this admitted SDK. Their wait
+  // captures the latest record and is unaffected by subsequent rerecords.
+  // This queues a device-side dependency; no host synchronization or reset.
+  return aclrtStreamWaitEvent(stream, event);
+#else
+  return ACL_ERROR_FEATURE_UNSUPPORTED;
+#endif
 }
 
 using cudaHostFn_t = void (*)(void*);

@@ -51,6 +51,19 @@ cases=[
 ]
 cap='cudaDevAttrComputeCapabilityMajor'
 for name, code, expected, absent in [
+ ('stream_query','int main(){cudaStream_t s;return cudaStreamQuery(s)==cudaErrorNotReady;}', ['ascify::cudaStreamQuery(s)==ACL_ERROR_RT_EVENT_NOT_COMPLETE'], []),
+ ('stream_query_address','int main(){auto query=&cudaStreamQuery;cudaStream_t s;return query(s);}', ['&ascify::cudaStreamQuery','aclrtStream s'], []),
+ ('stream_query_null','int main(){return cudaStreamQuery(0);}', ['ascify::cudaStreamQuery(0)'], []),
+ ('stream_query_special','int main(){cudaStreamQuery(cudaStreamLegacy);return cudaStreamQuery(cudaStreamPerThread);}', ['ascify::cudaStreamQuery(ascify::cudaStreamLegacy)','ascify::cudaStreamQuery(ascify::cudaStreamPerThread)'], []),
+ ('stream_wait_default','int main(){cudaStream_t s;cudaEvent_t e;return cudaStreamWaitEvent(s,e);}', ['ascify::cudaStreamWaitEvent(s,e)'], []),
+ ('stream_wait_flags_once','int main(){cudaStream_t s;cudaEvent_t e;unsigned flags=0;return cudaStreamWaitEvent(s,e,flags++);}', ['ascify::cudaStreamWaitEvent(s,e,flags++)'], []),
+ ('stream_wait_named_flags','int main(){cudaStream_t s;cudaEvent_t e;cudaStreamWaitEvent(s,e,cudaEventWaitDefault);return cudaStreamWaitEvent(s,e,cudaEventWaitExternal);}', ['ascify::cudaStreamWaitEvent(s,e,ascify::cudaEventWaitDefault)','ascify::cudaStreamWaitEvent(s,e,ascify::cudaEventWaitExternal)'], []),
+ ('stream_checked','int main(){cudaStream_t s;cudaEvent_t e;checkCudaErrors(cudaStreamQuery(s));checkCudaErrors(cudaStreamWaitEvent(s,e,0));}', ['ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaStreamQuery(s))','ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaStreamWaitEvent(s,e,0))'], ['#include <helper_cuda.h>']),
+]:
+ cases.append((name,'#include <cuda_runtime.h>\n'+('#include <helper_cuda.h>\n' if name=='stream_checked' else '')+code+'\n',expected,absent,False))
+for name in ['cudaDeviceCanAccessPeer','cudaStreamQuery','cudaStreamWaitEvent']:
+ cases.append(('runtime_macro_collision_'+name,'#include <cuda_runtime.h>\n#define '+name+' user_shadow\nint main(){int count=0;return cudaGetDeviceCount(&count);}\n',[],[],True))
+for name, code, expected, absent in [
  ('peer_query','int main(){int supported=7;return cudaDeviceCanAccessPeer(&supported,0,1);}', ['ascify::cudaDeviceCanAccessPeer(&supported,0,1)'], []),
  ('peer_enable_default','int main(){return cudaDeviceEnablePeerAccess(1);}', ['ascify::cudaDeviceEnablePeerAccess(1)'], []),
  ('peer_enable_flags_once','int main(){unsigned flags=0;return cudaDeviceEnablePeerAccess(1,flags++);}', ['ascify::cudaDeviceEnablePeerAccess(1,flags++)'], []),

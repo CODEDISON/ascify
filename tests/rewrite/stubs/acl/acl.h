@@ -22,6 +22,20 @@ aclError aclrtLaunchHostFunc(aclrtStream, aclrtHostFunc, void*);
 aclError aclrtDeviceCanAccessPeer(int32_t*, int32_t, int32_t);
 aclError aclrtDeviceEnablePeerAccess(int32_t, uint32_t);
 aclError aclrtDeviceDisablePeerAccess(int32_t);
+#if !defined(ASCIFY_TEST_PUBLIC_85_ACL)
+enum aclrtStreamStatus {
+  ACL_STREAM_STATUS_COMPLETE = 0,
+  ACL_STREAM_STATUS_NOT_READY = 1,
+  ACL_STREAM_STATUS_RESERVED = 0xFFFF
+};
+aclError aclrtStreamQuery(aclrtStream, aclrtStreamStatus*);
+aclError aclrtStreamWaitEvent(aclrtStream, aclrtEvent);
+#endif
+#ifdef ASCIFY_TEST_ACL_CONTROLLABLE_STREAM_WAIT_QUERY
+extern int ascify_test_synchronize_stream_calls;
+extern int ascify_test_synchronize_event_calls;
+extern aclrtStream ascify_test_stream_create_result;
+#endif
 
 enum aclrtMemcpyKind {
   ACL_MEMCPY_HOST_TO_HOST,
@@ -60,6 +74,7 @@ static const aclError ACL_ERROR_REPEAT_FINALIZE = 100037;
 static const aclError ACL_ERROR_RT_CONTEXT_NULL = 107002;
 static const aclError ACL_ERROR_RT_NO_DEVICE = 207004;
 static const aclError ACL_ERROR_RT_EVENT_NOT_COMPLETE = 507006;
+static const aclError ACL_ERROR_RT_STREAM_NOT_COMPLETE = 507004;
 static const unsigned ACL_EVENT_TIME_LINE = 8;
 static const unsigned ACL_EVENT_SYNC = 1;
 static const unsigned ACL_EVENT_CAPTURE_STREAM_PROGRESS = 2;
@@ -478,7 +493,11 @@ inline aclError aclrtCreateStream(aclrtStream* stream) {
     return ascify_test_create_stream_status;
   }
 #endif
+#ifdef ASCIFY_TEST_ACL_CONTROLLABLE_STREAM_WAIT_QUERY
+  *stream = ascify_test_stream_create_result;
+#else
   *stream = reinterpret_cast<aclrtStream>(1);
+#endif
   return ACL_SUCCESS;
 }
 
@@ -489,6 +508,10 @@ inline aclError aclrtSynchronizeStream(aclrtStream stream) {
   ascify_test_sync_stream = stream;
   ascify_test_sync_sequence = ++ascify_test_copy_order;
   return ascify_test_sync_status;
+#elif defined(ASCIFY_TEST_ACL_CONTROLLABLE_STREAM_WAIT_QUERY)
+  (void)stream;
+  ++ascify_test_synchronize_stream_calls;
+  return ACL_ERROR_FEATURE_UNSUPPORTED;
 #else
   (void)stream;
   return ACL_SUCCESS;
@@ -517,7 +540,14 @@ inline aclError aclrtRecordEvent(aclrtEvent, aclrtStream stream) {
 #endif
   return ACL_SUCCESS;
 }
-inline aclError aclrtSynchronizeEvent(aclrtEvent) { return ACL_SUCCESS; }
+inline aclError aclrtSynchronizeEvent(aclrtEvent) {
+#ifdef ASCIFY_TEST_ACL_CONTROLLABLE_STREAM_WAIT_QUERY
+  ++ascify_test_synchronize_event_calls;
+  return ACL_ERROR_FEATURE_UNSUPPORTED;
+#else
+  return ACL_SUCCESS;
+#endif
+}
 inline aclError aclrtEventElapsedTime(float* milliseconds, aclrtEvent,
                                       aclrtEvent) {
   *milliseconds = 1.0f;
