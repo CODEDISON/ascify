@@ -42,6 +42,12 @@ ASCIFY_FRONTEND_COMPAT_DEVICE_ inline void sync(const thread_block& group) {
 
 template <unsigned int Size, typename ParentT = void> class thread_block_tile;
 namespace ascify_detail {
+// Value domain only; no class/enum obtains this capability from sizeof alone.
+template<class T> struct scalar64_transport_type : std::integral_constant<bool,
+    (std::is_same<T, long>::value || std::is_same<T, unsigned long>::value ||
+     std::is_same<T, long long>::value ||
+     std::is_same<T, unsigned long long>::value ||
+     std::is_same<T, double>::value) && sizeof(T) == 8> {};
 // Full-warp register collectives and synchronization with runtime participation checks.
 template <unsigned int Size> class tile_register_operations {
   static_assert(Size == 32, "Ascify admits only full-warp tile size 32; multi-warp subgroup synchronization is not implemented");
@@ -57,11 +63,13 @@ template <unsigned int Size> class tile_register_operations {
   shfl_up(T value, unsigned int delta) const;
   template <typename T> ASCIFY_FRONTEND_COMPAT_DEVICE_
   typename std::enable_if<std::is_same<T, int>::value ||
-      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
+      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value ||
+      scalar64_transport_type<T>::value, T>::type
   shfl(T value, int source_rank) const;
   template <typename T> ASCIFY_FRONTEND_COMPAT_DEVICE_
   typename std::enable_if<std::is_same<T, int>::value ||
-      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
+      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value ||
+      scalar64_transport_type<T>::value, T>::type
   shfl_down(T value, unsigned int delta) const;
   template <typename T> ASCIFY_FRONTEND_COMPAT_DEVICE_
   typename std::enable_if<std::is_same<T, int>::value ||
@@ -217,11 +225,11 @@ inline int max(A a, B b) {
 constexpr char kProfileManifest[] =
     "schema=ascify.frontend-compat-profile.v1\n"
     "profile=ascify-admitted-v1\n"
-    "file=cooperative_groups.h;bytes=5325;sha256=1b4482129c22ca214b2a11e7df532a5c29c3bb9b622348ae28391d714c83d301\n"
+    "file=cooperative_groups.h;bytes=5801;sha256=45bcf927b3f5717b20468bc244a84f791a59e3780f1cdd9d7b56df42fd58f1a3\n"
     "file=cooperative_groups/reduce.h;bytes=1612;sha256=bc6f9130deaa55a786df70d127a118ecf57b1014dddbb0700a45ef05f597c928\n"
     "file=host_math.h;bytes=1872;sha256=c73958a48fb55cd8f05a45e9455ce45f8660273863b17c070f5d1081a396106f\n";
 
-static_assert(sizeof(kAdmissionHeader) - 1 == 5325,
+static_assert(sizeof(kAdmissionHeader) - 1 == 5801,
               "admission header identity drifted");
 static_assert(sizeof(kReductionHeader) - 1 == 1612,
               "reduction header identity drifted");
@@ -238,7 +246,7 @@ struct RequiredProfileFile {
 
 constexpr RequiredProfileFile kRequiredProfileFiles[] = {
     {"profile.manifest", 393, kProfileManifest},
-    {"cooperative_groups.h", 5325, kAdmissionHeader},
+    {"cooperative_groups.h", 5801, kAdmissionHeader},
     {"cooperative_groups/reduce.h", 1612, kReductionHeader},
     {"host_math.h", 1872, kHostMathHeader},
 };

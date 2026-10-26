@@ -87,6 +87,8 @@ extern int ascify_test_register_exit_cleanup(void (*callback)());
 #endif
 #endif
 
+#include <ascify/scalar64_compat.hpp>
+
 namespace ascify {
 
 // Internal target for one proven nonvolatile CUDA lane-ID instruction.
@@ -1722,13 +1724,17 @@ __aicore__ ASCIFY_FORCEINLINE uint32_t ballot_sync(uint32_t mask, int predicate)
 template<typename T>
 __aicore__ ASCIFY_FORCEINLINE T shfl_sync(uint32_t mask, T value, int source_lane,
                                           int width = 32) {
-  detail::requireFullWarpMask(mask);
-  detail::requireSupportedWarpWidth(width);
+  if constexpr (detail::scalar64_transport_type<T>::value) {
+    return detail::scalar64_shfl_index(mask, value, source_lane, width);
+  } else {
+    detail::requireFullWarpMask(mask);
+    detail::requireSupportedWarpWidth(width);
 #if defined(ASCIFY_SIMT_HEADER_FAMILY_PUBLIC_85)
-  return AscendC::Simt::WarpShflSync(value, source_lane, width);
+    return AscendC::Simt::WarpShflSync(value, source_lane, width);
 #else
-  return asc_shfl(value, source_lane, width);
+    return asc_shfl(value, source_lane, width);
 #endif
+  }
 }
 
 template<typename T>
@@ -1756,24 +1762,28 @@ __aicore__ ASCIFY_FORCEINLINE T shfl_up_sync(uint32_t mask, T value, unsigned in
 template<typename T>
 __aicore__ ASCIFY_FORCEINLINE T shfl_down_sync(uint32_t mask, T value, unsigned int delta,
                                                int width = 32) {
+  if constexpr (detail::scalar64_transport_type<T>::value) {
+    return detail::scalar64_shfl_down(mask, value, delta, width);
+  } else {
 #if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3)
-  if constexpr (std::is_same<T, int32_t>::value ||
-                std::is_same<T, uint32_t>::value || std::is_same<T, float>::value) {
-    // Keep existing full-mask calls on their original native path. Restricted
-    // partial-mask calls need an already converged cohort; other scalar types
-    // retain the earlier full-mask-only contract and native overload set.
-    if (mask != UINT32_MAX || width == 1) {
-      return detail::converged_shfl_down_sync(mask, value, delta, width);
+    if constexpr (std::is_same<T, int32_t>::value ||
+                  std::is_same<T, uint32_t>::value || std::is_same<T, float>::value) {
+      // Keep existing full-mask calls on their original native path. Restricted
+      // partial-mask calls need an already converged cohort; other scalar types
+      // retain the earlier full-mask-only contract and native overload set.
+      if (mask != UINT32_MAX || width == 1) {
+        return detail::converged_shfl_down_sync(mask, value, delta, width);
+      }
     }
-  }
 #endif
-  detail::requireFullWarpMask(mask);
-  detail::requireSupportedWarpWidth(width);
+    detail::requireFullWarpMask(mask);
+    detail::requireSupportedWarpWidth(width);
 #if defined(ASCIFY_SIMT_HEADER_FAMILY_PUBLIC_85)
-  return AscendC::Simt::WarpShflDownSync(value, delta, width);
+    return AscendC::Simt::WarpShflDownSync(value, delta, width);
 #else
-  return asc_shfl_down(value, delta, width);
+    return asc_shfl_down(value, delta, width);
 #endif
+  }
 }
 
 template<typename T>

@@ -22,6 +22,7 @@
 #include <simt_api/device_warp_functions.h>
 #include <simt_api/cooperative_groups.h>
 #include <ascify/device_contract_reject.hpp>
+#include <ascify/scalar64_compat.hpp>
 
 namespace cooperative_groups {
 
@@ -84,12 +85,22 @@ template <unsigned int Size> class tile_register_operations {
   shfl_up(T value, unsigned int delta) const { return native_.shfl_up(value, delta); }
   template <typename T> __SIMT_DEVICE_FUNCTIONS_DECL__
   typename std::enable_if<std::is_same<T, int>::value ||
-      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
-  shfl(T value, int source_rank) const { return native_.shfl(value, source_rank); }
+      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value ||
+      ::ascify::detail::scalar64_transport_type<T>::value, T>::type
+  shfl(T value, int source_rank) const {
+    if constexpr (::ascify::detail::scalar64_transport_type<T>::value)
+      return ::ascify::detail::scalar64_shfl_index(UINT32_MAX, value, source_rank, 32);
+    else return native_.shfl(value, source_rank);
+  }
   template <typename T> __SIMT_DEVICE_FUNCTIONS_DECL__
   typename std::enable_if<std::is_same<T, int>::value ||
-      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
-  shfl_down(T value, unsigned int delta) const { return native_.shfl_down(value, delta); }
+      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value ||
+      ::ascify::detail::scalar64_transport_type<T>::value, T>::type
+  shfl_down(T value, unsigned int delta) const {
+    if constexpr (::ascify::detail::scalar64_transport_type<T>::value)
+      return ::ascify::detail::scalar64_shfl_down(UINT32_MAX, value, delta, 32);
+    else return native_.shfl_down(value, delta);
+  }
   template <typename T> __SIMT_DEVICE_FUNCTIONS_DECL__
   typename std::enable_if<std::is_same<T, int>::value ||
       std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type

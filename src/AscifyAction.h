@@ -38,6 +38,7 @@ THE SOFTWARE.
 #include "CudaVec3AbiBoundary.h"
 #include "ReplacementsFrontendActionFactory.h"
 #include "Statistics.h"
+#include "Scalar64Lowering.h"
 
 namespace ct = clang::tooling;
 namespace mat = clang::ast_matchers;
@@ -117,6 +118,7 @@ private:
   std::map<std::string, clang::SourceLocation> Ifndefs;
   std::vector<clang::SourceRange> SkippedSourceRanges;
   std::vector<SemanticRewriteRange> SemanticRewriteRanges;
+  ascify::Scalar64Plan scalar64Plan;
   std::vector<SemanticRewriteRange> cudaLaneIdMacroRanges;
   std::set<unsigned> rewrittenCudaLaneIdOffsets;
   std::set<unsigned> rewrittenCudaPackedSadOffsets;
@@ -282,7 +284,7 @@ private:
   void auditActiveAscifyCudaCompatMacrosAtInsertion();
   void observeCudaRuntimeApiMacroUse(const clang::Token &token,
                                     const clang::MacroDefinition &definition);
-  bool auditCudaRuntimeApiSurface();
+  bool auditCudaRuntimeApiSurface(bool includeRecords = true);
   bool auditCudaRuntimeApiRecords(bool textureOnly);
   bool auditCudaProfilerApiSurface();
   bool rewriteUnsupportedCudaSmAttribute(const mat::MatchFinder::MatchResult &Result);

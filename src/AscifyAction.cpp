@@ -70,6 +70,7 @@ THE SOFTWARE.
 #include "CudaVec3AbiBoundary.h"
 #include "CudaTextureBoundary.h"
 #include "BoundedDeviceTemplateInlining.h"
+#include "Scalar64Lowering.h"
 
 using namespace ascify;
 
@@ -767,12 +768,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 75259)
+  if (contents.size() != 75623)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "92ae6d94c684ecf2c853d0d008f5cc4d006cd105aea8ea2584978f2b79707bbb");
+      "911eaf4cd16f6a2ef58d7a9f1fdf7b60c6204e77705f49bad6e61d743294c6ed");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -799,12 +800,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 75259)
+  if (invalidBuffer || contents.size() != 75623)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "92ae6d94c684ecf2c853d0d008f5cc4d006cd105aea8ea2584978f2b79707bbb");
+      "911eaf4cd16f6a2ef58d7a9f1fdf7b60c6204e77705f49bad6e61d743294c6ed");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -8092,6 +8093,7 @@ bool AscifyAction::insertSemanticReplacement(
 }
 std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::CompilerInstance &CI, StringRef) {
   Finder.reset(new mat::MatchFinder);
+  scalar64Plan = {};
   davC310TargetRecipe.reset();
   if (!NoLowerDeviceDoubleParams) {
     Finder->addMatcher(
@@ -8959,7 +8961,7 @@ bool AscifyAction::auditCudaProfilerApiSurface() {
   return true;
 }
 
-bool AscifyAction::auditCudaRuntimeApiSurface() {
+bool AscifyAction::auditCudaRuntimeApiSurface(bool includeRecords) {
   auto &compiler = getCompilerInstance();
   auto &source = compiler.getSourceManager();
   const auto reject = [&](clang::SourceLocation location,
@@ -9251,7 +9253,7 @@ bool AscifyAction::auditCudaRuntimeApiSurface() {
       lexer.LexFromRawLexer(token);
     }
   }
-  return auditCudaRuntimeApiRecords(false);
+  return !includeRecords || auditCudaRuntimeApiRecords(false);
 }
 
 bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
@@ -9350,11 +9352,12 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
                 const std::set<unsigned> &audited,
                 const std::set<unsigned> &native, const std::set<unsigned> &frozenTextureUtilityFiles,
                 const std::set<unsigned> &frozenTextureCgFiles,
-                const std::set<unsigned> &frozenRuntimePatternFiles, bool textureOnly)
+                const std::set<unsigned> &frozenRuntimePatternFiles, bool textureOnly,
+                const ascify::Scalar64Plan& scalar64)
         : context(context), source(source), sdk(sdk), audited(audited), native(native), frozenTextureUtilityFiles(frozenTextureUtilityFiles),
           frozenTextureCgFiles(frozenTextureCgFiles),
           frozenRuntimePatternFiles(frozenRuntimePatternFiles),
-          textureOnly(textureOnly) {}
+          textureOnly(textureOnly), scalar64(scalar64) {}
     bool shouldVisitTemplateInstantiations() const { return true; }
     bool shouldVisitImplicitCode() const { return true; }
     bool TraverseDecl(clang::Decl *declaration) {
@@ -9501,6 +9504,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       return clang::RecursiveASTVisitor<RecordAudit>::TraverseInitListExpr(expression);
     }
     bool VisitTypeLoc(clang::TypeLoc type) {
+      if (scalar64.scalarSignatureTypeLocs.count(type.getOpaqueData())) return true;
       return inspect(type.getType(), type.getBeginLoc());
     }
     bool VisitArrayTypeLoc(clang::ArrayTypeLoc type) {
@@ -9520,6 +9524,9 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       // reflection operands remain audited.
       if (llvm::isa<clang::ImplicitValueInitExpr>(expression))
         return true;
+      // Exact expression/type facts from the guarded builtin scalar family,
+      // never a void-NTTP, class, inquiry or whole-body exemption.
+      if (scalar64.scalarExpressions.count(expression)) return true;
       // A fixed scalar NTTP call can retain a dependent Expr type until
       // overload resolution, even though no SDK record can enter its type.
       // Prove only this expression; normal traversal still visits its body,
@@ -10153,6 +10160,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       // native implementation templates remain independently audited.
       if (type->isDependentType() &&
           !native.count(source.getFileID(location).getHashValue())) {
+        if (ascify::ProvesScalar64Type(scalar64, type)) return true;
         // Exact parsed bytes identify the reviewed Sample/profile utilities.
         // Their uninstantiated generic utilities do not establish a texture
         // layout; concrete instantiations still traverse the ordinary checks.
@@ -10276,6 +10284,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     const std::set<unsigned> &frozenTextureCgFiles;
     const std::set<unsigned> &frozenRuntimePatternFiles;
     const bool textureOnly;
+    const ascify::Scalar64Plan& scalar64;
     unsigned runtimePatternDepth = 0;
     unsigned runtimeInstanceDepth = 0;
     std::vector<const clang::TemplateTypeParmDecl *> runtimePatternParameters;
@@ -10283,7 +10292,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     std::vector<std::pair<unsigned, const clang::TagDecl *>> runtimeIdentityArguments;
     std::set<const clang::RecordDecl *> reflectedRecords;
     std::set<const clang::VarDecl *> inquiryVariables;
-  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, frozenTextureCgFiles, frozenRuntimePatternFiles, textureOnly);
+  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, frozenTextureCgFiles, frozenRuntimePatternFiles, textureOnly, scalar64Plan);
   if (!records.TraverseDecl(compiler.getASTContext().getTranslationUnitDecl()))
     {
       const auto diagnostic = compiler.getDiagnostics().getCustomDiagID(
@@ -12394,13 +12403,128 @@ void AscifyAction::ExecuteAction() {
   // Reset the contextual token watcher above before any diagnostic early exit.
   if (getCompilerInstance().getDiagnostics().hasErrorOccurred())
     return;
-  if (cudaRuntimeApiHeaderAdmitted && !auditCudaRuntimeApiSurface()) {
+  // Complete physical/macro SDK admission before scalar64's callee proof.
+  // Record/type admission follows its expression-specific closed-domain proof.
+  if (cudaRuntimeApiHeaderAdmitted && !auditCudaRuntimeApiSurface(false)) {
+    cudaRuntimeApiBoundaryFailed = true;
+    return;
+  }
+  std::map<unsigned, bool> scalar64SdkFiles;
+  const auto scalar64Sdk = [&](clang::SourceLocation location) {
+    location = SM.getSpellingLoc(location);
+    if (location.isInvalid()) return false;
+    const auto file = SM.getFileID(location);
+    const auto found = scalar64SdkFiles.find(file.getHashValue());
+    if (found != scalar64SdkFiles.end()) return found->second;
+    const bool proven = cudaRuntimeApiSdkFileIds.count(file.getHashValue()) ||
+        isOwnedCudaCompilerInput(file, getCompilerInstance()) ||
+        (verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
+         !macroAlteredFrontendCgFileIds.count(file.getHashValue()) &&
+         verifiedFrontendCgFile(file, getCompilerInstance(), frontendCompatibility));
+    scalar64SdkFiles[file.getHashValue()] = proven;
+    return proven;
+  };
+  const auto scalar64Shuffle = [&](const clang::FunctionDecl* function) {
+    if (!function || !function->getIdentifier() || !function->hasAttr<clang::CUDADeviceAttr>() ||
+        !scalar64Sdk(function->getLocation())) return false;
+    const auto name = function->getName();
+    auto& context = getCompilerInstance().getASTContext();
+    if (name == "__shfl_sync" || name == "__shfl_down_sync") {
+      if (function->getQualifiedNameAsString() != name || function->getNumParams() != 4)
+        return false;
+      return context.hasSameUnqualifiedType(function->getParamDecl(0)->getType(), context.UnsignedIntTy) &&
+          context.hasSameUnqualifiedType(function->getParamDecl(1)->getType(), function->getReturnType()) &&
+          context.hasSameUnqualifiedType(function->getParamDecl(2)->getType(),
+              name == "__shfl_sync" ? context.IntTy : context.UnsignedIntTy) &&
+          context.hasSameUnqualifiedType(function->getParamDecl(3)->getType(), context.IntTy);
+    }
+    const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(function);
+    if (!method || (name != "shfl" && name != "shfl_down") || function->getNumParams() != 2)
+      return false;
+    const auto* parent = llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(method->getParent());
+    if (!parent || parent->getSpecializedTemplate()->getQualifiedNameAsString() !=
+            "cooperative_groups::ascify_detail::tile_register_operations" ||
+        parent->getTemplateArgs().size() != 1 ||
+        parent->getTemplateArgs()[0].getKind() != clang::TemplateArgument::Integral ||
+        parent->getTemplateArgs()[0].getAsIntegral() != 32) return false;
+    const auto file = SM.getFileID(SM.getSpellingLoc(function->getLocation()));
+    return verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
+        !macroAlteredFrontendCgFileIds.count(file.getHashValue()) &&
+        verifiedFrontendCgFile(file, getCompilerInstance(), frontendCompatibility) &&
+        context.hasSameUnqualifiedType(function->getParamDecl(0)->getType(), function->getReturnType()) &&
+        context.hasSameUnqualifiedType(function->getParamDecl(1)->getType(),
+            name == "shfl" ? context.IntTy : context.UnsignedIntTy);
+  };
+  std::string scalar64Error;
+  clang::SourceLocation scalar64ErrorLocation;
+  if (!ascify::ProveScalar64Lowering(getCompilerInstance().getASTContext(),
+          [&](clang::SourceLocation location) { return ownedPreservedMaxLocation(location); },
+          scalar64Sdk, scalar64Shuffle,
+          [&](llvm::StringRef name, clang::SourceLocation location) {
+            return !PP.getMacroDefinitionAtLoc(PP.getIdentifierInfo(name), location);
+          }, !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks,
+          scalar64Plan, scalar64ErrorLocation, scalar64Error)) {
+    const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error, "scalar64 boundary: %0");
+    getCompilerInstance().getDiagnostics().Report(scalar64ErrorLocation, diagnostic) << scalar64Error;
+    cudaRuntimeApiBoundaryFailed = true;
+    return;
+  }
+  if (scalar64Plan.used() && (cudaAttributeControlModified ||
+      deviceTemplateAttributeMacroConflict || frontendCgControlModified)) {
+    const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error, "scalar64 boundary: device/profile control provenance was modified");
+    getCompilerInstance().getDiagnostics().Report(diagnostic);
+    cudaRuntimeApiBoundaryFailed = true;
+    return;
+  }
+  if (cudaRuntimeApiHeaderAdmitted && !auditCudaRuntimeApiRecords(false)) {
     cudaRuntimeApiBoundaryFailed = true;
     return;
   }
   if (cudaProfilerApiHeaderAdmitted && !auditCudaProfilerApiSurface()) {
     cudaRuntimeApiBoundaryFailed = true;
     return;
+  }
+  if (scalar64Plan.used()) {
+    ct::Replacements staged(*replacements);
+    std::map<unsigned, ascify::Scalar64Edit> insertions;
+    std::vector<ascify::Scalar64Edit> edits;
+    for (const auto& edit : scalar64Plan.edits) {
+      if (!edit.location.isFileID() || !SM.isWrittenInMainFile(edit.location)) {
+        scalar64Error = "scalar64 edit has no literal main-file owner"; break;
+      }
+      const unsigned offset = SM.getFileOffset(edit.location);
+      for (const auto& range : SemanticRewriteRanges)
+        if (range.file == SM.getMainFileID() && range.beginOffset <= offset &&
+            offset < range.endOffset) scalar64Error = "scalar64 edit overlaps another semantic transaction";
+      if (!scalar64Error.empty()) break;
+      if (edit.length == 0) {
+        auto insertion = insertions.find(offset);
+        if (insertion == insertions.end()) insertions.emplace(offset, edit);
+        else insertion->second.text += edit.text;
+      } else edits.push_back(edit);
+    }
+    for (const auto& insertion : insertions) edits.push_back(insertion.second);
+    for (const auto& edit : edits)
+      if (!llcompat::insertReplacement(staged, ct::Replacement(SM, edit.location, edit.length, edit.text), &scalar64Error)) break;
+    if (!scalar64Error.empty()) {
+      const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error, "scalar64 boundary: %0");
+      getCompilerInstance().getDiagnostics().Report(diagnostic) << scalar64Error;
+      cudaRuntimeApiBoundaryFailed = true;
+      return;
+    }
+    *replacements = std::move(staged);
+    for (const auto& edit : edits) if (edit.length)
+      SemanticRewriteRanges.push_back({SM.getMainFileID(), SM.getFileOffset(edit.location),
+          SM.getFileOffset(edit.location) + edit.length});
+    needsCudaCompatHeader = true;
+    auditActiveAscifyCudaCompatMacrosAtInsertion();
+    llvm::errs() << "Ascify scalar64 v1: additions=" << scalar64Plan.additions
+                 << ", assignments=" << scalar64Plan.assignments
+                 << ", transports=" << scalar64Plan.transports
+                 << ", closed_template_guards=" << scalar64Plan.guards << "\n";
   }
   std::string vec3AbiError;
   clang::SourceLocation vec3AbiLocation;

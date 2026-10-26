@@ -24,6 +24,12 @@ ASCIFY_FRONTEND_COMPAT_DEVICE_ inline void sync(const thread_block& group) {
 
 template <unsigned int Size, typename ParentT = void> class thread_block_tile;
 namespace ascify_detail {
+// Value domain only; no class/enum obtains this capability from sizeof alone.
+template<class T> struct scalar64_transport_type : std::integral_constant<bool,
+    (std::is_same<T, long>::value || std::is_same<T, unsigned long>::value ||
+     std::is_same<T, long long>::value ||
+     std::is_same<T, unsigned long long>::value ||
+     std::is_same<T, double>::value) && sizeof(T) == 8> {};
 // Full-warp register collectives and synchronization with runtime participation checks.
 template <unsigned int Size> class tile_register_operations {
   static_assert(Size == 32, "Ascify admits only full-warp tile size 32; multi-warp subgroup synchronization is not implemented");
@@ -39,11 +45,13 @@ template <unsigned int Size> class tile_register_operations {
   shfl_up(T value, unsigned int delta) const;
   template <typename T> ASCIFY_FRONTEND_COMPAT_DEVICE_
   typename std::enable_if<std::is_same<T, int>::value ||
-      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
+      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value ||
+      scalar64_transport_type<T>::value, T>::type
   shfl(T value, int source_rank) const;
   template <typename T> ASCIFY_FRONTEND_COMPAT_DEVICE_
   typename std::enable_if<std::is_same<T, int>::value ||
-      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value, T>::type
+      std::is_same<T, unsigned int>::value || std::is_same<T, float>::value ||
+      scalar64_transport_type<T>::value, T>::type
   shfl_down(T value, unsigned int delta) const;
   template <typename T> ASCIFY_FRONTEND_COMPAT_DEVICE_
   typename std::enable_if<std::is_same<T, int>::value ||

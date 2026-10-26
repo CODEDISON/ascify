@@ -68,6 +68,19 @@ These files are licensed under the Apache License, Version 2.0. A copy of the
 license is provided in this repository's `LICENSE` file. The original OneFlow
 copyright and Apache-2.0 license headers are retained in each fixture.
 
+## Berkeley SoftFloat binary64 addition
+
+`include/ascify/binary64_rne_v1.hpp` is a C++ adaptation of the binary64
+addition closure from [Berkeley SoftFloat Release 3e](https://github.com/ucb-bar/berkeley-softfloat-3)
+at commit `497c81c1f5016dc6ef5b3219ece2f3c261d4d8f1`. Its sources are
+`f64_add.c`, `s_addMagsF64.c`, `s_subMagsF64.c`, `s_roundPackToF64.c`,
+`s_normRoundPackToF64.c`, `s_shiftRightJam64.c`, `s_countLeadingZeros64.c`,
+and the `8086-SSE` NaN specialization. The port fixes rounding to nearest,
+ties to even, retains that specialization's NaN payload policy, replaces the
+normalization lookup table with fixed integer tests, and omits exception flags
+and mutable global rounding state. The preserved BSD notice is in the source
+header and [LICENSES/SoftFloat-3e.txt](LICENSES/SoftFloat-3e.txt).
+
 `rms_norm.cuh` contains the local `rows_per_access` tail-handling patch
 documented in `tests/fixtures/oneflow/README.md`.
 

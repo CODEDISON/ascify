@@ -209,6 +209,15 @@ run_check "single-return host status and UInt32 device-counter boundaries" \
     --clang "${CLANG:-clang++}" \
     --evidence-dir "$work_dir/thread_fence_boundaries"
 
+run_check "closed scalar64 transport and binary64 add AST/CPU contracts" \
+  "$python" -B "$rewrite_dir/check_scalar64_lowering.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang++}" \
+    --cxx "${CXX:-c++}" \
+    --evidence-dir "$work_dir/scalar64_lowering"
+
 run_check "CUDA ffs argument conversion and overload boundaries" \
   "$python" -B "$rewrite_dir/check_ffs_conversion.py" \
     --binary "$ASCIFY_BINARY" \
