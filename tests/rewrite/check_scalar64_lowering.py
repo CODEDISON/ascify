@@ -244,6 +244,18 @@ def main():
     context = tempfile.TemporaryDirectory(prefix='ascify-scalar64-') if not args.evidence_dir else None
     work = Path(args.evidence_dir if args.evidence_dir else context.name).resolve()
     work.mkdir(parents=True, exist_ok=True)
+    # CUDA13 keeps libcu++ under the selected SDK's include/cccl directory.
+    # Match its ordinary SDK search root on BOTH source-validity and converter
+    # invocations; do not change CUDA headers or disable their dependencies.
+    cccl = Path(args.cuda_path).resolve() / 'include/cccl'
+    cccl_header = cccl / 'cuda/std/type_traits'
+    sdk_flags = []
+    summary['external_sdk_includes'] = []
+    if cccl_header.is_file():
+        sdk_flags = ['-I' + str(cccl.resolve())]
+        summary['external_sdk_includes'].append(dict(
+            include_dir=str(cccl.resolve()), key_header=str(cccl_header.resolve()),
+            key_header_sha256=hashlib.sha256(cccl_header.read_bytes()).hexdigest()))
     try:
         def command(argv, name, expect=0):
             result = subprocess.run(argv, text=True, capture_output=True, timeout=90)
@@ -267,13 +279,13 @@ def main():
             digest = hashlib.sha256(source.read_bytes()).hexdigest()
             syntax = [args.clang, '-x', 'cuda', '--cuda-host-only', '-nocudalib',
                       '--cuda-path=' + args.cuda_path, '-Wno-unknown-cuda-version',
-                      '-std=' + case['standard'], '-fsyntax-only', '-fgpu-rdc', str(source)]
+                      '-std=' + case['standard'], '-fsyntax-only', '-fgpu-rdc', *sdk_flags, str(source)]
             command(syntax, label + '.original')
             convert = [args.binary, str(source), '--target-policy=dav-c310-vec',
                        '--simt-math=precise', '--default-preprocessor',
                        '--frontend-compat=ascify-admitted-v1', '--cuda-path=' + args.cuda_path,
                        '--clang-resource-directory=' + args.resource_dir, *case['flags'],
-                       '-o', str(output), '--', '-x', 'cuda', '-std=' + case['standard'], '-fgpu-rdc']
+                       '-o', str(output), '--', '-x', 'cuda', '-std=' + case['standard'], '-fgpu-rdc', *sdk_flags]
             result = subprocess.run(convert, text=True, capture_output=True, timeout=90)
             (work / (label + '.convert.stdout')).write_text(result.stdout)
             (work / (label + '.convert.stderr')).write_text(result.stderr)
@@ -325,11 +337,13 @@ scalar64_expect(scalar64_raw(host_pair(scalar64_from_raw<double>(t.left),scalar6
             ('up', 'void f(){auto t=ascify_cg::tiled_partition<32>(ascify_cg::this_thread_block());(void)t.shfl_up(1.0,1);}'),
             ('xor', 'void f(){auto t=ascify_cg::tiled_partition<32>(ascify_cg::this_thread_block());(void)t.shfl_xor(1.0,1);}'),
             ('unverified_target', 'void f(){(void)ascify::detail::scalar_add_rne<double>(1.0,1.0);}'),
+            ('unverified_raw_down', 'void f(){(void)ascify::shfl_down_sync(~0U,1.0,1,32);}'),
+            ('unverified_raw_index', 'void f(){(void)ascify::shfl_sync(~0U,1.0,1,32);}'),
         ]:
             source = work / ('reject_' + label + '.cpp')
             source.write_text('#include <ascify/ascify_cuda_compat.hpp>\n'
                               '#include <ascify/cooperative_groups_compat.hpp>\n' + body + '\n')
-            flags = [flag for flag in host_flags if label != 'unverified_target' or flag != '-D__NPU_ARCH__=3510']
+            flags = [flag for flag in host_flags if not label.startswith('unverified_') or flag != '-D__NPU_ARCH__=3510']
             result = subprocess.run(flags + ['-fsyntax-only', str(source)], text=True,
                                     capture_output=True, timeout=60)
             (work / (label + '.target-refusal.stderr')).write_text(result.stderr)
@@ -337,14 +351,21 @@ scalar64_expect(scalar64_raw(host_pair(scalar64_from_raw<double>(t.left),scalar6
         summary['passed'] = True
         summary['accepted'] = sum(c['accepted'] for c in summary['cases'])
         summary['refused'] = len(summary['cases']) - summary['accepted']
-        summary['target_compile_refusals'] = 5
+        summary['target_compile_refusals'] = 7
         summary['host_collective_refusals'] = 5
         print('scalar64: ' + str(summary['accepted']) + ' admitted/retained, ' +
               str(summary['refused']) + ' source-valid refusals; host checks only')
     finally:
+        summary['external_sdk_inputs_unchanged'] = all(
+            Path(item['key_header']).is_file() and
+            hashlib.sha256(Path(item['key_header']).read_bytes()).hexdigest() == item['key_header_sha256']
+            for item in summary['external_sdk_includes'])
+        if not summary['external_sdk_inputs_unchanged']:
+            summary['passed'] = False
         (work / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
         if context:
             context.cleanup()
+        assert summary['external_sdk_inputs_unchanged'], 'Selected SDK CCCL input changed during regression'
 
 
 if __name__ == '__main__':

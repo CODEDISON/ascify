@@ -1724,7 +1724,11 @@ __aicore__ ASCIFY_FORCEINLINE uint32_t ballot_sync(uint32_t mask, int predicate)
 template<typename T>
 __aicore__ ASCIFY_FORCEINLINE T shfl_sync(uint32_t mask, T value, int source_lane,
                                           int width = 32) {
+#if defined(ASCIFY_SCALAR64_VERIFIED_TARGET)
   if constexpr (detail::scalar64_transport_type<T>::value) {
+#else
+  if constexpr (std::is_same<T, double>::value) {
+#endif
     return detail::scalar64_shfl_index(mask, value, source_lane, width);
   } else {
     detail::requireFullWarpMask(mask);
@@ -1762,7 +1766,11 @@ __aicore__ ASCIFY_FORCEINLINE T shfl_up_sync(uint32_t mask, T value, unsigned in
 template<typename T>
 __aicore__ ASCIFY_FORCEINLINE T shfl_down_sync(uint32_t mask, T value, unsigned int delta,
                                                int width = 32) {
+#if defined(ASCIFY_SCALAR64_VERIFIED_TARGET)
   if constexpr (detail::scalar64_transport_type<T>::value) {
+#else
+  if constexpr (std::is_same<T, double>::value) {
+#endif
     return detail::scalar64_shfl_down(mask, value, delta, width);
   } else {
 #if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3)

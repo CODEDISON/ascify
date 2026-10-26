@@ -1,8 +1,11 @@
 # Restricted scalar64 conversion
 
 This route targets Ascend950DT (`__NPU_ARCH__ == 3510`) with the verified CANN
-9.1 legacy SIMT headers and `__builtin_bit_cast`. Target compilation rejects
-other providers. It requires `--default-preprocessor`; existing SDK/provider,
+9.1 legacy SIMT headers and `__builtin_bit_cast`. New binary64 arithmetic and
+explicit scalar64 helpers reject unverified targets. Raw wrappers retain the
+pre-existing native integer64 paths of other providers; double always enters
+the restricted helper and cannot fall through to a native float overload.
+It requires `--default-preprocessor`; existing SDK/provider,
 macro, physical-source and transactional-publication checks still apply.
 
 | Operation | Admitted domain | Contract |
@@ -56,8 +59,12 @@ reduction<double> or complete CUDA Samples support.
    Its 16 admitted/retained cases execute the generated C++ against host SDK
    doubles, compare raw bits with literal independent expectations, and check
    float/int order and shuffle call counts. Forty-one source-valid refusals plus
-   five target compilation and five host collective refusal cases cover the
+   seven target compilation and five host collective refusal cases cover the
    boundary. No host-model result establishes NPU correctness.
+   Where present, the selected SDK's `include/cccl` directory is supplied to
+   both original CUDA syntax and conversion, with its type_traits header hash
+   recorded and checked unchanged. SDK source and syntax requirements remain
+   intact.
 3. Compile actual generated payloads with CANN9.1 CCEC. In particular prove the
    typed GM/shared-reference `+=` ABI and inspect the object/assembly: binary64
    addition must use the integer backend, and shuffle must transport uint64.
