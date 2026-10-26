@@ -23,11 +23,41 @@ callback registered after successful Start performs best-effort cleanup before
 runtime teardown; applications must explicitly Stop to observe flush errors.
 
 The profiler header projection accepts the verified physical CUDA header as a
-direct unconditional literal include. Conditional includes, header-guard
-observations, retained header inquiries, token pastes and macro-stack pragmas
-are refused. In particular, a retained `__has_include(cuda_profiler_api.h)` must
-not silently disable the target profiling region. The v13.3 original matrixMul
-uses an unconditional include; the v13.4 conditional form is not admitted yet.
+direct unconditional literal include. On the LLVM23 frontend it additionally
+admits one proved positive main-file availability block: a direct literal
+`#if __has_include(<cuda_profiler_api.h>)`, optionally preceded by the exact
+`defined(__has_include) &&` test, followed by the direct include, optionally one
+fresh caller flag defined to literal `1`, and the matching `#endif`. The block
+must be top-level, without an else, nested condition, extra include or code.
+The actual lookup entry, active physical SDK read, builtin history and complete
+source ranges must agree. The flag retains its source name and definition;
+subsequent uses are limited to direct `ifdef`/`ifndef` or `if defined` controls.
+
+For an explicit Host C++ original root, the frontend's own unmodified main-file
+mapping may carry a dedicated witness for the canonical path, physical UID/size,
+original bytes and SHA256. These identities are rechecked around mapping, at
+the condition, at proof sealing and before publishing the rewritten buffer.
+Only the root may use this witness; selected headers, contextual/joint inputs,
+caller remaps, VFS overlays, PCH and modules do not acquire it. SDK lookup,
+entry and content checks retain their physical identity requirements.
+The witness is optional for ordinary Host C++ reads: failed capture keeps the
+original read path and leaves the conditional-profiler exception unavailable.
+
+That proved query becomes `__has_include(<acl/acl_prof.h>)`, with an explicit
+compile-time error alternative if the target header is absent. A transactional
+`#line` restores the valid original next-line position after the block; caller
+line directives/markers and explicit position-macro observations remain outside
+this admission. Header-guard reflection, other retained header inquiries, token
+pastes, macro-stack controls, shadow headers and unproved source contexts are
+still refused. No fake header or capability macro is introduced, and the source
+profiling region must not silently disappear when CCEC does not search CUDA.
+
+A successful source-conversion receipt may include `cuda_profiler_availability`
+with rule `positive-physical-sdk-probe-v1`, source/SDK/range evidence and
+`backend_status: unverified`. This is not a backend or runtime success claim.
+Complete build acceptance must also prove the actual CCEC-selected canonical
+CANN profiler-header dependencies and the real `msprofiler` provider, with
+unchanged input identities. See the [frontend boundary checks](../tests/rewrite/check_conditional_profiler.py).
 
 The three-argument typed and `void**` `cudaMallocHost` overloads support zero
 flags through real `aclrtMallocHost`. Nonzero Portable/Mapped/WriteCombined

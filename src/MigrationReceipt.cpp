@@ -125,10 +125,10 @@ std::string MigrationReceipt::toJson() const {
       [](const MigrationReceiptInput &lhs, const MigrationReceiptInput &rhs) {
         return std::tie(lhs.input, lhs.resolvedInput, lhs.output, lhs.status,
                         lhs.stage, lhs.diagnosticSummary, lhs.boundedDeviceTemplateDefinitions,
-                        lhs.cudaVec3LayoutEvidence) <
+                        lhs.cudaVec3LayoutEvidence, lhs.cudaProfilerAvailabilityEvidence) <
                std::tie(rhs.input, rhs.resolvedInput, rhs.output, rhs.status,
                         rhs.stage, rhs.diagnosticSummary, rhs.boundedDeviceTemplateDefinitions,
-                        rhs.cudaVec3LayoutEvidence);
+                        rhs.cudaVec3LayoutEvidence, rhs.cudaProfilerAvailabilityEvidence);
       });
 
   std::ostringstream out;
@@ -185,6 +185,17 @@ std::string MigrationReceipt::toJson() const {
       writeJsonString(out, input.cudaVec3LayoutEvidence[item]);
     }
     out << "]}";
+    if (!input.cudaProfilerAvailabilityEvidence.empty()) {
+      out << ",\n      \"cuda_profiler_availability\": {\"rule\": "
+             "\"positive-physical-sdk-probe-v1\", \"backend_status\": "
+             "\"unverified\", \"target_header\": \"acl/acl_prof.h\", \"evidence\": [";
+      for (std::size_t item = 0;
+           item < input.cudaProfilerAvailabilityEvidence.size(); ++item) {
+        if (item != 0) out << ',';
+        writeJsonString(out, input.cudaProfilerAvailabilityEvidence[item]);
+      }
+      out << "]}";
+    }
     out << "\n    }";
     if (index + 1 != sortedInputs.size())
       out << ',';

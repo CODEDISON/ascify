@@ -58,6 +58,7 @@ struct MigrationReceiptInput {
   std::string diagnosticSummary;
   unsigned boundedDeviceTemplateDefinitions = 0;
   std::vector<std::string> cudaVec3LayoutEvidence = {};
+  std::vector<std::string> cudaProfilerAvailabilityEvidence = {};
 };
 
 class MigrationReceipt {

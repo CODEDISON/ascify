@@ -62,6 +62,7 @@ THE SOFTWARE.
 #include "LLVMCompat.h"
 #include "ArgParse.h"
 #include "LocalHeader.h"
+#include "HostCxxRootInput.h"
 #include "ImplicitCudaHeaders.h"
 #include "CUDA2DPP.h"
 #include "StringUtils.h"
@@ -4787,6 +4788,19 @@ void AscifyAction::FileChanged(
     else
       cudaRuntimeApiSdkIdentityFailure = spelling;
   }
+  for (auto &candidate : profilerAvailabilityCandidates) {
+    if (candidate.includeObserved && include.isFileID() &&
+        parentFile == candidate.file &&
+        candidate.lookupEntry != nullptr && sdkEntry != nullptr &&
+        candidate.lookupEntry->getUniqueID() == sdkEntry->getUniqueID() &&
+        isPhysicalCudaProfilerHeader(sourceManager.getFilename(spelling), sdkEntry) &&
+        cudaRuntimeApiSdkFileIds.count(file.getHashValue())) {
+      const auto parentBytes = sourceManager.getBufferData(parentFile);
+      if (physicalLineBegin(parentBytes, sourceManager.getFileOffset(include)) ==
+          physicalLineBegin(parentBytes, candidate.includeBegin))
+        candidate.sdkEntered = true;
+    }
+  }
   const unsigned frozenRole =
       frozenNvidiaSampleHelperFileRole(sourceManager, spelling);
   const bool parentInsideRemovedHelper =
@@ -4850,6 +4864,458 @@ void AscifyAction::FileChanged(
   if (wasTrusted ||
       initiallyTrustedSystemFileIdentities.count(identity) != 0)
     trustedSystemFileIds.insert(file.getHashValue());
+}
+
+namespace {
+struct ProfilerPhysicalToken {
+  std::string text;
+  unsigned begin = 0;
+  unsigned end = 0;
+  bool identifier = false;
+};
+
+// Read actual physical tokens, including inactive source. Never reconstruct a
+// directive by joining macro expansions or by trusting its evaluated value.
+static bool profilerPhysicalTokens(clang::CompilerInstance &compiler,
+                                  clang::FileID file, unsigned begin,
+                                  unsigned end,
+                                  std::vector<ProfilerPhysicalToken> &tokens,
+                                  bool rejectLineSplices = true) {
+  auto &source = compiler.getSourceManager();
+  bool invalid = false;
+  const auto bytes = source.getBufferData(file, &invalid);
+  if (invalid || begin > end || end > bytes.size() ||
+      (rejectLineSplices && (bytes.slice(begin, end).contains('\\') ||
+                            bytes.slice(begin, end).contains("??")))) return false;
+  clang::Lexer lexer(source.getLocForStartOfFile(file), compiler.getLangOpts(),
+                     bytes.data(), bytes.data(), bytes.data() + bytes.size());
+  clang::Token token;
+  while (true) {
+    lexer.LexFromRawLexer(token);
+    if (token.is(clang::tok::eof)) break;
+    const unsigned offset = source.getFileOffset(token.getLocation());
+    if (offset >= end) break;
+    if (offset < begin || token.is(clang::tok::comment)) continue;
+    const auto after = clang::Lexer::getLocForEndOfToken(
+        token.getLocation(), 0, source, compiler.getLangOpts());
+    if (after.isInvalid() || source.getFileOffset(after) > end) return false;
+    tokens.push_back({clang::Lexer::getSpelling(token, source,
+                                              compiler.getLangOpts()),
+                      offset, source.getFileOffset(after), token.isAnyIdentifier()});
+  }
+  return true;
+}
+
+static unsigned profilerPhysicalLineEnd(llvm::StringRef bytes, unsigned begin) {
+  const auto end = bytes.find_first_of("\r\n", begin);
+  return end == llvm::StringRef::npos ? bytes.size() : end;
+}
+
+static unsigned profilerNextPhysicalLine(llvm::StringRef bytes, unsigned end) {
+  if (end < bytes.size() && bytes[end] == '\r') ++end;
+  if (end < bytes.size() && bytes[end] == '\n') ++end;
+  return end;
+}
+
+static bool profilerLiteralOperand(
+    llvm::StringRef bytes, const std::vector<ProfilerPhysicalToken> &tokens,
+    size_t &cursor, unsigned &begin, unsigned &end) {
+  static constexpr llvm::StringLiteral literal("<cuda_profiler_api.h>");
+  if (cursor >= tokens.size()) return false;
+  begin = tokens[cursor].begin;
+  end = begin + literal.size();
+  if (bytes.substr(begin, literal.size()) != literal) return false;
+  while (cursor < tokens.size() && tokens[cursor].begin < end) {
+    if (tokens[cursor].end > end) return false;
+    ++cursor;
+  }
+  return cursor != 0 && tokens[cursor - 1].end == end;
+}
+} // namespace
+
+bool AscifyAction::isPhysicalCudaProfilerHeader(
+    llvm::StringRef path, const clang::FileEntry *entry) {
+#if LLVM_VERSION_MAJOR >= 13
+  if (CudaPath.empty() || path.empty()) return false;
+  auto &source = getCompilerInstance().getSourceManager();
+  llvm::SmallString<256> expected(CudaPath.getValue()), physicalExpected,
+      physicalActual;
+  llvm::sys::path::append(expected, "include", "cuda_profiler_api.h");
+  const auto buffer = llvm::MemoryBuffer::getFile(path);
+  if (!buffer || (*buffer)->getBufferSize() != 4566 ||
+      !sha256Equals((*buffer)->getBuffer(),
+          "bb8e03c217df1309ccfe3249c4fac1bcd577bdcff5c65944217548195204118e") ||
+      llvm::sys::fs::real_path(expected, physicalExpected) ||
+      llvm::sys::fs::real_path(path, physicalActual) ||
+      physicalExpected != physicalActual) return false;
+  if (entry != nullptr) {
+    llvm::sys::fs::UniqueID identity;
+    if (source.isFileOverridden(entry) || entry->getSize() != 4566 ||
+        llvm::sys::fs::getUniqueID(path, identity) ||
+        identity != entry->getUniqueID()) return false;
+  }
+  return true;
+#else
+  return false;
+#endif
+}
+
+void AscifyAction::HasInclude(
+    clang::SourceLocation location, llvm::StringRef filename, bool angled,
+    const clang::FileEntry *entry, llvm::StringRef resolvedPath) {
+  if (filename != "cuda_profiler_api.h") return;
+  auto &source = getCompilerInstance().getSourceManager();
+  if (!source.isWrittenInMainFile(source.getExpansionLoc(location))) return;
+  const bool physical = location.isFileID() && angled && entry != nullptr &&
+      isPhysicalCudaProfilerHeader(resolvedPath, entry);
+  profilerHasIncludeObservations.push_back(
+      {location, resolvedPath.str(), entry, physical});
+}
+
+bool AscifyAction::isWitnessedProfilerHostRoot(clang::FileID file) {
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  const auto &pp = compiler.getPreprocessorOpts();
+  const auto &lang = compiler.getLangOpts();
+  if (hostRootInput == nullptr || lang.CUDA || file.isInvalid() ||
+      file != source.getMainFileID() || lang.Modules || lang.CPlusPlusModules ||
+      !compiler.getHeaderSearchOpts().VFSOverlayFiles.empty() ||
+      !pp.RemappedFiles.empty() || !pp.RemappedFileBuffers.empty() ||
+      !pp.ImplicitPCHInclude.empty() || !pp.PCHThroughHeader.empty() ||
+      pp.PrecompiledPreambleBytes.first != 0 || pp.PrecompiledPreambleBytes.second ||
+      !compiler.getFrontendOpts().ModuleFiles.empty() ||
+      compiler.getASTContext().getExternalSource() != nullptr)
+    return false;
+  if (localHeaderContext != nullptr &&
+      (localHeaderContext->depth != 0 || localHeaderContext->virtualInput != nullptr ||
+       localHeaderContext->plan == nullptr ||
+       localHeaderContext->sourcePath != localHeaderContext->plan->rootSourcePath() ||
+       localHeaderContext->sourcePath != hostRootInput->path()))
+    return false;
+  const auto *entry = source.getFileEntryForID(file);
+  const auto origin = source.getLocForStartOfFile(file);
+#if LLVM_VERSION_MAJOR >= 15
+  const auto entryRef = source.getFileEntryRefForID(file);
+  if (!entryRef || &entryRef->getFileEntry() != entry ||
+      entryRef->getName() != hostRootInput->path()) return false;
+#else
+  if (entry == nullptr || entry->getName() != hostRootInput->path()) return false;
+#endif
+  bool invalid = false;
+  const auto bytes = source.getBufferData(file, &invalid);
+  // The VFS main entry was created by main.cpp, so its UID need not equal the
+  // real file's UID. Bind that entry's name/size and exact parsed bytes to our
+  // explicit witness; the witness still rechecks the physical UID and SHA.
+  return entry != nullptr && !source.isFileOverridden(entry) && !invalid &&
+      hostRootInput->matchesParsed(source.getFilename(origin), bytes,
+                                   entry->getSize());
+}
+
+void AscifyAction::If(clang::SourceLocation location,
+                     clang::SourceRange condition,
+                     clang::PPCallbacks::ConditionValueKind value) {
+  const unsigned entryDepth = preprocessorConditionalDepth;
+  ConditionalDirectiveEntered();
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  if (!location.isFileID() || !source.isWrittenInMainFile(location)) return;
+  const auto file = source.getFileID(location);
+  bool invalid = false;
+  const auto bytes = source.getBufferData(file, &invalid);
+  if (invalid) return;
+  const unsigned begin = physicalLineBegin(bytes, source.getFileOffset(location));
+  const unsigned end = profilerPhysicalLineEnd(bytes, begin);
+  const auto line = bytes.slice(begin, end);
+  if (!line.contains("cuda_profiler_api.h") ||
+      !line.contains("__has_include")) return;
+  std::vector<ProfilerPhysicalToken> tokens;
+  if (!profilerPhysicalTokens(compiler, file, begin, end, tokens, false)) {
+    profilerAvailabilityProofFailed = true; return;
+  }
+  bool probeToken = false, headerToken = false;
+  for (const auto &token : tokens) {
+    probeToken |= token.text == "__has_include" || token.text == "__has_include_next";
+    headerToken |= token.text == "cuda_profiler_api" ||
+        token.text.find("cuda_profiler_api.h") != std::string::npos;
+  }
+  // Mentions in comments do not make an unrelated #if a profiler rule.
+  if (!probeToken || !headerToken) return;
+  auto fail = [&]() { profilerAvailabilityProofFailed = true; };
+  const auto &ppOptions = compiler.getPreprocessorOpts();
+  const auto &lang = compiler.getLangOpts();
+  const auto *mainEntry = source.getFileEntryForID(file);
+  if (line.contains('\\') || line.contains("??") ||
+      !profilerAvailabilityCandidates.empty() || entryDepth != 0 ||
+      TargetPolicy != "dav-c310-vec" || TargetRecipe != "none" ||
+      ppOptions.RetainExcludedConditionalBlocks || lang.Modules ||
+      lang.CPlusPlusModules || !ppOptions.ImplicitPCHInclude.empty() ||
+      !ppOptions.PCHThroughHeader.empty() ||
+      ppOptions.PrecompiledPreambleBytes.first != 0 ||
+      ppOptions.PrecompiledPreambleBytes.second ||
+      !compiler.getFrontendOpts().ModuleFiles.empty() ||
+      compiler.getASTContext().getExternalSource() != nullptr ||
+      mainEntry == nullptr || source.isFileOverridden(mainEntry) ||
+      (!physicalSourceFileMatches(source.getFilename(location), *mainEntry, source) &&
+       !isWitnessedProfilerHostRoot(file)) ||
+      (localHeaderContext != nullptr &&
+       (localHeaderContext->depth != 0 || localHeaderContext->virtualInput != nullptr))) {
+    fail(); return;
+  }
+  if (tokens.size() < 5 || tokens[0].text != "#" || tokens[1].text != "if") {
+    fail(); return;
+  }
+  ProfilerAvailabilityCandidate candidate;
+  candidate.file = file;
+  candidate.ifLocation = location;
+  size_t cursor = 2;
+  if (tokens[cursor].text == "defined") {
+    if (tokens.size() < cursor + 6 || tokens[cursor + 1].text != "(" ||
+        tokens[cursor + 2].text != "__has_include" ||
+        tokens[cursor + 3].text != ")" || tokens[cursor + 4].text != "&&") {
+      fail(); return;
+    }
+    candidate.builtinOffsets.insert(tokens[cursor + 2].begin);
+    cursor += 5;
+  }
+  if (cursor + 2 >= tokens.size() || tokens[cursor].text != "__has_include" ||
+      tokens[cursor + 1].text != "(") { fail(); return; }
+  const unsigned lookupOffset = tokens[cursor].begin;
+  candidate.builtinOffsets.insert(lookupOffset);
+  cursor += 2;
+  if (condition.getBegin().isInvalid() || condition.getEnd().isInvalid()) {
+    fail(); return;
+  }
+  // A genuine builtin expands to a scratch numeric token. Bind its complete
+  // expansion range back to the already-proved physical directive; requiring
+  // the evaluated numeric token itself to be FileID would reject every probe.
+  const auto physicalCondition = source.getExpansionRange(condition);
+  const auto conditionBegin = physicalCondition.getBegin();
+  const auto conditionEnd = physicalCondition.isTokenRange()
+      ? clang::Lexer::getLocForEndOfToken(physicalCondition.getEnd(), 0,
+                                        source, compiler.getLangOpts())
+      : physicalCondition.getEnd();
+  if (!profilerLiteralOperand(bytes, tokens, cursor, candidate.operandBegin,
+                              candidate.operandEnd) ||
+      cursor + 1 != tokens.size() || tokens[cursor].text != ")" ||
+      !conditionBegin.isFileID() || !conditionEnd.isFileID() ||
+      source.getFileID(conditionBegin) != file ||
+      source.getFileID(conditionEnd) != file ||
+      source.getFileOffset(conditionBegin) != tokens[2].begin ||
+      source.getFileOffset(conditionEnd) != tokens.back().end ||
+      value != clang::PPCallbacks::CVK_True) { fail(); return; }
+  const auto *builtin = compiler.getPreprocessor().getMacroInfo(
+      compiler.getPreprocessor().getIdentifierInfo("__has_include"));
+  if (builtin == nullptr || !builtin->isBuiltinMacro()) { fail(); return; }
+  unsigned lookups = 0;
+  for (const auto &observation : profilerHasIncludeObservations) {
+    if (!observation.location.isFileID() ||
+        source.getFileID(observation.location) != file ||
+        // LLVM23 reports FilenameLoc, not the __has_include identifier.
+        source.getFileOffset(observation.location) != candidate.operandBegin) continue;
+    ++lookups;
+    candidate.lookupProved = observation.physicalSdk;
+    candidate.sdkPath = observation.resolvedPath;
+    candidate.lookupEntry = observation.entry;
+  }
+  if (lookups != 1 || !candidate.lookupProved) { fail(); return; }
+  // Parse the entire bounded physical block now, before its contents are
+  // processed. Callbacks must subsequently confirm the exact include/endif.
+  unsigned position = profilerNextPhysicalLine(bytes, end);
+  unsigned nonempty = 0;
+  bool closed = false;
+  while (position < bytes.size()) {
+    const unsigned lineEnd = profilerPhysicalLineEnd(bytes, position);
+    std::vector<ProfilerPhysicalToken> body;
+    if (!profilerPhysicalTokens(compiler, file, position, lineEnd, body)) {
+      fail(); return;
+    }
+    position = profilerNextPhysicalLine(bytes, lineEnd);
+    if (body.empty()) continue;
+    if (body.size() == 2 && body[0].text == "#" && body[1].text == "endif") {
+      if (nonempty < 1) { fail(); return; }
+      candidate.endifBegin = body[0].begin;
+      candidate.resumeOffset = position;
+      if (position <= lineEnd || position >= bytes.size()) { fail(); return; }
+      closed = true; break;
+    }
+    if (nonempty == 0 && body.size() >= 3 && body[0].text == "#" &&
+        body[1].text == "include") {
+      size_t operand = 2;
+      unsigned first = 0, last = 0;
+      if (!profilerLiteralOperand(bytes, body, operand, first, last) ||
+          operand != body.size()) { fail(); return; }
+      candidate.includeBegin = body[0].begin;
+    } else if (nonempty == 1 && body.size() == 4 && body[0].text == "#" &&
+               body[1].text == "define" && body[2].identifier &&
+               body[3].text == "1") {
+      const llvm::StringRef name(body[2].text);
+      if (name.starts_with("__") || name.starts_with("ASCIFY_") ||
+          name.starts_with("ACL_") || name.starts_with("MSVP_") ||
+          name.starts_with("CUDA_") || name.starts_with("CUDART_") ||
+          profilerMacroDefinitions[name.str()] != 0 ||
+          profilerMacroUndefinitions[name.str()] != 0 ||
+          compiler.getPreprocessor().getMacroInfo(
+              compiler.getPreprocessor().getIdentifierInfo(name)) != nullptr) {
+        fail(); return;
+      }
+      candidate.flag = name.str();
+      candidate.flagBegin = body[2].begin;
+    } else { fail(); return; }
+    ++nonempty;
+  }
+  if (!closed) { fail(); return; }
+  profilerAvailabilityCandidates.push_back(std::move(candidate));
+}
+
+void AscifyAction::Else(clang::SourceLocation,
+                       clang::SourceLocation ifLocation) {
+  for (const auto &candidate : profilerAvailabilityCandidates)
+    if (candidate.ifLocation == ifLocation) profilerAvailabilityProofFailed = true;
+}
+
+void AscifyAction::Endif(clang::SourceLocation location,
+                        clang::SourceLocation ifLocation) {
+  auto &source = getCompilerInstance().getSourceManager();
+  for (auto &candidate : profilerAvailabilityCandidates) {
+    if (candidate.ifLocation != ifLocation) continue;
+    candidate.endifObserved = location.isFileID() &&
+        source.getFileID(location) == candidate.file &&
+        physicalLineBegin(source.getBufferData(candidate.file),
+                          source.getFileOffset(location)) <= candidate.endifBegin &&
+        source.getFileOffset(location) >= candidate.endifBegin;
+    candidate.endifLocation = location;
+  }
+  ConditionalDirectiveEnded();
+}
+
+bool AscifyAction::isProvedProfilerAvailabilityToken(
+    clang::SourceLocation location) const {
+  if (!location.isFileID()) return false;
+  const auto &source = getCompilerInstance().getSourceManager();
+  for (const auto &candidate : profilerAvailabilityCandidates)
+    if (candidate.sealed && source.getFileID(location) == candidate.file &&
+        candidate.builtinOffsets.count(source.getFileOffset(location))) return true;
+  return false;
+}
+
+bool AscifyAction::sealProfilerAvailabilityProof() {
+  if (profilerAvailabilityCandidates.empty() && !profilerAvailabilityProofFailed)
+    return true;
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  auto reject = [&]() {
+    const auto diagnostic = compiler.getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "CUDA profiler header boundary: cannot prove positive physical profiler availability block");
+    compiler.getDiagnostics().Report(diagnostic);
+    return false;
+  };
+  if (profilerAvailabilityProofFailed || profilerAvailabilityCandidates.size() != 1 ||
+      profilerAvailabilityControlModified || profilerAvailabilityPositionObserved)
+    return reject();
+  auto &candidate = profilerAvailabilityCandidates.front();
+  if (!candidate.lookupProved || !candidate.includeObserved ||
+      candidate.lookupEntry == nullptr ||
+      !candidate.includeMapped || !candidate.sdkEntered || !candidate.endifObserved ||
+      !isPhysicalCudaProfilerHeader(candidate.sdkPath) ||
+      (!candidate.flag.empty() &&
+       (profilerMacroDefinitions[candidate.flag] != 1 ||
+        profilerMacroUndefinitions[candidate.flag] != 0))) return reject();
+  const auto *builtin = compiler.getPreprocessor().getMacroInfo(
+      compiler.getPreprocessor().getIdentifierInfo("__has_include"));
+  if (builtin == nullptr || !builtin->isBuiltinMacro()) return reject();
+  if (!candidate.flag.empty()) {
+    const auto *flag = compiler.getPreprocessor().getMacroInfo(
+        compiler.getPreprocessor().getIdentifierInfo(candidate.flag));
+    if (flag == nullptr || flag->isFunctionLike() || flag->getNumTokens() != 1 ||
+        !flag->getDefinitionLoc().isFileID() ||
+        source.getFileID(flag->getDefinitionLoc()) != candidate.file ||
+        source.getFileOffset(flag->getDefinitionLoc()) != candidate.flagBegin ||
+        compiler.getPreprocessor().getSpelling(*flag->tokens_begin()) != "1")
+      return reject();
+  }
+  bool invalid = false;
+  const auto bytes = source.getBufferData(candidate.file, &invalid);
+  if (invalid) return reject();
+  std::vector<ProfilerPhysicalToken> all;
+  if (!profilerPhysicalTokens(compiler, candidate.file, 0, bytes.size(), all, false))
+    return reject();
+  for (size_t index = 0; index < all.size(); ++index) {
+    const auto &token = all[index];
+    // Do not reinterpret a caller #line or GNU line marker as a proved
+    // position. The resume below comes only from this real SourceManager.
+    if (token.text == "#" && index + 1 < all.size() &&
+        (all[index + 1].text == "line" ||
+         (!all[index + 1].text.empty() &&
+          all[index + 1].text[0] >= '0' && all[index + 1].text[0] <= '9')))
+      return reject();
+    if (!candidate.flag.empty() && token.text == candidate.flag &&
+        token.begin != candidate.flagBegin) {
+      if (token.begin < source.getFileOffset(candidate.ifLocation)) return reject();
+      const unsigned lineBegin = physicalLineBegin(bytes, token.begin);
+      std::vector<ProfilerPhysicalToken> use;
+      if (!profilerPhysicalTokens(compiler, candidate.file, lineBegin,
+              profilerPhysicalLineEnd(bytes, lineBegin), use)) return reject();
+      const bool directConditional = use.size() == 3 && use[0].text == "#" &&
+          (use[1].text == "ifdef" || use[1].text == "ifndef") &&
+          use[2].text == candidate.flag;
+      const bool definedConditional = use.size() == 6 && use[0].text == "#" &&
+          use[1].text == "if" && use[2].text == "defined" &&
+          use[3].text == "(" && use[4].text == candidate.flag && use[5].text == ")";
+      if (!directConditional && !definedConditional) return reject();
+    }
+    // Keep the explicit position-macro boundary conservative. The same
+    // transaction also restores the original presumed line for implicit
+    // __builtin_LINE consumers; frozen diagnostics keep their old contract.
+    if (token.text == "__LINE__") return reject();
+  }
+  const auto origin = source.getLocForStartOfFile(candidate.file);
+  const auto *entry = source.getFileEntryForID(candidate.file);
+  if (entry == nullptr || source.isFileOverridden(entry) ||
+      (!physicalSourceFileMatches(source.getFilename(origin), *entry, source) &&
+       !isWitnessedProfilerHostRoot(candidate.file)))
+    return reject();
+  const auto operand = origin.getLocWithOffset(candidate.operandBegin);
+  const auto endif = origin.getLocWithOffset(candidate.endifBegin);
+  const auto resume = origin.getLocWithOffset(candidate.resumeOffset);
+  const auto presumed = source.getPresumedLoc(resume);
+  if (presumed.isInvalid() || presumed.getLine() == 0 ||
+      presumed.getLine() > 2147483647u) return reject();
+  ct::Replacements staged(*replacements);
+  const ct::Replacement probe(source, operand,
+      candidate.operandEnd - candidate.operandBegin, "<acl/acl_prof.h>");
+  const ct::Replacement missing(source, endif, 0,
+      "#else\n#error \"Ascify admitted profiler branch requires the target ACL profiler header\"\n");
+  const ct::Replacement position(source, resume, 0,
+      "#line " + std::to_string(presumed.getLine()) + "\n");
+  for (const auto &range : SemanticRewriteRanges) {
+    if (range.file != candidate.file) continue;
+    if ((candidate.operandBegin < range.endOffset &&
+         range.beginOffset < candidate.operandEnd) ||
+        (range.beginOffset <= candidate.endifBegin &&
+         candidate.endifBegin < range.endOffset) ||
+        (range.beginOffset <= candidate.resumeOffset &&
+         candidate.resumeOffset < range.endOffset)) return reject();
+  }
+  if (!llcompat::insertReplacement(staged, probe) ||
+      !llcompat::insertReplacement(staged, missing) ||
+      !llcompat::insertReplacement(staged, position)) return reject();
+  *replacements = std::move(staged);
+  SemanticRewriteRanges.push_back(
+      {candidate.file, candidate.operandBegin, candidate.operandEnd});
+  candidate.sealed = true;
+  Statistics::current().cudaProfilerAvailabilityEvidence.push_back(
+      "source=" + source.getFilename(origin).str() +
+      ";source_sha256=" + contextualInputSha256(bytes) +
+      ";if_offset=" + std::to_string(source.getFileOffset(candidate.ifLocation)) +
+      ";include_offset=" + std::to_string(candidate.includeBegin) +
+      ";sdk=" + candidate.sdkPath +
+      ";lookup_device=" + std::to_string(candidate.lookupEntry->getUniqueID().getDevice()) +
+      ";lookup_file=" + std::to_string(candidate.lookupEntry->getUniqueID().getFile()) +
+      ";sdk_sha256=bb8e03c217df1309ccfe3249c4fac1bcd577bdcff5c65944217548195204118e" +
+      ";source_flag=" + candidate.flag +
+      ";resume_line=" + std::to_string(presumed.getLine()));
+  return true;
 }
 
 void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
@@ -5015,21 +5481,23 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
     auditActiveAscifyCudaCompatMacrosAtInsertion();
   }
   if (file_name == "cuda_profiler_api.h") {
-    llvm::SmallString<256> expected(CudaPath.getValue()), physicalExpected,
-        physicalActual;
-    llvm::sys::path::append(expected, "include", "cuda_profiler_api.h");
-    const auto buffer = llvm::MemoryBuffer::getFile(resolved_file_name);
-    bool exact = false;
-#if LLVM_VERSION_MAJOR >= 13
-    exact = buffer && (*buffer)->getBufferSize() == 4566 &&
-        sha256Equals((*buffer)->getBuffer(),
-          "bb8e03c217df1309ccfe3249c4fac1bcd577bdcff5c65944217548195204118e");
-#endif
-    if (!directRange || !directSpelling || preprocessorConditionalDepth != 0 ||
-        CudaPath.empty() || !exact ||
-        llvm::sys::fs::real_path(expected, physicalExpected) ||
-        llvm::sys::fs::real_path(resolved_file_name, physicalActual) ||
-        physicalExpected != physicalActual) {
+    bool provedConditional = false;
+    for (auto &candidate : profilerAvailabilityCandidates) {
+      if (directRange && directSpelling && is_angled &&
+          preprocessorConditionalDepth == 1 && candidate.lookupProved &&
+          SM.getFileID(hash_loc) == candidate.file &&
+          SM.getFileOffset(hash_loc) == candidate.includeBegin &&
+          includeToken.getIdentifierInfo() != nullptr &&
+          includeToken.getIdentifierInfo()->getName() == "include" &&
+          !candidate.includeObserved) {
+        candidate.includeObserved = true;
+        candidate.includeLocation = hash_loc;
+        provedConditional = true;
+      }
+    }
+    if (!directRange || !directSpelling ||
+        (preprocessorConditionalDepth != 0 && !provedConditional) ||
+        !isPhysicalCudaProfilerHeader(resolved_file_name)) {
       cudaRuntimeApiBoundaryFailed = true;
       const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
           clang::DiagnosticsEngine::Error,
@@ -5120,6 +5588,10 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
     // include rewrite the sole owner of that span.
     const bool inserted = insertSemanticReplacement(
         Rep, clang::FullSourceLoc{sl, SM}, sl, replacementEnd);
+    if (file_name == "cuda_profiler_api.h")
+      for (auto &candidate : profilerAvailabilityCandidates)
+        if (candidate.includeLocation == hash_loc)
+          candidate.includeMapped = inserted && newInclude == "<acl/acl_prof.h>";
     if (inserted && file_name == "cub/cub.cuh" &&
         name == "acl_cub/aclcub.hpp" && directRange && directSpelling)
       mappedCubIncludes.push_back(
@@ -5178,6 +5650,13 @@ void AscifyAction::FileSkipped(const clang::FileEntry& skippedFile,
   if (!location.isFileID())
     return;
   auto& source = getCompilerInstance().getSourceManager();
+  for (const auto &candidate : profilerAvailabilityCandidates) {
+    if (source.getFileID(location) != candidate.file) continue;
+    const auto bytes = source.getBufferData(candidate.file);
+    if (physicalLineBegin(bytes, source.getFileOffset(location)) ==
+        physicalLineBegin(bytes, candidate.includeBegin))
+      profilerAvailabilityProofFailed = true;
+  }
   for (const auto& candidate : redundantCubIncludeCandidates) {
     if (candidate.filenameBegin != location ||
         candidate.resolvedPath != resolvedPath ||
@@ -5249,6 +5728,16 @@ void AscifyAction::PragmaDirective(
       getCompilerInstance().getSourceManager();
   const clang::SourceLocation expansion =
       sourceManager.getExpansionLoc(Loc);
+  if (Introducer != clang::PIK_HashPragma && expansion.isValid()) {
+    const auto spelling = sourceManager.getSpellingLoc(Loc);
+    const auto file = sourceManager.getFileID(spelling);
+    if (!locationComesFromInitiallyTrustedSystemFile(
+            sourceManager, spelling, trustedSystemFileIds) &&
+        !cudaRuntimeApiSdkFileIds.count(file.getHashValue()) &&
+        frozenNvidiaSampleHelperFileRole(sourceManager, spelling) == 0 &&
+        !isOwnedCudaCompilerInput(file, getCompilerInstance()))
+      profilerAvailabilityControlModified = true;
+  }
   if (Introducer != clang::PIK_HashPragma) {
     if (frontendCompatibility.enabled()) {
       auto &compiler = getCompilerInstance();
@@ -8638,6 +9127,11 @@ void AscifyAction::Defined(const clang::Token &MacroNameTok,
 void AscifyAction::MacroUndefined(
     const clang::Token &MacroNameTok,
     const clang::MacroDefinition &MD) {
+  if (MacroNameTok.getIdentifierInfo() != nullptr) {
+    const auto name = MacroNameTok.getIdentifierInfo()->getName();
+    ++profilerMacroUndefinitions[name.str()];
+    if (name == "__has_include") profilerAvailabilityControlModified = true;
+  }
   if (frontendCompatibility.enabled() &&
       MacroNameTok.getIdentifierInfo() != nullptr &&
       MacroNameTok.getIdentifierInfo()->getName() ==
@@ -8675,6 +9169,13 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
     return;
   const llvm::StringRef name =
       MacroNameTok.getIdentifierInfo()->getName();
+  ++profilerMacroDefinitions[name.str()];
+  if (name == "__has_include") {
+    const auto *info = getCompilerInstance().getPreprocessor().getMacroInfo(
+        MacroNameTok.getIdentifierInfo());
+    if (info == nullptr || !info->isBuiltinMacro())
+      profilerAvailabilityControlModified = true;
+  }
   if (name == "__attribute__" || name == "always_inline")
     deviceTemplateAttributeMacroConflict = true;
   if (name == "__MVS__")
@@ -8941,14 +9442,30 @@ bool AscifyAction::auditCudaProfilerApiSurface() {
     if (invalid) { return reject(begin); }
     clang::Lexer lexer(begin, compiler.getLangOpts(), data.begin(), data.begin(), data.end());
     clang::Token token;
+    bool previousHash = false;
     lexer.LexFromRawLexer(token);
     while (!token.is(clang::tok::eof)) {
       if (token.is(clang::tok::hashhash)) { return reject(token.getLocation()); }
+      const bool followsHash = previousHash;
+      previousHash = token.is(clang::tok::hash);
+      if (!profilerAvailabilityCandidates.empty() && followsHash &&
+          token.is(clang::tok::numeric_constant)) return reject(token.getLocation());
       if (token.isAnyIdentifier()) {
         const auto name = clang::Lexer::getSpelling(token, source, compiler.getLangOpts());
+        if (!profilerAvailabilityCandidates.empty() && followsHash && name == "line")
+          return reject(token.getLocation());
+        for (const auto &candidate : profilerAvailabilityCandidates)
+          if (!candidate.flag.empty() && name == candidate.flag &&
+              file != candidate.file) return reject(token.getLocation());
+        if (name == "__has_include" &&
+            isProvedProfilerAvailabilityToken(token.getLocation())) {
+          lexer.LexFromRawLexer(token);
+          continue;
+        }
         if (name == "__CUDA_PROFILER_API_H__" || name == "__has_include" ||
             name == "__has_include_next" || name == "_Pragma" ||
-            name == "__pragma" || name == "push_macro" || name == "pop_macro")
+            name == "__pragma" || name == "push_macro" || name == "pop_macro" ||
+            (!profilerAvailabilityCandidates.empty() && name == "__LINE__"))
           return reject(token.getLocation());
       } else if (token.is(clang::tok::string_literal)) {
         const auto literal = clang::Lexer::getSpelling(token, source, compiler.getLangOpts());
@@ -9202,7 +9719,10 @@ bool AscifyAction::auditCudaRuntimeApiSurface(bool includeRecords) {
         const bool provedFalseStdargInquiry = productNativeStdarg && directive &&
             name == "__has_include_next" &&
             isFalseNativeStdargCondition(data, source.getFileOffset(token.getLocation()));
+        const bool provedProfilerInquiry = name == "__has_include" &&
+            isProvedProfilerAvailabilityToken(token.getLocation());
         if (!physicalNativeSystemHeader && !provedFalseStdargInquiry &&
+            !provedProfilerInquiry &&
             (name == "__has_include" || name == "__has_include_next" ||
              name == "__has_feature" || name == "__has_extension" ||
              name == "__has_builtin" || name == "__has_attribute" ||
@@ -10351,6 +10871,16 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
   const clang::MacroInfo *macroInfo = MD.getMacroInfo();
+  if (MacroNameTok.getIdentifierInfo()->getName() == "__LINE__") {
+    const auto spelling = sourceManager.getSpellingLoc(MacroNameTok.getLocation());
+    const auto file = sourceManager.getFileID(spelling);
+    if (!locationComesFromInitiallyTrustedSystemFile(
+            sourceManager, spelling, trustedSystemFileIds) &&
+        !cudaRuntimeApiSdkFileIds.count(file.getHashValue()) &&
+        frozenNvidiaSampleHelperFileRole(sourceManager, spelling) == 0 &&
+        !isOwnedCudaCompilerInput(file, getCompilerInstance()))
+      profilerAvailabilityPositionObserved = true;
+  }
   const auto profileUse = sourceManager.getExpansionLoc(MacroNameTok.getLocation());
   if (frontendCompatibility.enabled() && profileUse.isValid()) {
     const auto file = sourceManager.getFileID(profileUse);
@@ -12139,6 +12669,18 @@ class PPCallbackProxy : public clang::PPCallbacks {
 public:
   explicit PPCallbackProxy(AscifyAction &action): ascifyAction(action) {}
 
+#if LLVM_VERSION_MAJOR >= 23
+  // This callback signature is bound to the actual LLVM23 SDK used by the
+  // admitted frontend. Older versions retain conditional-profiler refusal.
+  void HasInclude(clang::SourceLocation location, StringRef filename, bool angled,
+                  clang::OptionalFileEntryRef file,
+                  clang::SrcMgr::CharacteristicKind) override {
+    ascifyAction.HasInclude(location, filename, angled,
+        file ? &file->getFileEntry() : nullptr,
+        file ? file->getName() : StringRef());
+  }
+#endif
+
   void FileChanged(
       clang::SourceLocation location,
       clang::PPCallbacks::FileChangeReason reason,
@@ -12216,10 +12758,21 @@ public:
     ascifyAction.Ifndef(Loc, MacroNameTok, MD);
   }
 
-  void If(clang::SourceLocation,
-          clang::SourceRange,
-          clang::PPCallbacks::ConditionValueKind) override {
-    ascifyAction.ConditionalDirectiveEntered();
+  void If(clang::SourceLocation location,
+          clang::SourceRange condition,
+          clang::PPCallbacks::ConditionValueKind value) override {
+    ascifyAction.If(location, condition, value);
+  }
+
+  void Elif(clang::SourceLocation location, clang::SourceRange,
+            clang::PPCallbacks::ConditionValueKind,
+            clang::SourceLocation ifLocation) override {
+    ascifyAction.Else(location, ifLocation);
+  }
+
+  void Else(clang::SourceLocation location,
+            clang::SourceLocation ifLocation) override {
+    ascifyAction.Else(location, ifLocation);
   }
 
   void Ifdef(clang::SourceLocation Loc,
@@ -12254,8 +12807,9 @@ public:
   }
 #endif
 
-  void Endif(clang::SourceLocation, clang::SourceLocation) override {
-    ascifyAction.ConditionalDirectiveEnded();
+  void Endif(clang::SourceLocation location,
+             clang::SourceLocation ifLocation) override {
+    ascifyAction.Endif(location, ifLocation);
   }
 
   void Defined(const clang::Token &MacroNameTok,
@@ -12343,6 +12897,8 @@ bool AscifyAction::BeginInvocation(clang::CompilerInstance &CI) {
 
 void AscifyAction::ExecuteAction() {
   clang::Preprocessor &PP = getCompilerInstance().getPreprocessor();
+  if (localHeaderContext == nullptr || localHeaderContext->depth == 0)
+    Statistics::current().cudaProfilerAvailabilityEvidence.clear();
   // Register yourself as the preprocessor callback, by proxy.
   PP.addPPCallbacks(std::unique_ptr<PPCallbackProxy>(new PPCallbackProxy(*this)));
 #if LLVM_VERSION_MAJOR > 3
@@ -12403,6 +12959,13 @@ void AscifyAction::ExecuteAction() {
   // Reset the contextual token watcher above before any diagnostic early exit.
   if (getCompilerInstance().getDiagnostics().hasErrorOccurred())
     return;
+  // All PP callbacks and Sema have completed. Seal the entire conditional
+  // proof BEFORE either surface audit, and long before output publication.
+  // EndSourceFileAction must never create a late audit exception.
+  if (!sealProfilerAvailabilityProof()) {
+    cudaRuntimeApiBoundaryFailed = true;
+    return;
+  }
   // Complete physical/macro SDK admission before scalar64's callee proof.
   // Record/type admission follows its expression-specific closed-domain proof.
   if (cudaRuntimeApiHeaderAdmitted && !auditCudaRuntimeApiSurface(false)) {

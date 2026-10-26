@@ -77,6 +77,10 @@ def main():
             if database is None:
                 source_argument = (os.path.relpath(source)
                                    if name == 'relative_explicit_runtime' else str(source))
+                if name == 'ordinary_symlink_root':
+                    alias = directory / 'original_alias.cpp'
+                    alias.symlink_to(source.name)
+                    source_argument = str(alias)
                 argv = base + [source_argument, '-o', str(output), *tool,
                                '--', '-std=c++17', *flags]
             else:
@@ -92,6 +96,8 @@ def main():
                 argv += ['-ivfsoverlay', str(overlay)]
             result = subprocess.run(argv, text=True, capture_output=True, timeout=120)
             assert {str(p): digest(p) for p in paths} == before, (name, 'input changed')
+            if name == 'ordinary_symlink_root':
+                assert alias.is_symlink() and os.readlink(alias) == source.name
             assert (result.returncode == 0) == good, (name, argv, result.stdout, result.stderr)
             if good:
                 text = output.read_text()
@@ -112,6 +118,8 @@ def main():
             return source, output, result
 
         _, host_output, _ = run('custom_uchar4', exact=True, compile_host=True)
+        if os.name == 'posix':
+            run('ordinary_symlink_root', exact=True, compile_host=True)
         run('tool_host_language', tool=('--input-language=c++',), flags=(), exact=True)
         run('tool_and_compiler_agree', tool=('--input-language=c++',), exact=True)
         run('joined_language', flags=('-xc++',), exact=True)

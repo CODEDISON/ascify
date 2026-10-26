@@ -50,6 +50,7 @@ THE SOFTWARE.
 #include "ImplicitCudaHeaders.h"
 #include "FrontendCompatibility.h"
 #include "FrontendLanguage.h"
+#include "HostCxxRootInput.h"
 #include "MigrationReceipt.h"
 #include "MigrationReceiptIO.h"
 
@@ -300,25 +301,49 @@ bool ascifySingleSource(const std::string &srcPath,
     // including when the user spelled the positional input relatively.
     const std::string parsePath = mainContextPath;
     std::string hostInput;
+    std::unique_ptr<const ascify::HostCxxRootInputWitness> hostRootInput;
     if (!contextualInput) {
-      std::ifstream input(parsePath, std::ios::binary);
-      if (!input) return false;
-      hostInput.assign(std::istreambuf_iterator<char>(input),
-                       std::istreambuf_iterator<char>());
-      if (input.bad()) return false;
+#if LLVM_VERSION_MAJOR >= 13
+      const bool unmodifiedHostRoot = languageDatabase.hostCxx() &&
+          (localHeaderContext == nullptr ||
+           (localHeaderContext->depth == 0 && localHeaderContext->plan != nullptr &&
+            localHeaderContext->sourcePath ==
+                localHeaderContext->plan->rootSourcePath()));
+      if (unmodifiedHostRoot) {
+        // Capture real bytes and physical UID/size before creating our VFS
+        // main-file mapping. Selected headers and joint contextual inputs do
+        // not receive this witness.
+        hostRootInput = ascify::HostCxxRootInputWitness::capture(parsePath);
+      }
+      if (hostRootInput) {
+        hostInput = hostRootInput->bytes();
+      } else
+#endif
+      {
+        // A missing optional profiler witness must not change the ordinary
+        // Host C++ read contract. Profiler admission still fails closed.
+        std::ifstream input(parsePath, std::ios::binary);
+        if (!input) return false;
+        hostInput.assign(std::istreambuf_iterator<char>(input),
+                         std::istreambuf_iterator<char>());
+        if (input.bad()) return false;
+      }
     }
     const std::string &input = contextualInput
         ? *localHeaderContext->virtualInput : hostInput;
     ct::RefactoringTool Tool(languageDatabase, parsePath);
+    if (hostRootInput && !hostRootInput->matchesPhysical()) return false;
     Tool.mapVirtualFile(parsePath, input);
+    if (hostRootInput && !hostRootInput->matchesPhysical()) return false;
     ct::Replacements &edits = llcompat::getReplacements(Tool, parsePath);
     ascify::FrontendCompatibilityConfig frontendCompatibility;
     if (!appendArgumentsAdjusters(Tool, mainContextPath, ascify_exe_path,
                                   frontendCompatibility, languageDatabase.hostCxx()))
       return false;
     ReplacementsFrontendActionFactory<AscifyAction> factory(
-        &edits, localHeaderContext, frontendCompatibility);
-    if (Tool.run(&factory))
+        &edits, localHeaderContext, frontendCompatibility, hostRootInput.get());
+    if (Tool.run(&factory) ||
+        (hostRootInput && !hostRootInput->matchesPhysical()))
       return false;
     auto rewritten = ct::applyAllReplacements(input, edits);
     if (!rewritten) {
@@ -818,6 +843,8 @@ int main(int argc, const char **argv) {
     receiptInput.boundedDeviceTemplateDefinitions = conversionOk
         ? Statistics::current().boundedDeviceTemplateDefinitions : 0;
     if (conversionOk) receiptInput.cudaVec3LayoutEvidence = Statistics::current().cudaVec3LayoutEvidence;
+    if (conversionOk) receiptInput.cudaProfilerAvailabilityEvidence =
+        Statistics::current().cudaProfilerAvailabilityEvidence;
     receiptInput.diagnosticSummary =
         conversionOk
             ? "source conversion completed; later pipeline stages are outside this receipt"

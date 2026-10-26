@@ -38,6 +38,8 @@ ascify::MigrationReceipt makeSuccessReceipt(bool reverseInputs) {
   };
   first.boundedDeviceTemplateDefinitions = 2;
   first.cudaVec3LayoutEvidence = {"site=/work/quoted\"name.cu:7;type=float3;layout=12/4"};
+  first.cudaProfilerAvailabilityEvidence = {
+      "source=/work/quoted\"name.cu;if_offset=7;sdk=/cuda/include/cuda_profiler_api.h"};
   if (reverseInputs) {
     receipt.addInputResult(first);
     receipt.addInputResult(second);
@@ -63,6 +65,10 @@ int main() {
   assert(forward.find("\"rule\": \"int-nttp-scalar-dag-v1\", \"definitions\": 2") != std::string::npos);
   assert(forward.find("\"rule\": \"closed-scalar-local-v1\"") != std::string::npos);
   assert(forward.find("quoted\\\"name.cu:7;type=float3;layout=12/4") != std::string::npos);
+  assert(forward.find("\"backend_status\": \"unverified\"") != std::string::npos);
+  assert(forward.find("\"target_header\": \"acl/acl_prof.h\"") != std::string::npos);
+  assert(forward.find("quoted\\\"name.cu;if_offset=7;sdk=") != std::string::npos);
+  assert(forward.find("\"backend_status\": \"verified\"") == std::string::npos);
 
   ascify::MigrationReceipt failed({
       "portable", "precise", "none", "none", "disabled", "side_by_side",
@@ -77,6 +83,7 @@ int main() {
          std::string::npos);
   assert(failedJson.find("\"status\": \"succeeded\"") ==
          std::string::npos);
+  assert(failedJson.find("cuda_profiler_availability") == std::string::npos);
 
   std::cout << forward;
   return 0;
