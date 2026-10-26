@@ -204,7 +204,7 @@ try:
         if not args.source_only:
             argv = [args.binary, original, "--target-policy=dav-c310-vec",
                     "--simt-math=fast", "--target-recipe=none", "--default-preprocessor",
-                    "--frontend-compat=ascify-admitted-v1",
+                    "--frontend-compat=" + ("ascify-admitted-v1" if language == "cuda" else "none"),
                     "--cuda-path=" + str(args.cuda_path),
                     "--clang-resource-directory=" + str(args.resource_dir),
                     "--migration-receipt=" + str(receipt), "-o", converted]
