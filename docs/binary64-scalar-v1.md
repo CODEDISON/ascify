@@ -7,6 +7,10 @@ pre-existing native integer64 paths of other providers; double always enters
 the restricted helper and cannot fall through to a native float overload.
 It requires `--default-preprocessor`; existing SDK/provider,
 macro, physical-source and transactional-publication checks still apply.
+Reachable builtin atomic/complex/vector `+` and `+=` with double components
+are refused before route activation. These types never enter a scalar helper.
+Host functions, copying without a new addition, and other element dtypes retain
+their existing behavior.
 
 | Operation | Admitted domain | Contract |
 |---|---|---|
@@ -56,11 +60,15 @@ reduction<double> or complete CUDA Samples support.
 1. Review the isolated product diff, source fingerprints and test fixtures.
 2. Build the actual frontend, run release checks, and use the new syntax-first
    `tests/rewrite/check_scalar64_lowering.py` with the actual binary/CUDA SDK.
-   Its 16 admitted/retained cases execute the generated C++ against host SDK
+   Its original 16 admitted/retained cases execute the generated C++ against host SDK
    doubles, compare raw bits with literal independent expectations, and check
    float/int order and shuffle call counts. Forty-one source-valid refusals plus
    seven target compilation and five host collective refusal cases cover the
    boundary. No host-model result establishes NPU correctness.
+   All original57 expectations remain intact. Fifteen supplementary cases add
+   ten wrapped-double/constant-observation refusals and five host/copy/other
+   dtype controls, for72 frontend cases (21 admitted/retained,51 refused).
+   The constinit case explicitly selects C++20.
    Where present, the selected SDK's `include/cccl` directory is supplied to
    both original CUDA syntax and conversion, with its type_traits header hash
    recorded and checked unchanged. SDK source and syntax requirements remain

@@ -226,6 +226,55 @@ __device__ double move(double a){
 }
 ''', accepted=False, prefix=CUDA + '#include <cooperative_groups.h>\n')
 
+    # Keep the original57 fixtures/expectations above intact. These cases
+    # exercise the builtin wrapped-double refusal and its nonactivation scope.
+    wrapped_refusals = [
+        ('atomic_typedef_assign', 'using D=double; using A=_Atomic(D);\n__device__ void step(A* a,D b){*a+=b;}\n'),
+        ('atomic_ref_paren_assign', 'using A=_Atomic(double);\n__device__ void step(A& a,double b){(a)+=b;}\n'),
+        ('atomic_array_assign', 'using A=_Atomic(double);\n__device__ void step(A* a,unsigned i,double b){a[i]+=b;}\n'),
+        ('atomic_volatile_assign', '__device__ void step(volatile _Atomic(double)* a,double b){*a+=b;}\n'),
+        ('atomic_binary_add', '__device__ double pair(_Atomic(double)* a,double b){return *a+b;}\n'),
+        ('complex_double_add', 'using V=_Complex double;\n__device__ V pair(V a,V b){return a+b;}\n'),
+        ('complex_double_assign', 'using V=_Complex double;\n__device__ void step(V& a,V b){a+=b;}\n'),
+        ('vector_double_add', 'typedef double V __attribute__((ext_vector_type(2)));\n__device__ V pair(V a,V b){return a+b;}\n'),
+        ('vector_double_assign', 'typedef double V __attribute__((ext_vector_type(2)));\n__device__ void step(V& a,V b){a+=b;}\n'),
+    ]
+    for name, body in wrapped_refusals:
+        yield case(name, body, accepted=False)
+    yield case('constinit_initializer', '''
+__device__ double pair(double a){static constinit double c=1.0+2.0;return a+c;}
+''', accepted=False, standard='c++20')
+    yield case('host_complex_retained', '''
+using V=_Complex double;
+V pair(V a,V b){return a+b;}
+''', retained=['return a+b;'], cpu='''
+V a,b; __real__ a=1.0; __imag__ a=2.0; __real__ b=3.0; __imag__ b=4.0;
+V result=pair(a,b); if(__real__ result!=4.0||__imag__ result!=6.0)std::abort();''')
+    yield case('host_vector_retained', '''
+typedef double V __attribute__((ext_vector_type(2)));
+V pair(V a,V b){return a+b;}
+''', retained=['return a+b;'], cpu='''
+V result=pair(V{1.0,2.0},V{3.0,4.0});
+if(result[0]!=4.0||result[1]!=6.0)std::abort();''')
+    yield case('device_complex_copy_no_add', '''
+using V=_Complex double;
+__device__ void copy(V* out,const V* in){out[0]=in[0];}
+''', retained=['out[0]=in[0];'], cpu='''
+V in,out; __real__ in=scalar64_from_raw<double>(0x7ff0000000000042);
+__imag__ in=scalar64_from_raw<double>(0x8000000000000000); copy(&out,&in);
+scalar64_expect(scalar64_raw(__real__ out),0x7ff0000000000042);
+scalar64_expect(scalar64_raw(__imag__ out),0x8000000000000000);''')
+    for name, dtype, initial, increment, expected in [
+        ('atomic_int_retained', 'int', '1', '2', '3'),
+        ('atomic_float_retained', 'float', '1.0f', '0.5f', '1.5f'),
+    ]:
+        # A double declaration alone must not activate any refusal. These
+        # preserve existing frontend behavior; no NPU atomic support is implied.
+        yield case(name, 'using UnusedDouble=double;\n__device__ void step(_Atomic(' +
+                   dtype + ')* a,' + dtype + ' b){*a+=b;}\n', retained=['*a+=b;'],
+                   cpu='_Atomic(' + dtype + ') a; a=' + initial + '; step(&a,' +
+                   increment + '); if(a!=' + expected + ')std::abort();')
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

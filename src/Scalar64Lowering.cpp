@@ -34,6 +34,18 @@ bool device(const FunctionDecl* function) {
 bool doubleType(QualType type, ASTContext& context) {
   return !type.isNull() && context.hasSameUnqualifiedType(type, context.DoubleTy);
 }
+// Refusal only. These are compiler builtin arithmetic wrappers, not records,
+// pointers, arrays or a sizeof-based approximation of an arithmetic domain.
+bool wrappedDoubleArithmeticType(QualType type, ASTContext& context) {
+  if (type.isNull()) return false;
+  type = type.getCanonicalType();
+  QualType element;
+  if (const auto* atomic = type->getAs<AtomicType>()) element = atomic->getValueType();
+  else if (const auto* complex = type->getAs<ComplexType>()) element = complex->getElementType();
+  else if (const auto* vector = type->getAs<VectorType>()) element = vector->getElementType();
+  else return false;
+  return doubleType(element, context) || wrappedDoubleArithmeticType(element, context);
+}
 bool addType(QualType type, ASTContext& context) {
   return !type.isNull() && (context.hasSameUnqualifiedType(type, context.IntTy) ||
       context.hasSameUnqualifiedType(type, context.FloatTy) || doubleType(type, context));
@@ -183,7 +195,14 @@ class Proof {
             parent.get<ArrayTypeTraitExpr>() || parent.get<ExpressionTraitExpr>() ||
             parent.get<StaticAssertDecl>() || parent.get<DecltypeType>()) return true;
         if (const auto* variable = parent.get<VarDecl>())
-          if (variable->isConstexpr() || isa<ParmVarDecl>(variable)) return true;
+          if (variable->isConstexpr() || isa<ParmVarDecl>(variable) ||
+              (variable->hasGlobalStorage() && variable->hasInit() &&
+               variable->hasConstantInitialization())) return true;
+        if (const auto* location = parent.get<TypeLoc>()) {
+          const auto type = location->getType();
+          if (!type.isNull() && (isa<DecltypeType>(type.getTypePtr()) ||
+                                 isa<TypeOfExprType>(type.getTypePtr()))) return true;
+        }
         if (const auto* type = parent.get<Type>())
           if (isa<DecltypeType>(type) || isa<TypeOfExprType>(type) ||
               (isa<FunctionProtoType>(type) &&
@@ -489,8 +508,16 @@ class Proof {
 
   bool run(bool standard) {
     inventory.TraverseDecl(context.getTranslationUnitDecl());
+    std::vector<Operation> wrappedDoubleAdditions;
     for (const auto& item : inventory.operations) {
       if (!input(item.owner)) continue;
+      const bool addition = item.expression->getOpcode() == BO_Add ||
+                            item.expression->getOpcode() == BO_AddAssign;
+      if (addition &&
+          (wrappedDoubleArithmeticType(item.expression->getType(), context) ||
+           wrappedDoubleArithmeticType(plain(item.expression->getLHS())->getType(), context) ||
+           wrappedDoubleArithmeticType(plain(item.expression->getRHS())->getType(), context)))
+        wrappedDoubleAdditions.push_back(item);
       if ((item.expression->getOpcode() == BO_Add || item.expression->getOpcode() == BO_AddAssign) &&
           doubleType(item.expression->getType(), context)) {
         routes.insert(item.owner->getCanonicalDecl());
@@ -533,6 +560,14 @@ class Proof {
       if (!reachable.count(*iterator)) iterator = routes.erase(iterator); else ++iterator;
     for (auto iterator = mathRoutes.begin(); iterator != mathRoutes.end();)
       if (!reachable.count(*iterator)) iterator = mathRoutes.erase(iterator); else ++iterator;
+    // Atomic/complex/vector results need not be DoubleTy. Refuse their double
+    // arithmetic before the ordinary builtin routes-empty exit.
+    // Reuse actual reachability; unused header bodies do not activate a route.
+    // This is refusal only: no wrapped type enters helper/type admission.
+    for (const auto& item : wrappedDoubleAdditions)
+      if (reachable.count(item.owner->getCanonicalDecl()))
+        return fail(item.expression->getOperatorLoc(),
+                    "atomic/complex/vector binary64 +/+= is outside the scalar64 scalar domain");
     if (routes.empty()) return true;
     if (!standard) return fail({}, "scalar64 requires --default-preprocessor");
     bool changed = true;
