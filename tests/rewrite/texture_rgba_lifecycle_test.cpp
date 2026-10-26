@@ -1,5 +1,6 @@
 // RGBA host model for the actual public texture lifecycle. The ACL calls
 // below are test doubles, not real ACL/GM or target execution evidence.
+#define ASCIFY_TEST_CUSTOM_CURRENT_CONTEXT
 #define aclrtMalloc ascify_unused_stub_malloc
 #define aclrtFree ascify_unused_stub_free
 #define aclrtMemcpy ascify_unused_stub_memcpy
