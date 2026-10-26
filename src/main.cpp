@@ -818,6 +818,8 @@ int main(int argc, const char **argv) {
     receiptInput.boundedDeviceTemplateDefinitions = conversionOk
         ? Statistics::current().boundedDeviceTemplateDefinitions : 0;
     if (conversionOk) receiptInput.cudaVec3LayoutEvidence = Statistics::current().cudaVec3LayoutEvidence;
+    if (conversionOk) receiptInput.cudaProfilerAvailabilityEvidence =
+        Statistics::current().cudaProfilerAvailabilityEvidence;
     receiptInput.diagnosticSummary =
         conversionOk
             ? "source conversion completed; later pipeline stages are outside this receipt"

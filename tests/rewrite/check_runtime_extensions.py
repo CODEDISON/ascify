@@ -39,7 +39,7 @@ cases=[
  ('callback_user_empty','#include <cuda_runtime.h>\n#undef CUDART_CB\n#define CUDART_CB\nvoid CUDART_CB done(void*){}\n',['void CUDART_CB done(void*){}'],[],False),
  ('callback_user_attribute','#include <cuda_runtime.h>\n#undef CUDART_CB\n#define CUDART_CB __attribute__((noinline))\nvoid CUDART_CB done(void*){}\n',['void CUDART_CB done(void*){}','__attribute__((noinline))'],[],False),
  ('callback_macro_alias','#include <cuda_runtime.h>\n#define CALLING CUDART_CB\nvoid CALLING done(void*){}\n',['#define CALLING CUDART_CB','void CALLING done(void*){}'],[],False),
- ('profiler_conditional','#include <cuda_runtime.h>\n#if __has_include(<cuda_profiler_api.h>)\n#include <cuda_profiler_api.h>\n#endif\n'+body,[],[],True),
+ ('profiler_conditional','#include <cuda_runtime.h>\n#if __has_include(<cuda_profiler_api.h>)\n#include <cuda_profiler_api.h>\n#endif\n'+body,['__has_include(<acl/acl_prof.h>)','ascify::cudaProfilerStart()','ascify::cudaProfilerStop()','#error "Ascify admitted profiler branch requires the target ACL profiler header"'],['__has_include(<cuda_profiler_api.h>)'],False),
  ('profiler_guard_observation',prof+'#ifdef __CUDA_PROFILER_API_H__\nint observed=1;\n#endif\n'+body,[],[],True),
  ('profiler_guard_inactive',prof+'#if 0\nint __CUDA_PROFILER_API_H__;\n#endif\n'+body,[],[],True),
  ('profiler_inquiry_after',prof+'#if __has_include(<cuda_profiler_api.h>)\nint observed=1;\n#endif\n'+body,[],[],True),
@@ -106,6 +106,10 @@ try:
     assert r.returncode==0,(name,r.stderr)
     text=out.read_text(); assert all(x in text for x in expected),(name,text,expected)
     assert not any(x in text for x in absent),(name,text,absent)
+    if name=='profiler_conditional':
+     proof=json.loads(receipt.read_text())['inputs'][0]['cuda_profiler_availability']
+     assert proof['backend_status']=='unverified' and proof['target_header']=='acl/acl_prof.h',proof
+     assert len(proof['evidence'])==1 and 'sdk_sha256=bb8e03c2' in proof['evidence'][0],proof
     row['output_sha256']=sha(out)
    row['receipt_sha256']=sha(receipt)
   assert sha(cu)==row['input_sha256'];row['passed']=True;save();print(name,'PASS',flush=True)

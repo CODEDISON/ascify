@@ -209,6 +209,45 @@ private:
   bool isAdmittedCudaTextureMacroUse(clang::SourceLocation location);
   bool cudaRuntimeApiHeaderAdmitted = false;
   bool cudaProfilerApiHeaderAdmitted = false;
+  struct ProfilerHasIncludeObservation {
+    clang::SourceLocation location;
+    std::string resolvedPath;
+    const clang::FileEntry *entry = nullptr;
+    bool physicalSdk = false;
+  };
+  struct ProfilerAvailabilityCandidate {
+    clang::FileID file;
+    clang::SourceLocation ifLocation;
+    clang::SourceLocation includeLocation;
+    clang::SourceLocation endifLocation;
+    unsigned operandBegin = 0;
+    unsigned operandEnd = 0;
+    unsigned includeBegin = 0;
+    unsigned endifBegin = 0;
+    unsigned resumeOffset = 0;
+    unsigned flagBegin = 0;
+    std::string flag;
+    std::string sdkPath;
+    const clang::FileEntry *lookupEntry = nullptr;
+    std::set<unsigned> builtinOffsets;
+    bool lookupProved = false;
+    bool includeObserved = false;
+    bool includeMapped = false;
+    bool sdkEntered = false;
+    bool endifObserved = false;
+    bool sealed = false;
+  };
+  std::vector<ProfilerHasIncludeObservation> profilerHasIncludeObservations;
+  std::vector<ProfilerAvailabilityCandidate> profilerAvailabilityCandidates;
+  std::map<std::string, unsigned> profilerMacroDefinitions;
+  std::map<std::string, unsigned> profilerMacroUndefinitions;
+  bool profilerAvailabilityControlModified = false;
+  bool profilerAvailabilityPositionObserved = false;
+  bool profilerAvailabilityProofFailed = false;
+  bool isPhysicalCudaProfilerHeader(llvm::StringRef path,
+                                    const clang::FileEntry *entry = nullptr);
+  bool sealProfilerAvailabilityProof();
+  bool isProvedProfilerAvailabilityToken(clang::SourceLocation location) const;
   bool cudaRuntimeApiBoundaryFailed = false;
   bool cudaRuntimeApiStrictControlModified = false;
   bool cudaRuntimeApiMvsControlModified = false;
@@ -409,6 +448,13 @@ public:
                       llvm::StringRef directive);
   void ConditionalDirectiveEntered();
   void ConditionalDirectiveEnded();
+  void HasInclude(clang::SourceLocation location, llvm::StringRef filename,
+                  bool angled, const clang::FileEntry *entry,
+                  llvm::StringRef resolvedPath);
+  void If(clang::SourceLocation location, clang::SourceRange condition,
+          clang::PPCallbacks::ConditionValueKind value);
+  void Else(clang::SourceLocation location, clang::SourceLocation ifLocation);
+  void Endif(clang::SourceLocation location, clang::SourceLocation ifLocation);
   void Defined(const clang::Token &MacroNameTok,
                const clang::MacroDefinition &MD,
                clang::SourceRange Range);
