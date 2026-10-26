@@ -9465,7 +9465,8 @@ bool AscifyAction::auditCudaProfilerApiSurface() {
         if (name == "__CUDA_PROFILER_API_H__" || name == "__has_include" ||
             name == "__has_include_next" || name == "_Pragma" ||
             name == "__pragma" || name == "push_macro" || name == "pop_macro" ||
-            (!profilerAvailabilityCandidates.empty() && name == "__LINE__"))
+            (!profilerAvailabilityCandidates.empty() && name == "__LINE__" &&
+             file == profilerAvailabilityCandidates.front().file))
           return reject(token.getLocation());
       } else if (token.is(clang::tok::string_literal)) {
         const auto literal = clang::Lexer::getSpelling(token, source, compiler.getLangOpts());
