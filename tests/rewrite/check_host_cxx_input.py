@@ -43,7 +43,8 @@ def main():
 
         def run(name, source_text=HOST, *, tool=(), flags=('-x', 'c++'),
                 good=True, diagnostic='', suffix='.cpp', headers=None,
-                compile_host=False, database=None, exact=False):
+                compile_host=False, database=None, exact=False,
+                runtime_overlay=False):
             nonlocal count
             directory = work / name
             directory.mkdir()
@@ -56,6 +57,17 @@ def main():
                 header.parent.mkdir(parents=True, exist_ok=True)
                 header.write_text(text)
                 paths.append(header)
+            overlay = None
+            if runtime_overlay:
+                shadow = directory / 'shadow_cuda_runtime.h'
+                shadow.write_text('struct cudaArray;\n'
+                                  'typedef unsigned long long cudaTextureObject_t;\n')
+                overlay = directory / 'runtime_overlay.json'
+                overlay.write_text(json.dumps({'version': 0, 'use-external-names': False, 'roots': [{
+                    'type': 'file', 'name': str(cuda / 'include/cuda_runtime.h'),
+                    'external-contents': str(shadow),
+                }]}))
+                paths.extend((shadow, overlay))
             # Prove __FILE__ at the real source identity, even though the
             # resulting C++ is later written to a different output path.
             if name == 'original_identity':
@@ -76,6 +88,8 @@ def main():
                 argv = base + [str(source), '-p', str(directory), '-o', str(output), *tool]
                 if flags is not None:
                     argv += ['--', *flags]
+            if overlay is not None:
+                argv += ['-ivfsoverlay', str(overlay)]
             result = subprocess.run(argv, text=True, capture_output=True, timeout=120)
             assert {str(p): digest(p) for p in paths} == before, (name, 'input changed')
             assert (result.returncode == 0) == good, (name, argv, result.stdout, result.stderr)
@@ -148,6 +162,59 @@ def main():
         _, relative_output, _ = run('relative_explicit_runtime',
             '#include <cuda_runtime.h>\ncudaError_t release(void *p) { return cudaFree(p); }\n')
         assert 'ascify::cudaFree(p)' in relative_output.read_text()
+
+        # A selected physical header is reparsed as a host-C++ main file.
+        # Its proved whole-file guard is one structural level, not an
+        # arbitrary preprocessing condition or a new source of SDK identity.
+        texture_declarations = ('extern "C" void consume_texture(cudaArray*, '
+                                'cudaTextureObject_t);\n')
+        runtime_include = '#include <cuda_runtime.h>\n'
+        texture_body = runtime_include + texture_declarations
+        outer_prefix = '#ifndef HOST_TEXTURE_DECLS\n#define HOST_TEXTURE_DECLS\n'
+        guarded_texture = outer_prefix + texture_body + '#endif\n'
+        for name, header_text in (
+                ('guarded_runtime_texture_header', guarded_texture),
+                ('guarded_runtime_quote_header', guarded_texture.replace(
+                    '<cuda_runtime.h>', '"cuda_runtime.h"'))):
+            _, output, _ = run(name, '#include "detail/texture_decls.h"\n',
+                tool=('--local-headers-recursive',),
+                headers={'detail/texture_decls.h': header_text})
+            emitted = list(Path(str(output) + '.headers').rglob('texture_decls.h.dpp'))
+            assert len(emitted) == 1, (name, emitted)
+            text = emitted[0].read_text()
+            assert outer_prefix in text and '#endif' in text, (name, text)
+            assert '#include <cuda_runtime.h>' not in text and '#include "cuda_runtime.h"' not in text
+            assert 'ascify::cudaArray*' in text and 'ascify::cudaTextureObject_t' in text, (name, text)
+
+        for name, header_text in (
+                ('guarded_runtime_arbitrary_if', '#if 1\n' + texture_body + '#endif\n'),
+                ('guarded_runtime_nested_if', outer_prefix + '#if 1\n' + texture_body + '#endif\n#endif\n'),
+                ('guarded_runtime_redefined_guard', outer_prefix +
+                    '#undef HOST_TEXTURE_DECLS\n#define HOST_TEXTURE_DECLS\n' + texture_body + '#endif\n'),
+                ('guarded_runtime_digraph_mutation', outer_prefix +
+                    '%:undef HOST_TEXTURE_DECLS\n#define HOST_TEXTURE_DECLS\n' + texture_body + '#endif\n'),
+                ('guarded_runtime_macro_stack', outer_prefix +
+                    '#pragma push_macro("HOST_TEXTURE_DECLS")\n' + texture_body +
+                    '#pragma pop_macro("HOST_TEXTURE_DECLS")\n#endif\n'),
+                ('guarded_runtime_tail_observer', guarded_texture +
+                    '#ifdef HOST_TEXTURE_DECLS\nint observed_guard = 1;\n#endif\n')):
+            run(name, '#include "detail/texture_decls.h"\n',
+                tool=('--local-headers-recursive',),
+                headers={'detail/texture_decls.h': header_text}, good=False,
+                diagnostic='texture name is not owned by the admitted CUDA SDK')
+        run('guarded_runtime_caller_main', guarded_texture, good=False,
+            diagnostic='texture name is not owned by the admitted CUDA SDK')
+        run('guarded_runtime_shadow_path', '#include "detail/texture_decls.h"\n',
+            tool=('--local-headers-recursive',),
+            headers={'detail/texture_decls.h': guarded_texture.replace(
+                '<cuda_runtime.h>', '"cuda_runtime.h"'),
+                'detail/cuda_runtime.h': 'struct cudaArray;\n'
+                    'typedef unsigned long long cudaTextureObject_t;\n'}, good=False,
+            diagnostic='texture name is not owned by the admitted CUDA SDK')
+        run('guarded_runtime_vfs_override', '#include "detail/texture_decls.h"\n',
+            tool=('--local-headers-recursive',),
+            headers={'detail/texture_decls.h': guarded_texture}, runtime_overlay=True,
+            good=False, diagnostic='Ascify cannot translate input selected by VFS overlay arguments')
 
         header = '#ifndef HOST_LEAF\n#define HOST_LEAF\n' + HOST + '#endif\n'
         _, output, _ = run('local_cuh_inherits_host', '#include "detail/leaf.cuh"\n',

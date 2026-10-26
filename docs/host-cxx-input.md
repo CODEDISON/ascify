@@ -34,6 +34,13 @@ uses normal conditional preprocessing and rejects `--amap`. An explicit
 normal semantic conversion. `--cuda-path` locates its include directory in
 host mode; it does not force that header into a TU.
 
+A selected local header may directly include the physical Runtime umbrella
+inside its ordinary whole-file `#ifndef`/`#define` guard. This uses the same
+complete-guard proof as `cuda_runtime_api.h`: extra conditions, guard mutation,
+macro-stack operations, trailing guard observations, caller-main guards and
+virtual-input substitutions do not qualify. The physical SDK identity and
+existing AST, ABI and publication checks still apply.
+
 Explicit compiler CUDA/device flags, forwarded frontend arguments and command
 line CUDA language predefines conflict with host mode and fail. They are not
 silently removed. A `.cu` root requested as host is rejected, even when its

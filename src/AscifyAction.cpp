@@ -4904,12 +4904,22 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
       includeToken.getIdentifierInfo()->getName() == "include")
     redundantCubIncludeCandidates.push_back(
         {hash_loc, filenameBegin, filenameEnd, resolved_file_name.str()});
+  // A selected physical header is parsed as its own main file. Treat only a
+  // proved complete outer guard as structural, for both Runtime entry points.
+  // A caller main, virtual contextual input or extra condition is unchanged.
+  const bool guardedLocalRuntimeRoot =
+      (file_name == "cuda_runtime.h" || file_name == "cuda_runtime_api.h") &&
+      preprocessorConditionalDepth == 1 && localHeaderContext != nullptr &&
+      localHeaderContext->plan != nullptr && localHeaderContext->depth != 0 &&
+      localHeaderContext->virtualInput == nullptr &&
+      hasCompleteMainOuterGuard(getCompilerInstance());
   // This is only an additional physical SDK provenance root. It does not
   // enable the broader Runtime-header projection or exempt any AST/layout,
   // macro-observation, transitive dependency or publication check.
   if (file_name == "cuda_runtime.h" && !getCompilerInstance().getLangOpts().CUDA &&
       !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks &&
-      directRange && directSpelling && preprocessorConditionalDepth == 0 &&
+      directRange && directSpelling &&
+      (preprocessorConditionalDepth == 0 || guardedLocalRuntimeRoot) &&
       module == nullptr && !getCompilerInstance().getLangOpts().Modules &&
       includeToken.getIdentifierInfo() != nullptr &&
       includeToken.getIdentifierInfo()->getName() == "include" &&
@@ -4925,13 +4935,8 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
     // A recursive closure translates a selected header as its own main file.
     // Its ordinary whole-file guard is preserved in the emitted header. No
     // arbitrary main-TU condition or nested local condition is admitted here.
-    const bool guardedLocalHeader =
-        preprocessorConditionalDepth == 1 && localHeaderContext != nullptr &&
-        localHeaderContext->plan != nullptr && localHeaderContext->depth != 0 &&
-        localHeaderContext->virtualInput == nullptr &&
-        hasCompleteMainOuterGuard(getCompilerInstance());
     if (!directRange || !directSpelling ||
-        (preprocessorConditionalDepth != 0 && !guardedLocalHeader) ||
+        (preprocessorConditionalDepth != 0 && !guardedLocalRuntimeRoot) ||
         !isConfiguredCudaRuntimeApiPath(resolved_file_name, SM)) {
       cudaRuntimeApiBoundaryFailed = true;
       const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
