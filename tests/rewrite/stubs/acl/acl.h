@@ -19,6 +19,9 @@ typedef void* aclrtStream;
 typedef void* aclrtEvent;
 typedef void (*aclrtHostFunc)(void*);
 aclError aclrtLaunchHostFunc(aclrtStream, aclrtHostFunc, void*);
+aclError aclrtDeviceCanAccessPeer(int32_t*, int32_t, int32_t);
+aclError aclrtDeviceEnablePeerAccess(int32_t, uint32_t);
+aclError aclrtDeviceDisablePeerAccess(int32_t);
 
 enum aclrtMemcpyKind {
   ACL_MEMCPY_HOST_TO_HOST,
@@ -74,8 +77,13 @@ extern aclError ascify_test_device_count_status;
 extern aclError ascify_test_synchronize_status;
 extern aclError ascify_test_finalize_status;
 extern bool ascify_test_acl_initialized;
+#if defined(ASCIFY_TEST_ACL_THREAD_LOCAL_DEVICE)
+extern thread_local bool ascify_test_context_bound;
+extern thread_local int32_t ascify_test_current_device;
+#else
 extern bool ascify_test_context_bound;
 extern int32_t ascify_test_current_device;
+#endif
 extern uint32_t ascify_test_device_count;
 extern int ascify_test_init_calls;
 extern int ascify_test_finalize_calls;

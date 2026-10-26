@@ -73,6 +73,9 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   m["cudaGetDevice"]                                           = {"ascify::cudaGetDevice",                                  CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
   m["cudaSetDevice"]                                           = {"ascify::cudaSetDevice",                                  CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
   m["cudaGetDeviceCount"]                                      = {"ascify::cudaGetDeviceCount",                             CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
+  m["cudaDeviceCanAccessPeer"] = {"ascify::cudaDeviceCanAccessPeer", CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
+  m["cudaDeviceEnablePeerAccess"] = {"ascify::cudaDeviceEnablePeerAccess", CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
+  m["cudaDeviceDisablePeerAccess"] = {"ascify::cudaDeviceDisablePeerAccess", CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
   // CANN uses a different argument order and writes int64_t. Keep CUDA's
   // signature at the call site and adapt it in the compatibility shim.
   m["cudaDeviceGetAttribute"]                                  = {"ascify::cudaDeviceGetAttribute",                         CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};

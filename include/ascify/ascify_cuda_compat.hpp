@@ -845,6 +845,46 @@ inline aclError cudaGetDeviceCount(int* count) {
   return detail::rememberLifecycleError(status);
 }
 
+// Peer queries name both devices and must not select a different current
+// device. ACL writes int32_t, while CUDA exposes int: commit that result only
+// on success, including when a failing backend partially writes its output.
+inline aclError cudaDeviceCanAccessPeer(int* can_access_peer, int device,
+                                       int peer_device) {
+  if (can_access_peer == nullptr || device < 0 || peer_device < 0) {
+    return ACL_ERROR_RT_PARAM_INVALID;
+  }
+  const aclError initialized = detail::runtime_manager.ensureInitialized();
+  if (initialized != ACL_SUCCESS) {
+    return detail::rememberLifecycleError(initialized);
+  }
+  int32_t result = 0;
+  const aclError status = aclrtDeviceCanAccessPeer(
+      &result, static_cast<int32_t>(device),
+      static_cast<int32_t>(peer_device));
+  if (status == ACL_SUCCESS) { *can_access_peer = static_cast<int>(result); }
+  return detail::rememberLifecycleError(status);
+}
+
+// Enable/disable apply to the calling thread's current device. Reuse the
+// ordinary lazy-context path, including the selected device after a reset;
+// do not switch to the peer device or invent an access-capability result.
+inline aclError cudaDeviceEnablePeerAccess(int peer_device,
+                                          unsigned int flags = 0) {
+  if (peer_device < 0 || flags != 0) { return ACL_ERROR_RT_PARAM_INVALID; }
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  return detail::rememberLifecycleError(aclrtDeviceEnablePeerAccess(
+      static_cast<int32_t>(peer_device), 0U));
+}
+
+inline aclError cudaDeviceDisablePeerAccess(int peer_device) {
+  if (peer_device < 0) { return ACL_ERROR_RT_PARAM_INVALID; }
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  return detail::rememberLifecycleError(
+      aclrtDeviceDisablePeerAccess(static_cast<int32_t>(peer_device)));
+}
+
 inline aclError cudaDeviceSynchronize() {
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }

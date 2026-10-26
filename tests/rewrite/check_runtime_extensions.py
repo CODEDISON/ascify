@@ -51,6 +51,14 @@ cases=[
 ]
 cap='cudaDevAttrComputeCapabilityMajor'
 for name, code, expected, absent in [
+ ('peer_query','int main(){int supported=7;return cudaDeviceCanAccessPeer(&supported,0,1);}', ['ascify::cudaDeviceCanAccessPeer(&supported,0,1)'], []),
+ ('peer_enable_default','int main(){return cudaDeviceEnablePeerAccess(1);}', ['ascify::cudaDeviceEnablePeerAccess(1)'], []),
+ ('peer_enable_flags_once','int main(){unsigned flags=0;return cudaDeviceEnablePeerAccess(1,flags++);}', ['ascify::cudaDeviceEnablePeerAccess(1,flags++)'], []),
+ ('peer_disable','int main(){return cudaDeviceDisablePeerAccess(1);}', ['ascify::cudaDeviceDisablePeerAccess(1)'], []),
+ ('peer_checked','int main(){int supported=7;checkCudaErrors(cudaDeviceCanAccessPeer(&supported,0,1));checkCudaErrors(cudaDeviceEnablePeerAccess(1));checkCudaErrors(cudaDeviceDisablePeerAccess(1));}', ['ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaDeviceCanAccessPeer(&supported,0,1))','ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaDeviceEnablePeerAccess(1))','ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaDeviceDisablePeerAccess(1))'], ['#include <helper_cuda.h>']),
+]:
+ cases.append((name,'#include <cuda_runtime.h>\n'+('#include <helper_cuda.h>\n' if name=='peer_checked' else '')+code+'\n',expected,absent,False))
+for name, code, expected, absent in [
  ('sm_major_selector','int main(){int n=1;return cudaDeviceGetAttribute(&n,'+cap+',0);}', ['::ascify::'+cap], []),
  ('sm_minor_selector','int main(){int n=1;return cudaDeviceGetAttribute(&n,cudaDevAttrComputeCapabilityMinor,0);}', ['::ascify::cudaDevAttrComputeCapabilityMinor'], []),
  ('sm_selector_sizeof','int main(){return sizeof('+cap+');}', ['sizeof('+cap+')'], ['::ascify::'+cap]),

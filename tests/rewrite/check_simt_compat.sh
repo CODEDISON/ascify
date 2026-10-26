@@ -349,6 +349,14 @@ if command -v "$cxx" >/dev/null 2>&1; then
     -o "$test_tmp/runtime-event-query"
   "$test_tmp/runtime-event-query"
 
+  "$cxx" -std=c++17 -pthread \
+    -I"$repo_root/tests/rewrite/stubs" -I"$repo_root/include" \
+    "$repo_root/tests/rewrite/runtime_peer_compat_test.cpp" \
+    -o "$test_tmp/runtime-peer"
+  for peer_case in invalid query lazy borrowed errors init-failure threads; do
+    "$test_tmp/runtime-peer" "$peer_case"
+  done
+
   "$cxx" -std=c++17 \
     -I"$repo_root/tests/rewrite/stubs" \
     -I"$repo_root/include" \

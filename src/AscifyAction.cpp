@@ -767,12 +767,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 70413)
+  if (contents.size() != 72333)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "0cc21c39f40d0e56092271c84f570b701638e7a7ac913f09deea7a676e280f08");
+      "170c521ce85826ccd3a5bb972dd3270581cbddb9f66ede2191f425cca79a23b5");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -799,12 +799,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 70413)
+  if (invalidBuffer || contents.size() != 72333)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "0cc21c39f40d0e56092271c84f570b701638e7a7ac913f09deea7a676e280f08");
+      "170c521ce85826ccd3a5bb972dd3270581cbddb9f66ede2191f425cca79a23b5");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -876,6 +876,8 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaLaunchHostFunc",
       "cudaFreeHost", "cudaGetDevice", "cudaSetDevice",
       "cudaGetDeviceCount", "cudaDeviceGetAttribute",
+      "cudaDeviceCanAccessPeer", "cudaDeviceEnablePeerAccess",
+      "cudaDeviceDisablePeerAccess",
       "cudaGetDeviceProperties", "cudaGetDeviceProperties_v2",
       "cudaMemcpyToSymbol", "cudaMemcpyFromSymbol",
       "cudaDeviceSynchronize", "cudaDeviceReset",
@@ -2096,6 +2098,9 @@ static bool requiresCudaCompatHeader(llvm::StringRef name) {
          name == "cudaGetDevice" ||
          name == "cudaSetDevice" ||
          name == "cudaGetDeviceCount" ||
+         name == "cudaDeviceCanAccessPeer" ||
+         name == "cudaDeviceEnablePeerAccess" ||
+         name == "cudaDeviceDisablePeerAccess" ||
          name == "cudaDeviceSynchronize" ||
          name == "cudaDeviceReset" ||
          name == "cudaGetLastError" ||
