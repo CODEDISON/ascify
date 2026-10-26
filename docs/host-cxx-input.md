@@ -60,3 +60,13 @@ For a fixed command, `--extra-arg-before=-xc++` precedes the original arguments;
 in `-- input`, Tooling inserts extra arguments before that separator. A fixed
 command after the tool's `--` takes precedence over database compiler flags;
 the existing `-p` option still supplies the enumerated original input files.
+
+A selected direct header without include directives can inherit a system macro
+actually provided by its host C++ parent. The provider must have an original
+physical system-header identity or match the product-owned Clang resource;
+caller `-isystem` and later system-header pragmas do not confer this identity.
+The header stays at its original include position through the existing exact
+token, final-macro and input-file proof. No macro values or standard headers
+are synthesized. Headers with their own includes remain on ordinary closure
+parsing, including includes skipped because the parent already loaded them.
+Contextual pragma, repeated-include and include-level restrictions still apply.

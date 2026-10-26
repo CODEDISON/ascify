@@ -154,6 +154,9 @@ run_check "real CUDA runtime-API header admission and refusal" \
 run_check "explicit host C++ input and mixed-TU contract" \
   "$python" -B "$rewrite_dir/check_host_cxx_input.py"
 
+run_check "physical parent-system macro host context" \
+  "$python" -B "$rewrite_dir/check_host_system_macro_context.py"
+
 run_check "selected local-header Runtime guard admission and refusal" \
   "$python" -B "$rewrite_dir/check_local_runtime_api_guard.py" \
     --binary "$ASCIFY_BINARY" \

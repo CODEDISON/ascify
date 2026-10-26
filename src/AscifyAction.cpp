@@ -1812,6 +1812,69 @@ static bool isOwnedCudaCompilerInput(clang::FileID file,
   return false;
 }
 
+// This establishes a physical parent-system provider, not general ownership
+// of system declarations. The existing context transaction still proves the
+// original include position, complete token stream, macros and file bytes.
+static bool physicalParentHostSystemMacro(
+    clang::FileID definitionFile, clang::FileID useFile,
+    clang::CompilerInstance &compiler,
+    const std::set<unsigned> &initialSystemFiles) {
+  auto &source = compiler.getSourceManager();
+  if (definitionFile.isInvalid() || useFile.isInvalid() ||
+      definitionFile == useFile ||
+      initialSystemFiles.count(definitionFile.getHashValue()) == 0)
+    return false;
+  const auto begin = source.getLocForStartOfFile(definitionFile);
+  const auto path = source.getFilename(begin);
+  const auto *entry = source.getFileEntryForID(definitionFile);
+  if (entry == nullptr || !source.isInSystemHeader(begin) ||
+      isConfiguredCudaSdkDependencyRole(path) ||
+      !physicalSourceFileMatches(path, *entry, source))
+    return false;
+  const auto &resourceRoot = compiler.getHeaderSearchOpts().ResourceDir;
+  if (pathIsWithinPhysicalDirectory(path, resourceRoot)) {
+    const auto ownedRoot = ownedClangResourceDirectory();
+    llvm::SmallString<256> physicalRoot, physicalFile;
+    if (ownedRoot.empty() ||
+        llvm::sys::fs::real_path(resourceRoot, physicalRoot) ||
+        llvm::sys::fs::real_path(path, physicalFile))
+      return false;
+    const auto relative = llvm::StringRef(physicalFile).drop_front(
+        physicalRoot.size() + 1);
+    llvm::SmallString<256> reference(ownedRoot);
+    llvm::sys::path::append(reference, relative);
+    const auto expected = llvm::MemoryBuffer::getFile(reference);
+    bool invalid = false;
+    const auto contents = source.getBufferData(definitionFile, &invalid);
+    if (!expected || invalid || contents != (*expected)->getBuffer())
+      return false;
+  } else if (!compiler.getTarget().getTriple().isOSLinux() ||
+             (!pathIsWithinPhysicalDirectory(path, "/usr/include") &&
+              !pathIsWithinPhysicalDirectory(path, "/usr/lib/gcc"))) {
+    return false;
+  }
+  std::set<unsigned> visited;
+  auto file = definitionFile;
+  while (file.isValid() && visited.insert(file.getHashValue()).second) {
+    if (file == useFile)
+      return false;
+    // The original root can intentionally be a verified virtual proof input;
+    // LocalHeader.cpp binds its saved bytes separately. Other ancestors must
+    // still be actual physical files, not a remapped source of the provider.
+    if (file == source.getMainFileID())
+      return true;
+    const auto *ancestor = source.getFileEntryForID(file);
+    const auto name = source.getFilename(source.getLocForStartOfFile(file));
+    if (ancestor == nullptr || !physicalSourceFileMatches(name, *ancestor, source))
+      return false;
+    const auto include = source.getSpellingLoc(source.getIncludeLoc(file));
+    if (!include.isFileID())
+      return false;
+    file = source.getFileID(include);
+  }
+  return false;
+}
+
 static bool isConfiguredCudaRuntimeApiPath(llvm::StringRef path,
                                            clang::SourceManager &source) {
   if (!pathIsWithinConfiguredCudaInclude(path))
@@ -10372,6 +10435,18 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
         // leaf. Decide sibling eligibility only after preprocessing finishes.
         siblingSourceMacroContextUsers.insert(contextualCanonicalPath(
             sourceManager.getFilename(use)));
+      } else if (!getCompilerInstance().getLangOpts().CUDA &&
+                 !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks &&
+                 !macroInfo->isBuiltinMacro() &&
+                 localHeaderContext->plan->isSelectedRootHeader(
+                     sourceManager.getFilename(use).str()) &&
+                 physicalParentHostSystemMacro(
+                     sourceManager.getFileID(definition), sourceManager.getFileID(use),
+                     getCompilerInstance(), trustedSystemFileIds)) {
+        // A later include can prove this header self-contained. Defer the
+        // no-own-include qualification until all original edges are known.
+        systemSourceMacroContextUsers.insert(contextualCanonicalPath(
+            sourceManager.getFilename(use)));
       }
     }
   }
@@ -11832,6 +11907,16 @@ void AscifyAction::EndSourceFileAction() {
       for (const auto &path : siblingSourceMacroContextUsers)
         if (!path.empty() && !inputEvidence->quotedIncludeParents.count(path))
           localHeaderContext->plan->requireInheritedSourceContext(path);
+      for (const auto &path : systemSourceMacroContextUsers) {
+        const bool hasOwnInclude = std::any_of(
+            inputEvidence->originalEdges.begin(), inputEvidence->originalEdges.end(),
+            [&](const LocalHeaderEdge &edge) { return edge.parentSourcePath == path; });
+        // In particular, an angle include may have been FileSkipped because
+        // the root already included it. Definition ancestry alone must not
+        // turn a self-contained header into a contextual one.
+        if (!path.empty() && !hasOwnInclude)
+          localHeaderContext->plan->requireInheritedSourceContext(path);
+      }
     }
     class ParentSourceDependencies
         : public clang::RecursiveASTVisitor<ParentSourceDependencies> {
