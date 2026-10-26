@@ -124,9 +124,11 @@ std::string MigrationReceipt::toJson() const {
       sortedInputs.begin(), sortedInputs.end(),
       [](const MigrationReceiptInput &lhs, const MigrationReceiptInput &rhs) {
         return std::tie(lhs.input, lhs.resolvedInput, lhs.output, lhs.status,
-                        lhs.stage, lhs.diagnosticSummary, lhs.boundedDeviceTemplateDefinitions) <
+                        lhs.stage, lhs.diagnosticSummary, lhs.boundedDeviceTemplateDefinitions,
+                        lhs.cudaVec3LayoutEvidence) <
                std::tie(rhs.input, rhs.resolvedInput, rhs.output, rhs.status,
-                        rhs.stage, rhs.diagnosticSummary, rhs.boundedDeviceTemplateDefinitions);
+                        rhs.stage, rhs.diagnosticSummary, rhs.boundedDeviceTemplateDefinitions,
+                        rhs.cudaVec3LayoutEvidence);
       });
 
   std::ostringstream out;
@@ -177,6 +179,12 @@ std::string MigrationReceipt::toJson() const {
     out << ",\n      \"bounded_device_template_inlining\": {\"rule\": "
            "\"int-nttp-scalar-dag-v1\", \"definitions\": "
         << input.boundedDeviceTemplateDefinitions << '}';
+    out << ",\n      \"cuda_vec3_local_layout\": {\"rule\": \"closed-scalar-local-v1\", \"evidence\": [";
+    for (std::size_t item = 0; item < input.cudaVec3LayoutEvidence.size(); ++item) {
+      if (item != 0) out << ',';
+      writeJsonString(out, input.cudaVec3LayoutEvidence[item]);
+    }
+    out << "]}";
     out << "\n    }";
     if (index + 1 != sortedInputs.size())
       out << ',';

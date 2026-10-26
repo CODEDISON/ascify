@@ -43,6 +43,8 @@ run_check "registered symbol copy argument and error contracts" \
   bash "$rewrite_dir/check_symbol_compat.sh"
 run_check "private device copy representation and size contracts" \
   sh "$rewrite_dir/check_device_memory_compat.sh"
+run_check "CUDA vec3 explicit record host layout" \
+  sh "$rewrite_dir/check_cuda_vec3_layout_host.sh"
 run_check "half2 parser ADL and dependent builtin lookup" \
   "$python" -B tests/rewrite/check_half2_parse_lookup.py
 run_check "host float max semantic admission" \
@@ -57,6 +59,8 @@ run_check "unsigned texture host arithmetic and type rejection" \
   sh "$rewrite_dir/check_texture_unsigned_host.sh"
 run_check "ordinary malloc texture ownership and lifecycle" \
   sh "$rewrite_dir/check_texture_malloc_host.sh"
+run_check "RGBA texture host arithmetic, ABI and lifecycle" \
+  sh "$rewrite_dir/check_texture_rgba_host.sh"
 run_check "dependent sample-helper emitted type domain" \
   "$python" -B "$rewrite_dir/check_sample_helper_template_domain.py"
 run_check "narrow cooperative-groups compatibility contract" \
@@ -146,6 +150,9 @@ run_check "real CUDA runtime-API header admission and refusal" \
     --binary "$ASCIFY_BINARY" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+
+run_check "explicit host C++ input and mixed-TU contract" \
+  "$python" -B "$rewrite_dir/check_host_cxx_input.py"
 
 run_check "selected local-header Runtime guard admission and refusal" \
   "$python" -B "$rewrite_dir/check_local_runtime_api_guard.py" \

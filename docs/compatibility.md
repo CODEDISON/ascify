@@ -306,10 +306,11 @@ Texture projection may retain the uninstantiated SFINAE utilities in the two
 exact product CG headers. Each physical inclusion must preserve the CUDA
 controls, the verified SDK device-attribute expansion chain, and the global
 `cooperative_groups` namespace. Foreign macro expansions or control changes
-keep the texture audit closed. This exception does not admit caller templates
-or skip SDK layout observations. The separate full Runtime rule described
-above additionally tracks original template patterns versus instantiations;
-it admits only the main CG header, not the reduction header.
+keep the texture audit closed. This exception does not admit caller templates,
+skip concrete template instances or SDK layout observations. The separate
+full Runtime rule described above additionally tracks original template
+patterns versus instantiations; it admits only the main CG header, not
+the reduction header.
 
 The current profile includes thread-block operations, a restricted 32-thread
 tile, typed reductions, and a distinct scratch-reduction projection. Target

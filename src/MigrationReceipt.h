@@ -57,6 +57,7 @@ struct MigrationReceiptInput {
   MigrationReceiptStage stage = MigrationReceiptStage::InputResolution;
   std::string diagnosticSummary;
   unsigned boundedDeviceTemplateDefinitions = 0;
+  std::vector<std::string> cudaVec3LayoutEvidence = {};
 };
 
 class MigrationReceipt {

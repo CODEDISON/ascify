@@ -45,7 +45,9 @@ int main() {
   descriptor.width = 4;
   descriptor.height = 2;
   descriptor.layers = 1;
-  descriptor.unsigned_element = 1;
+  descriptor.unsigned_element = ascify::detail::TextureSampleUnsigned;
+  descriptor.abi_version = ascify::detail::TextureDescriptorVersion;
+  descriptor.linear = ascify::detail::TextureFilterPoint;
   descriptor.error = reinterpret_cast<uint64_t>(&error);
   const auto token = reinterpret_cast<ascify::cudaTextureObject_t>(&descriptor);
 
@@ -90,15 +92,15 @@ int main() {
   rejects(0.0f, 0.0f, 2);
   rejects(std::numeric_limits<float>::infinity(), 0.0f, 0);
   rejects(0.0f, std::numeric_limits<float>::quiet_NaN(), 0);
-  descriptor.linear = 1;
+  descriptor.linear = ascify::detail::TextureFilterLinear;
   rejects(0.0f, 0.0f, 0);
-  descriptor.linear = 0;
+  descriptor.linear = ascify::detail::TextureFilterPoint;
   descriptor.width = 0;  // Existing released-backing invalidation contract.
   rejects(0.0f, 0.0f, 0);
   descriptor.width = 4;
-  descriptor.unsigned_element = 0;
+  descriptor.unsigned_element = ascify::detail::TextureSampleFloat;
   rejects(0.0f, 0.0f, 0);
-  descriptor.unsigned_element = 1;
+  descriptor.unsigned_element = ascify::detail::TextureSampleUnsigned;
   error = 0;
   assert(std::isnan(ascify::tex2DLayered<float>(token, 0.0f, 0.0f, 0)));
   assert(error == 1);
@@ -110,7 +112,7 @@ int main() {
   assert(error == 1);  // Wrong 2D wrapper for layered storage.
   assert(std::memcmp(data, original, sizeof(data)) == 0);
 
-  // The float path and its default tag still preserve the existing sampler.
+  // The float path uses the v2 float tag and preserves its numerical behavior.
   const float floats[] = {2.0f, 6.0f, 10.0f, 14.0f};
   descriptor = {};
   descriptor.data = reinterpret_cast<uint64_t>(floats);
@@ -118,7 +120,9 @@ int main() {
   descriptor.layer_bytes = 4 * sizeof(float);
   descriptor.width = descriptor.height = 2;
   descriptor.layers = 1;
-  descriptor.linear = 1;
+  descriptor.linear = ascify::detail::TextureFilterLinear;
+  descriptor.unsigned_element = ascify::detail::TextureSampleFloat;
+  descriptor.abi_version = ascify::detail::TextureDescriptorVersion;
   descriptor.error = reinterpret_cast<uint64_t>(&error);
   error = 0;
   assert(ascify::tex2D<float>(token, 1.0f, 1.0f) == 8.0f);

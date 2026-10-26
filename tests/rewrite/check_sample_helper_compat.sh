@@ -174,6 +174,7 @@ if command -v "$raw_token_clang" >/dev/null 2>&1; then
     "$repo_root/include/ascify/masked_warp_compat.hpp" \
     "$repo_root/include/ascify/device_contract_reject.hpp" \
     "$repo_root/include/ascify/device_memory_compat.hpp" \
+    "$repo_root/include/ascify/cuda_vec3_layout.hpp" \
     "$repo_root/include/ascify/cooperative_groups_compat.hpp" \
     "$repo_root/include/ascify/texture_types.hpp" \
     "$repo_root/include/ascify/texture_sampling.hpp" \

@@ -57,6 +57,7 @@ if(NOT ASCIFY_CLANG_TESTS_ONLY)
     src/DavC310TargetRecipe.cpp
     src/DeviceMemoryLowering.cpp
     src/FrontendCompatibility.cpp
+    src/FrontendLanguage.cpp
     src/ImplicitCudaHeaders.cpp
     src/LLVMCompat.cpp
     src/LocalHeader.cpp

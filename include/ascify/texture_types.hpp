@@ -4,6 +4,27 @@
 
 namespace ascify {
 
+namespace detail {
+template<typename T> struct textureRGBAElementType : std::false_type {};
+template<typename T> struct textureRGBAFloatType : std::false_type {};
+// CCEC supplies these native vector types in both halves of pure-SIMT
+// compilation. Merely finding vector_functions.h in a host include directory
+// does not prove that they exist. Plain C++ and the public-8.5 family keep the
+// scalar-only surface, without synthetic vector declarations.
+#if defined(ASCIFY_SIMT_LEGACY_HAS_VECTOR_CONSTRUCTORS) && \
+    defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
+static_assert(sizeof(uchar4) == 4 && alignof(uchar4) == 4,
+              "RGBA8 texture requires native four-byte uchar4 ABI");
+static_assert(sizeof(float4) == 16 && alignof(float4) == 16,
+              "RGBA8 normalized texture requires native float4 ABI");
+template<> struct textureRGBAElementType<uchar4> : std::true_type {};
+template<> struct textureRGBAFloatType<float4> : std::true_type {};
+#endif
+template<typename T> struct textureFetchType : std::integral_constant<bool,
+    std::is_same<T,float>::value || std::is_same<T,unsigned int>::value ||
+    textureRGBAElementType<T>::value || textureRGBAFloatType<T>::value> {};
+} // namespace detail
+
 // Explicit, bounded adapter types. The converter must prove SDK ownership
 // before publishing these names. No arbitrary SDK record-layout reflection
 // is admitted by declaring these structurally similar types.
@@ -92,9 +113,12 @@ inline cudaChannelFormatDesc cudaCreateChannelDesc(
 template<typename T>
 inline cudaChannelFormatDesc cudaCreateChannelDesc() {
   static_assert(std::is_same<T, float>::value ||
-                std::is_same<T, unsigned int>::value,
-                "Ascify texture channels require float32 or unsigned int32");
+                std::is_same<T, unsigned int>::value ||
+                detail::textureRGBAElementType<T>::value,
+                "Ascify texture channels require float32, unsigned int32 or native uchar4");
   static_assert(sizeof(unsigned int) == 4, "texture unsigned int channel width");
+  if constexpr (detail::textureRGBAElementType<T>::value)
+    return {8, 8, 8, 8, cudaChannelFormatKindUnsigned};
   return {32, 0, 0, 0, std::is_same<T, unsigned int>::value
       ? cudaChannelFormatKindUnsigned : cudaChannelFormatKindFloat};
 }

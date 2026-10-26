@@ -35,6 +35,26 @@ for supported domains and experimental paths.
   with requested-size, ownership and lifetime checks. This path awaits target
   validation and adds no original sample acceptance by itself.
 
+- Bounded synchronous `cudaMemcpy2DToArray` rectangles for the registered F32,
+  U32 and RGBA8 array formats, with explicit H2D/D2D, whole-texel offsets and
+  preserved row padding. New candidate and original Sample validation are
+  separate from predecessor scalar-copy evidence.
+- Experimental preservation of bounded, physically proved `MAX` fallbacks in
+  the frozen Samples-helper transaction. Both include orders retain the exact
+  original macro body and evaluations; other observations and macro epochs
+  remain rejected. See [the helper contract](docs/sample-helpers.md).
+- Experimental authenticated RGBA8 texture channels: normalized `float4`
+  Point/Linear reads and element-type `uchar4` Point reads on bounded 2D and
+  layered resources. Numerical, coordinate and validation limits are recorded
+  in [the texture contract](docs/texture-compatibility.md); original Sample
+  support is not implied by the source extension.
+- Experimental authenticated CUDA float3/uint3/int3 lowering to explicit 12-byte
+  scalar-local records. Arrays, GM, external ABI, templates and native vec3
+  interoperability remain guarded. See [the bounded contract](docs/cuda-vec3-local-layout.md).
+- Explicit host C++ input mode and compiler `-x c++` selection, retaining AST
+  translation and local-header proofs without implicit CUDA headers or CUDA
+  language predefines. The default without a language remains CUDA; conflicting
+  device options fail. See [the input contract](docs/host-cxx-input.md).
 - Texture projection can retain uninstantiated utilities from the exact selected
   product cooperative-groups profile after physical-input, CUDA-control and
   device-attribute macro proofs. Concrete instances, caller templates and SDK
@@ -76,6 +96,10 @@ for supported domains and experimental paths.
 
 ### Changed
 
+- Private texture descriptor ABI v2 rejects incompatible channel/filter/version
+  tags before texel reads. Rebuild all texture-using TUs, libraries and probes
+  with one complete helper installation and recreate handles, including existing
+  float32/unsigned-int32 consumers. Do not mix old and new descriptor helpers.
 - CLI help, diagnostics, and dependencies consistently describe CUDA-to-Ascend
   conversion. Inactive legacy switches and unimplemented generators were removed.
 - Standalone CMake builds respect the selected compiler and use target-scoped
@@ -113,3 +137,5 @@ for supported domains and experimental paths.
 - Order owned runtime cleanup after initialization and device binding.
 - Propagate selected Hybrid launch failures without launching the SIMT fallback.
 - Match Hybrid launch memory capacity to the runtime's shared allocations.
+
+- Authenticate a direct literal physical CUDA Runtime umbrella include in host C++ before early texture declarations; retain all SDK dependency and texture use checks. Validate final MAX definitions separately for both CCEC preprocessor tables.

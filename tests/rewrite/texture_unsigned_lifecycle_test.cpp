@@ -73,7 +73,10 @@ static ascify::cudaTextureDesc point_texture() {
 static void check_descriptor(ascify::cudaTextureObject_t token, bool layered) {
   const auto *descriptor = reinterpret_cast<const ascify::detail::TextureSamplingDescriptor *>(token);
   assert(allocations.at(const_cast<ascify::detail::TextureSamplingDescriptor *>(descriptor)) == 96);
-  assert(descriptor->unsigned_element == 1 && descriptor->layered == layered);
+  assert(descriptor->unsigned_element == ascify::detail::TextureSampleUnsigned &&
+         descriptor->layered == layered);
+  assert(descriptor->abi_version == ascify::detail::TextureDescriptorVersion &&
+         descriptor->linear == ascify::detail::TextureFilterPoint);
   assert(descriptor->error == token + 72);
   assert(*reinterpret_cast<const uint32_t *>(descriptor->error) == 0);
 }

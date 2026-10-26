@@ -136,6 +136,21 @@ private:
       nvidiaSampleFindDeviceCandidates;
   std::vector<NvidiaSampleExpandedMacroCandidate> nvidiaSampleExpandedMacros;
   std::vector<SemanticRewriteRange> nvidiaSampleMacroObservationRanges;
+  struct PreservedMaxFallback {
+    clang::SourceLocation guardName;
+    clang::SourceLocation definitionName;
+    SemanticRewriteRange range;
+    std::string parameterLeft, parameterRight;
+    std::vector<std::string> replacementTokens;
+    bool originallyActive = false;
+  };
+  std::vector<PreservedMaxFallback> preservedMaxFallbacks;
+  std::set<unsigned> preservedMaxTokenLocations;
+  std::vector<SemanticRewriteRange> preservedMaxInvocationRanges;
+  const clang::MacroInfo *preservedMaxProvider = nullptr;
+  bool preservedMaxProviderIsCaller = false;
+  bool preservedMaxNeeded = false;
+  bool preservedMaxReplayRequired = false;
   std::vector<NvidiaSampleTemplateGuard> nvidiaSampleTemplateGuards;
   std::vector<NvidiaSampleInactiveBranch> nvidiaSampleInactiveBranches;
   std::vector<SemanticRewriteRange> provenKernelAttributeCalleeRanges;
@@ -186,6 +201,7 @@ private:
   ascify::DavC310TargetRecipe davC310TargetRecipe;
   bool firstHeader = false;
   bool needsCudaCompatHeader = false;
+  bool needsCudaVec3LayoutHeader = false;
   bool needsCudaTextureHeader = false;
   std::set<unsigned> cudaTextureLiteralOffsets;
   std::set<unsigned> cudaTextureRequiredHelperOffsets;
@@ -197,6 +213,7 @@ private:
   bool cudaRuntimeApiMvsControlModified = false;
   clang::SourceLocation cudaRuntimeApiSdkIdentityFailure;
   std::set<unsigned> cudaRuntimeApiSdkFileIds;
+  std::set<unsigned> hostCudaRuntimeLiteralRootLines;
   std::set<std::string> cudaRuntimeApiSdkMacros;
   std::set<std::string> cudaRuntimeApiExternalMacroUses;
   struct RuntimeCgMacroObservation {
@@ -284,6 +301,16 @@ private:
   bool isDirectFrozenFunctionsImageProviderInstance(
       clang::SourceLocation imageLocation);
   bool admitFrozenHelperMaxFallback(const clang::Token &macroNameToken);
+  bool ownedPreservedMaxLocation(clang::SourceLocation location);
+  bool recordPreservedMaxFallback(const clang::Token &macroNameToken,
+                                  const clang::MacroDefinition &definition);
+  bool recordPreservedMaxDefinition(const clang::Token &macroNameToken);
+  bool admitPreservedMaxExpansion(const clang::Token &macroNameToken,
+                                  const clang::MacroDefinition &definition,
+                                  clang::SourceRange range,
+                                  const clang::MacroArgs *arguments);
+  void auditRawPreservedMaxTokens(clang::FileID file);
+  bool provePreservedMaxFinalState();
   void finalizeNvidiaSampleHelperClosure();
   // Calculate str's SourceLocation in SourceRange sr
   clang::SourceLocation GetSubstrLocation(const std::string &str, const clang::SourceRange &sr);
