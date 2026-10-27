@@ -8939,6 +8939,9 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
   scalar64Plan = {};
   nttpVoidCallPlan = {};
   directImageWitness = {};
+  directImageUtilityMacroUses.clear();
+  directImageUtilityControls.clear();
+  directImageUtilityInvalid = false;
   originalCgInputs.clear();
   originalCgIncludes.clear();
   originalCgSdkRoot.clear();
