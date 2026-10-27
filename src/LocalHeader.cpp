@@ -774,6 +774,18 @@ bool LocalHeaderClosurePlan::verifyContextInputs() {
       return false;
     }
   }
+  for (const auto &provider : contextEvidence_.providerIdentities) {
+    llvm::sys::fs::file_status status;
+    const auto size = contextEvidence_.providerSizes.find(provider.first);
+    if (size == contextEvidence_.providerSizes.end() ||
+        llvm::sys::fs::status(provider.first, status) ||
+        status.getUniqueID().getDevice() != provider.second.first ||
+        status.getUniqueID().getFile() != provider.second.second ||
+        status.getSize() != size->second) {
+      fail("contextual original SDK provider identity changed: " + provider.first);
+      return false;
+    }
+  }
   return !failed_;
 }
 
@@ -1156,6 +1168,11 @@ bool ascifySourceWithLocalHeaderClosure(
           originalEvidence.tokenSha256 != jointEvidence.tokenSha256 ||
           originalEvidence.macroSha256 != jointEvidence.macroSha256) {
         plan.fail("contextual local-header expanded tokens or final macro state differ");
+        return false;
+      }
+      if (originalEvidence.providerIdentities != jointEvidence.providerIdentities ||
+          originalEvidence.providerSizes != jointEvidence.providerSizes) {
+        plan.fail("contextual original SDK provider identities changed during joint parse");
         return false;
       }
       if (!jointEvidence.changedPathBinding.empty()) {

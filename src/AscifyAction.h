@@ -115,6 +115,22 @@ private:
   std::set<unsigned> verifiedFrontendHostMathEntryFileIds;
   bool frontendHostMathGuardModified = false;
   std::set<unsigned> verifiedFrontendCgEntryFileIds;
+  struct OriginalCgInput {
+    std::string path;
+    std::string sha256;
+    std::uint64_t device = 0, file = 0, size = 0;
+  };
+  std::vector<OriginalCgInput> originalCgInputs;
+  std::vector<std::string> originalCgIncludes;
+  std::string originalCgSdkRoot;
+  bool originalCgControlChanged = false;
+  bool originalCgInquiry = false;
+  bool proveOriginalCgInclude(clang::SourceLocation location,
+      const clang::Token &includeToken, llvm::StringRef name, bool angled,
+      clang::CharSourceRange filenameRange, llvm::StringRef searchPath,
+      llvm::StringRef resolvedPath,
+      std::string &error);
+  bool sealOriginalCgProviders();
   std::set<unsigned> macroAlteredFrontendCgFileIds;
   bool frontendCgControlModified = false;
   std::set<clang::FileID> enteredSourceFileIds;

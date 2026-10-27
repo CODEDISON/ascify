@@ -202,6 +202,54 @@ __device__ void sync(const thread_block&);
     yield case('caller_remapped_root', base, accepted=False,
                files={'remapped.cu': base}, remap_file='remapped.cu')
 
+    # New origin checks retain the original 35 fixtures above byte-for-byte.
+    def origin(name, flags=(), accepted=False, files=None, copy=False, source=base,
+               provider='shadow/cooperative_groups.h'):
+        result = case(name, source, accepted=accepted, flags=flags, files=files)
+        result['original_provider'] = provider
+        result['origin_boundary_expected'] = not accepted
+        if copy:
+            result['sdk_copy'] = {'shadow/cooperative_groups.h': 'cooperative_groups.h'}
+        return result
+
+    shadow = {'shadow/cooperative_groups.h': fake}
+    yield origin('origin_system_shadow', ('-isystem', '{case}/shadow'), files=shadow)
+    yield origin('origin_I_byte_copy', ('-I{case}/shadow',), copy=True)
+    yield origin('origin_system_byte_copy', ('-isystem', '{case}/shadow'), copy=True)
+    yield origin('origin_explicit_sdk', ('-I{cuda}/include',), accepted=True,
+                 provider='{cuda}/include/cooperative_groups.h')
+    yield origin('origin_sdk_before_shadow', ('-I{cuda}/include', '-I{case}/shadow'),
+                 accepted=True, files=shadow, provider='{cuda}/include/cooperative_groups.h')
+    yield origin('origin_shadow_before_sdk', ('-I{case}/shadow', '-I{cuda}/include'), files=shadow)
+    repeated = base.replace('#include <cooperative_groups.h>\n',
+                            '#include <cooperative_groups.h>\n#include <cooperative_groups.h>\n')
+    yield origin('origin_repeated_sdk', accepted=True, source=repeated,
+                 provider='{cuda}/include/cooperative_groups.h')
+    for name, source, flags in [
+        ('origin_guard_observation', base + '#ifdef _COOPERATIVE_GROUPS_H_\nint guard_seen;\n#endif\n', ()),
+        ('origin_abi_cli', base, ('-D_CG_ABI_VERSION=2',)),
+        ('origin_control_alias', '#define CALLER_Q _CG_QUALIFIER\n' + base, ()),
+        ('origin_late_restore', base + '#undef _CG_ABI_VERSION\n#define _CG_ABI_VERSION 2\n#undef _CG_ABI_VERSION\n', ()),
+        ('origin_raw_inactive', base + '#if 0\n_CG_VERSION\n#endif\n', ()),
+        ('origin_stack_restore', '#pragma push_macro("_CG_ABI_VERSION")\n' + base +
+         '#pragma pop_macro("_CG_ABI_VERSION")\n', ()),
+        ('origin_include_next', base.replace('#include <cooperative_groups.h>',
+                                             '#include_next <cooperative_groups.h>'), ()),
+        ('origin_has_include', '#if __has_include(<cooperative_groups.h>)\nint cg_available;\n#endif\n' + base, ()),
+    ]:
+        yield origin(name, flags, source=source, provider='{cuda}/include/cooperative_groups.h')
+    yield dict(case('origin_no_profile_control', '#include <cuda_runtime.h>\nint untouched=7;\n',
+                    needs=False, qualifiers=()), profile='none')
+    # Selection by physical product identity must not bypass the spelling and
+    # original-provider contract, including preprocessor forced includes.
+    for name, source, flags in [
+        ('origin_product_alias', base.replace('#include <cooperative_groups.h>', '#include <H>'), ()),
+        ('origin_forced_product_alias', base.replace('#include <cooperative_groups.h>\n', ''),
+         ('-include', '{case}/H')),
+    ]:
+        yield dict(case(name, source, accepted=False, flags=flags),
+                   product_alias={'H': 'cooperative_groups.h'}, origin_boundary_expected=True)
+
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -295,7 +343,8 @@ def main():
     if cccl_header.is_file():
         before[str(cccl_header)] = sha(cccl_header)
     summary = dict(schema='ascify.nttp-void.frontend-regression.v1', passed=False,
-                   device_executed=False, compiled_target=False, cases=[], inputs=before)
+                   device_executed=False, compiled_target=False, cases=[], inputs=before,
+                   binary_sha256=before[str(args.binary)])
 
     def command(argv, path):
         (path.with_suffix('.argv.json')).write_text(json.dumps(argv, indent=2) + '\n')
@@ -311,10 +360,27 @@ def main():
             source = directory / 'input.cu'
             source.write_text(case['source'])
             for name, text in case['files'].items():
-                (directory / name).write_text(text)
-            inputs = {str(p): sha(p) for p in directory.iterdir() if p.is_file()}
+                target = directory / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text)
+            for target, original_header in case.get('sdk_copy', {}).items():
+                copied = directory / target
+                copied.parent.mkdir(parents=True, exist_ok=True)
+                copied.write_bytes((args.cuda_path / 'include' / original_header).read_bytes())
+            aliases = {}
+            for name, role in case.get('product_alias', {}).items():
+                target = (args.binary.parent.parent / 'libexec/ascify/frontend-compat' /
+                          'ascify-admitted-v1' / role).resolve(strict=True)
+                assert target.is_file() and not target.is_symlink(), target
+                alias = directory / name
+                alias.symlink_to(target)
+                aliases[str(alias)] = str(target)
+                before[str(target)] = sha(target)
+            inputs = {str(p): sha(p) for p in directory.rglob('*') if p.is_file()}
+            extra = [flag.replace('{case}', str(directory)).replace('{cuda}', str(args.cuda_path))
+                     for flag in case['flags']]
             language = ['-x', 'cuda', '-std=c++17', '-fgpu-rdc',
-                        '-I' + str(directory), *sdk_flags, *case['flags']]
+                        '-I' + str(directory), *sdk_flags, *extra]
             if 'remap_file' in case:
                 remapped = directory / case['remap_file']
                 assert case['remap_file'] in case['files'] and remapped.is_file()
@@ -322,19 +388,32 @@ def main():
             syntax = [str(args.clang), '--cuda-host-only', '-nocudalib',
                       '--cuda-path=' + str(args.cuda_path), '-Wno-unknown-cuda-version',
                       '-fsyntax-only', *language, str(source)]
+            if 'original_provider' in case:
+                syntax += ['-H']
             original = command(syntax, directory / 'original')
             assert original.returncode == 0, (case['name'], 'original syntax invalid', original.stderr)
+            if 'original_provider' in case:
+                expected_provider = case['original_provider'].replace('{cuda}', str(args.cuda_path))
+                expected_provider = Path(expected_provider)
+                if not expected_provider.is_absolute():
+                    expected_provider = directory / expected_provider
+                selected = re.findall(r'(?m)^\.+ (.+[/\\]cooperative_groups\.h)\s*$', original.stderr)
+                assert selected and Path(selected[0]).resolve(strict=True) == expected_provider.resolve(strict=True), (
+                    case['name'], 'original provider mismatch', selected, str(expected_provider))
             output = directory / 'converted.cce'
             receipt = directory / 'receipt.json'
             convert = [str(args.binary), str(source), '--target-policy=dav-c310-vec',
                        '--target-recipe=none', '--simt-math=precise', '--default-preprocessor',
-                       '--frontend-compat=ascify-admitted-v1', '--cuda-path=' + str(args.cuda_path),
+                       '--frontend-compat=' + case.get('profile', 'ascify-admitted-v1'),
+                       '--cuda-path=' + str(args.cuda_path),
                        '--clang-resource-directory=' + str(args.resource_dir),
                        '--migration-receipt=' + str(receipt)]
             if case['recursive'] or 'local.cuh' in case['files']:
                 convert.append('--local-headers-recursive')
             result = command(convert + ['-o', str(output), '--', *language], directory / 'convert')
             assert all(sha(Path(p)) == value for p, value in inputs.items()), 'fixture mutated'
+            assert all(Path(p).is_symlink() and str(Path(p).readlink()) == target
+                       for p, target in aliases.items()), 'fixture alias mutated'
             record = json.loads(receipt.read_text())
             assert record['status'] == ('succeeded' if case['accepted'] else 'failed'), record
             if case['accepted']:
@@ -359,6 +438,9 @@ def main():
                 # proof. Original syntax has already succeeded independently.
                 assert ('boundary' in result.stderr or 'cooperative' in result.stderr or
                         'profile' in result.stderr), (case['name'], result.stderr)
+                if case.get('origin_boundary_expected'):
+                    assert 'frontend compatibility original CG provider boundary:' in result.stderr, (
+                        case['name'], 'original-provider refusal not exercised', result.stderr)
             summary['cases'].append(dict(name=case['name'], accepted=case['accepted'],
                 source_sha256=inputs[str(source)], original_returncode=original.returncode,
                 convert_returncode=result.returncode, input_unchanged=True,

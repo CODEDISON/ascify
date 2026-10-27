@@ -44,6 +44,9 @@ THE SOFTWARE.
 #include "clang/Basic/TokenKinds.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Lexer.h"
+#include "clang/Lex/DirectoryLookup.h"
+#include "clang/Lex/HeaderSearch.h"
+#include "clang/Lex/LiteralSupport.h"
 #include "clang/Lex/MacroArgs.h"
 #include "clang/Lex/PreprocessorOptions.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
@@ -2018,6 +2021,39 @@ static bool frontendCgControlName(llvm::StringRef name) {
       name == "ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_" ||
       name == "ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_COOPERATIVE_GROUPS_H_" ||
       name == "ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_REDUCE_H_";
+}
+
+// Original CUDA 13.4 CG controls, reviewed against the complete registered
+// top/reduce/info/driver_abi/helpers/memory inputs. No SDK MacroInfo authority
+// follows from this list. The supported projection requires caller silence.
+static const std::set<std::string> &originalCgControls() {
+  static const std::set<std::string> names = {
+      "CG_DEBUG", "LOAD_ENVREG", "_CG_ABI_EXPERIMENTAL", "_CG_ABI_VERSION",
+      "_CG_ABORT", "_CG_ASM_PTR_CONSTRAINT", "_CG_ASSERT", "_CG_BEGIN_NAMESPACE",
+      "_CG_CLUSTER_INTRINSICS_AVAILABLE", "_CG_CONCAT_INNER", "_CG_CONCAT_OUTER",
+      "_CG_CONSTEXPR_QUALIFIER", "_CG_CONST_DECL", "_CG_CPP11_FEATURES",
+      "_CG_CUDA_ARCH", "_CG_DEBUG", "_CG_DEPRECATED", "_CG_DRIVER_API_H",
+      "_CG_END_NAMESPACE", "_CG_HAS_CLUSTER_GROUP", "_CG_HAS_FP16_COLLECTIVE",
+      "_CG_HAS_GRID_GROUP", "_CG_HAS_INSTR_ELECT", "_CG_HAS_MATCH_COLLECTIVE",
+      "_CG_HAS_MULTI_GRID_GROUP", "_CG_HAS_RESERVED_SHARED", "_CG_HAS_STL_ATOMICS",
+      "_CG_INFO_H_", "_CG_LIMIT_INCLUDED_DEPENDENCIES", "_CG_NAMESPACE",
+      "_CG_QUALIFIER", "_CG_SKIP_BARRIER_INIT_TARGET", "_CG_STATIC_CONSTEXPR_QUALIFIER",
+      "_CG_STATIC_CONST_DECL", "_CG_STATIC_QUALIFIER", "_CG_STL_NAMESPACE",
+      "_CG_THREAD_SCOPE", "_CG_USER_PROVIDED_SHARED_MEMORY", "_CG_USE_CUDA_STL",
+      "_CG_USE_OWN_TRAITS", "_CG_VERSION", "_COOPERATIVE_GROUPS_HELPERS_H_",
+      "_COOPERATIVE_GROUPS_H_", "_COOPERATIVE_GROUPS_MEMORY_H_",
+      "_COOPERATIVE_GROUPS_REDUCE_H"};
+  return names;
+}
+
+static bool originalCgControlName(llvm::StringRef name) {
+  return originalCgControls().count(name.str()) != 0;
+}
+
+static bool originalCgControlText(llvm::StringRef text) {
+  for (const auto &name : originalCgControls())
+    if (text.contains(name)) return true;
+  return false;
 }
 
 static bool trustedFrontendCgControlOwner(
@@ -4964,6 +5000,9 @@ bool AscifyAction::isPhysicalCudaProfilerHeader(
 void AscifyAction::HasInclude(
     clang::SourceLocation location, llvm::StringRef filename, bool angled,
     const clang::FileEntry *entry, llvm::StringRef resolvedPath) {
+  if (frontendCompatibility.enabled() &&
+      (llvm::sys::path::filename(filename) == "cooperative_groups.h" ||
+       filename.starts_with("cooperative_groups/"))) originalCgInquiry = true;
   if (filename != "cuda_profiler_api.h") return;
   auto &source = getCompilerInstance().getSourceManager();
   if (!source.isWrittenInMainFile(source.getExpansionLoc(location))) return;
@@ -5319,12 +5358,231 @@ bool AscifyAction::sealProfilerAvailabilityProof() {
   return true;
 }
 
+bool AscifyAction::proveOriginalCgInclude(clang::SourceLocation location,
+    const clang::Token &includeToken, llvm::StringRef name, bool angled,
+    clang::CharSourceRange filenameRange, llvm::StringRef searchPath,
+    llvm::StringRef resolvedPath,
+    std::string &error) {
+  if (!frontendCompatibility.enabled()) return true;
+  const auto reject = [&](const char *reason) { error = reason; return false; };
+  llvm::SmallString<256> actual;
+  if (llvm::sys::fs::real_path(resolvedPath, actual)) {
+    if (name == "cooperative_groups.h" || name == "cooperative_groups/reduce.h")
+      return reject("selected CG provider cannot be resolved");
+    return true;
+  }
+  const std::string projectedTop = frontendCompatibility.canonicalRoot + "/cooperative_groups.h";
+  const std::string projectedReduce = frontendCompatibility.canonicalRoot + "/cooperative_groups/reduce.h";
+  const bool actualTop = actual == projectedTop, actualReduce = actual == projectedReduce;
+  if (!actualTop && !actualReduce) return true;
+  if ((actualTop && name != "cooperative_groups.h") ||
+      (actualReduce && name != "cooperative_groups/reduce.h"))
+    return reject("an alias to a product CG parser header has no admitted original provider");
+#if LLVM_VERSION_MAJOR != 23
+  return reject("original CG provider proof requires the reviewed LLVM23 interface");
+#else
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  auto &pp = compiler.getPreprocessor();
+  auto &headers = pp.getHeaderSearchInfo();
+  const auto &options = compiler.getPreprocessorOpts();
+  if (!location.isFileID() || !filenameRange.getBegin().isFileID() ||
+      !filenameRange.getEnd().isFileID() || includeToken.getIdentifierInfo() == nullptr ||
+      includeToken.getIdentifierInfo()->getPPKeywordID() != clang::tok::pp_include ||
+      compiler.getLangOpts().Modules || compiler.getLangOpts().CPlusPlusModules ||
+      !compiler.getHeaderSearchOpts().VFSOverlayFiles.empty() ||
+      !options.RemappedFiles.empty() || !options.RemappedFileBuffers.empty() ||
+      !options.ImplicitPCHInclude.empty() || !options.PCHThroughHeader.empty() ||
+      options.PrecompiledPreambleBytes.first || options.PrecompiledPreambleBytes.second ||
+      !compiler.getFrontendOpts().ModuleFiles.empty() ||
+      compiler.getASTContext().getExternalSource() || headers.getExternalLookup() ||
+      headers.HasIncludeAliasMap())
+    return reject("original CG provider has an unsupported directive, remap, module or PCH context");
+  llvm::SmallString<256> profile, selectedSearch, sdk;
+  if (llvm::sys::fs::real_path(frontendCompatibility.canonicalRoot, profile) ||
+      llvm::sys::fs::real_path(searchPath, selectedSearch) || selectedSearch != profile ||
+      CudaPath.empty()) return reject("original CG provider has no exact profile search binding");
+  sdk = CudaPath.getValue();
+  llvm::sys::path::append(sdk, "include");
+  llvm::SmallString<256> physicalSdk;
+  if (llvm::sys::fs::real_path(sdk, physicalSdk)) return reject("original CG SDK root is not physical");
+  if (!originalCgSdkRoot.empty() && originalCgSdkRoot != physicalSdk)
+    return reject("original CG SDK root changed");
+  unsigned optionCount = 0, directoryCount = 0;
+  for (const auto &entry : compiler.getHeaderSearchOpts().UserEntries) {
+    llvm::SmallString<256> path;
+    if (!llvm::sys::fs::real_path(entry.Path, path) && path == profile) ++optionCount;
+  }
+  clang::ConstSearchDirIterator profileDirectory = nullptr;
+  for (auto iterator = headers.search_dir_begin(); iterator != headers.search_dir_end(); ++iterator) {
+    if (!iterator->isNormalDir()) return reject("original CG lookup does not admit frameworks or header maps");
+    llvm::SmallString<256> path;
+    if (!llvm::sys::fs::real_path(iterator->getName(), path) && path == profile) {
+      ++directoryCount;
+      profileDirectory = iterator;
+    }
+  }
+  if (optionCount != 1 || directoryCount != 1)
+    return reject("original CG lookup requires one unambiguous injected profile directory");
+  // The actual lookup selected this profile, so every eligible prefix already
+  // missed. Query its normal suffix in Clang's order without LookupFileCache,
+  // SearchDirs mutation, PP CurDir changes or entering any candidate file.
+  clang::OptionalFileEntryRef original;
+  for (auto iterator = std::next(profileDirectory); iterator != headers.search_dir_end(); ++iterator) {
+    llvm::StringRef query = name;
+    llvm::SmallString<256> foundSearch, relative, mapped;
+    bool userFramework = false, framework = false, headerMap = false;
+    original = iterator->LookupFile(query, headers, location, &foundSearch, &relative,
+        nullptr, nullptr, userFramework, framework, headerMap, mapped, true);
+    if (userFramework || framework || headerMap || !mapped.empty() || query != name)
+      return reject("original CG lookup was mapped");
+    if (original) break;
+  }
+  if (!original) return reject("original CG SDK provider was not found without the injected profile");
+  llvm::SmallString<256> expected(physicalSdk), candidate;
+  llvm::sys::path::append(expected, name);
+  if (original->getName() != expected ||
+      llvm::sys::fs::real_path(original->getName(), candidate) || candidate != expected)
+    return reject("original CG provider is a caller shadow or another SDK root");
+  llvm::SmallString<256> runtime(physicalSdk);
+  llvm::sys::path::append(runtime, "cuda_runtime_api.h");
+  auto runtimeEntry = source.getFileManager().getFileRef(runtime);
+  if (!runtimeEntry) {
+    llvm::consumeError(runtimeEntry.takeError());
+    return reject("original CG runtime provider is unavailable");
+  }
+  const auto runtimeFile = source.translateFile(&runtimeEntry->getFileEntry());
+  if (runtimeFile.isInvalid() || !cudaRuntimeApiSdkFileIds.count(runtimeFile.getHashValue()) ||
+      !isConfiguredCudaRuntimeApiPath(runtime, source))
+    return reject("original CG provider has no authenticated parsed runtime-api owner");
+  struct Role { const char *path; std::uint64_t size; const char *sha256; };
+  static const Role roles[] = {
+      {"cuda_runtime_api.h", 669895, "2c6732345e9662d91733f5e45fa9c76c955640ef02c4bf17ceb7f1bcc209d3de"},
+      {"cooperative_groups.h", 55405, "64f650713034bfb355c12c5d64ce12efbd03a01efcfd67a76f2e2c8fa37376da"},
+      {"cooperative_groups/reduce.h", 2949, "0748600e4a8cfbab9ea934e06f76f7e00d111f8bc6cfc9817f97b68d3d5d275a"},
+      {"cooperative_groups/details/info.h", 12465, "14eae9dcbb6de0f71b2b67c0339517f63b2c159b63fcba954a1ccb15c2a249a6"},
+      {"cooperative_groups/details/driver_abi.h", 3964, "bfe6546f852018a264e8d4765825870f7c7fe36cbeb68808d6eac59fbd068be8"},
+      {"cooperative_groups/details/helpers.h", 22242, "063f2d5718bfd6d741949e65fb7a08044919a81f73675ca875acf8cf3890466a"},
+      {"cooperative_groups/details/memory.h", 5606, "8444b749f817201b23d8c16b0bf33908e5e53a2ad206eba13cc0099d6a08f76c"}};
+  for (const auto &role : roles) {
+    llvm::SmallString<256> path(physicalSdk), canonical;
+    llvm::sys::path::append(path, role.path);
+    if (llvm::sys::fs::real_path(path, canonical) || canonical != path)
+      return reject("original CG role path changed or escaped its SDK");
+    auto entry = source.getFileManager().getFileRef(path);
+    if (!entry) {
+      llvm::consumeError(entry.takeError());
+      return reject("original CG registered role is missing");
+    }
+    const auto bytes = llvm::MemoryBuffer::getFile(path);
+    const auto &file = entry->getFileEntry();
+    if (!bytes || file.getSize() != role.size || (*bytes)->getBufferSize() != role.size ||
+        contextualInputSha256((*bytes)->getBuffer()) != role.sha256 ||
+        !physicalSourceFileMatches(path, file, source))
+      return reject("original CG role has no reviewed physical byte identity");
+    OriginalCgInput input{path.str().str(), role.sha256,
+        file.getUniqueID().getDevice(), file.getUniqueID().getFile(), role.size};
+    const auto found = std::find_if(originalCgInputs.begin(), originalCgInputs.end(),
+        [&](const OriginalCgInput &old) { return old.path == input.path; });
+    if (found != originalCgInputs.end()) {
+      if (found->sha256 != input.sha256 || found->device != input.device ||
+          found->file != input.file || found->size != input.size)
+        return reject("original CG role changed between includes");
+    } else originalCgInputs.push_back(input);
+  }
+  for (const auto &control : originalCgControls())
+    if (pp.getMacroDefinitionAtLoc(pp.getIdentifierInfo(control), location))
+      return reject("original CG projection requires an unmodified default control state");
+  originalCgSdkRoot = physicalSdk.str().str();
+  originalCgIncludes.push_back(name.str() + ":" + candidate.str().str());
+  return true;
+#endif
+}
+
+bool AscifyAction::sealOriginalCgProviders() {
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  const auto fail = [&]() {
+    const auto diagnostic = compiler.getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "frontend compatibility original CG provider boundary: identity or default-control history is unproved");
+    compiler.getDiagnostics().Report(diagnostic);
+    cudaRuntimeApiBoundaryFailed = true;
+    return false;
+  };
+  if (originalCgInquiry) return fail(); // Unmodeled __has_include semantics cannot borrow the injected file.
+  for (const auto file : enteredSourceFileIds) {
+    if (!verifiedFrontendCgEntryFileIds.count(file.getHashValue())) continue;
+    const auto location = source.getLocForStartOfFile(file);
+    llvm::SmallString<256> path;
+    if (llvm::sys::fs::real_path(source.getFilename(location), path)) return fail();
+    const std::string role = path == frontendCompatibility.canonicalRoot + "/cooperative_groups.h"
+        ? "cooperative_groups.h" : path == frontendCompatibility.canonicalRoot + "/cooperative_groups/reduce.h"
+        ? "cooperative_groups/reduce.h" : std::string();
+    if (role.empty() || std::none_of(originalCgIncludes.begin(), originalCgIncludes.end(),
+          [&](const std::string &include) { return llvm::StringRef(include).starts_with(role + ":"); }))
+      return fail();
+  }
+  if (originalCgIncludes.empty()) return true;
+  llvm::SmallString<256> root(CudaPath.getValue()), canonical;
+  llvm::sys::path::append(root, "include");
+  if (llvm::sys::fs::real_path(root, canonical) || canonical != originalCgSdkRoot) return fail();
+  for (const auto &macro : compiler.getPreprocessorOpts().Macros)
+    if (originalCgControlText(macro.first) || llvm::StringRef(macro.first).contains('\\'))
+      originalCgControlChanged = true; // Unmodeled escaped CLI replacements fail closed.
+  for (const auto file : enteredSourceFileIds) {
+    bool invalid = false;
+    const auto bytes = source.getBufferData(file, &invalid);
+    if (invalid) return fail();
+    clang::Lexer lexer(source.getLocForStartOfFile(file), compiler.getLangOpts(),
+        bytes.begin(), bytes.begin(), bytes.end());
+    for (;;) {
+      clang::Token token;
+      lexer.LexFromRawLexer(token);
+      if (token.is(clang::tok::eof)) break;
+      if (token.is(clang::tok::raw_identifier) && originalCgControlName(
+              clang::Lexer::getSpelling(token, source, compiler.getLangOpts())))
+        originalCgControlChanged = true;
+      // Decoded strings also close escaped pragma push/pop targets. This
+      // bounded default mode does not admit caller mentions of private CG controls.
+      if (token.is(clang::tok::string_literal)) {
+        clang::StringLiteralParser literal(llvm::ArrayRef<clang::Token>(&token, 1),
+            source, compiler.getLangOpts(), compiler.getTarget(), nullptr);
+        if (literal.hadError || originalCgControlText(literal.GetString()))
+          originalCgControlChanged = true;
+      }
+    }
+  }
+  if (originalCgControlChanged) return fail();
+  for (const auto &input : originalCgInputs) {
+    llvm::SmallString<256> physical;
+    auto entry = source.getFileManager().getFileRef(input.path);
+    if (!entry) { llvm::consumeError(entry.takeError()); return fail(); }
+    const auto bytes = llvm::MemoryBuffer::getFile(input.path);
+    const auto &file = entry->getFileEntry();
+    if (llvm::sys::fs::real_path(input.path, physical) || physical != input.path ||
+        !bytes || (*bytes)->getBufferSize() != input.size ||
+        contextualInputSha256((*bytes)->getBuffer()) != input.sha256 ||
+        file.getUniqueID().getDevice() != input.device || file.getUniqueID().getFile() != input.file ||
+        !physicalSourceFileMatches(input.path, file, source)) return fail();
+    if (localHeaderContext && localHeaderContext->inputEvidence) {
+      auto &evidence = *localHeaderContext->inputEvidence;
+      const auto path = contextualRecordPathBinding(evidence, input.path);
+      if (path.empty()) return fail();
+      evidence.fileSha256[path] = input.sha256;
+      evidence.providerIdentities[path] = {input.device, input.file};
+      evidence.providerSizes[path] = input.size;
+    }
+  }
+  return true;
+}
+
 void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
                                       const clang::Token& includeToken,
                                       StringRef file_name,
                                       bool is_angled,
                                       clang::CharSourceRange filename_range,
-                                      StringRef resolved_file_name, StringRef,
+                                      StringRef resolved_file_name, StringRef search_path,
                                       StringRef, const clang::Module* module) {
   std::string frontendCompatibilityError;
   if (!ascify::ValidateFrontendCompatibilityInclude(
@@ -5334,6 +5592,15 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
     const auto ID = DE.getCustomDiagID(
         clang::DiagnosticsEngine::Error, "%0");
     DE.Report(filename_range.getBegin(), ID) << frontendCompatibilityError;
+    return;
+  }
+  if (!proveOriginalCgInclude(hash_loc, includeToken, file_name, is_angled,
+                              filename_range, search_path, resolved_file_name, frontendCompatibilityError)) {
+    const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error, "frontend compatibility original CG provider boundary: %0");
+    getCompilerInstance().getDiagnostics().Report(filename_range.getBegin(), diagnostic)
+        << frontendCompatibilityError;
+    cudaRuntimeApiBoundaryFailed = true;
     return;
   }
   outs() << "File included: " << file_name << "\n";
@@ -5758,8 +6025,10 @@ void AscifyAction::PragmaDirective(
       // headers retain their original ownership; caller -isystem is not proof.
       if (!physicalNative &&
           !cudaRuntimeApiSdkFileIds.count(file.getHashValue()) &&
-          (!file.isValid() || !isOwnedCudaCompilerInput(file, compiler)))
+          (!file.isValid() || !isOwnedCudaCompilerInput(file, compiler))) {
         frontendHostMathGuardModified = true;
+        originalCgControlChanged = true;
+      }
     }
     // _Pragma/__pragma tokens are lexed from a scratch buffer.  Admit only a
     // diagnostic pragma applied inside a file that was a system header on its
@@ -8585,6 +8854,11 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
   Finder.reset(new mat::MatchFinder);
   scalar64Plan = {};
   nttpVoidCallPlan = {};
+  originalCgInputs.clear();
+  originalCgIncludes.clear();
+  originalCgSdkRoot.clear();
+  originalCgControlChanged = false;
+  originalCgInquiry = false;
   davC310TargetRecipe.reset();
   if (!NoLowerDeviceDoubleParams) {
     Finder->addMatcher(
@@ -9071,6 +9345,8 @@ void AscifyAction::finalizeCudaAttributeGuards() {
 }
 
 void AscifyAction::Ifndef(clang::SourceLocation Loc, const clang::Token &MacroNameTok, const clang::MacroDefinition &MD) {
+  if (MacroNameTok.getIdentifierInfo() && originalCgControlName(MacroNameTok.getIdentifierInfo()->getName()))
+    originalCgControlChanged = true;
   ConditionalDirectiveEntered();
   auditExternalNvidiaSampleHelperPreprocessorUse(
       Loc, MacroNameTok, "#ifndef");
@@ -9081,6 +9357,8 @@ void AscifyAction::Ifndef(clang::SourceLocation Loc, const clang::Token &MacroNa
 void AscifyAction::Ifdef(clang::SourceLocation Loc,
                          const clang::Token &MacroNameTok,
                          const clang::MacroDefinition &MD) {
+  if (MacroNameTok.getIdentifierInfo() && originalCgControlName(MacroNameTok.getIdentifierInfo()->getName()))
+    originalCgControlChanged = true;
   recordCudaAttributeGuard(Loc, MacroNameTok, MD);
   recordInactiveNvidiaSampleHelperBranch(Loc, MacroNameTok, MD);
   ConditionalDirectiveEntered();
@@ -9120,6 +9398,9 @@ void AscifyAction::ConditionalDirectiveEnded() {
 void AscifyAction::Defined(const clang::Token &MacroNameTok,
                            const clang::MacroDefinition &MD,
                            clang::SourceRange Range) {
+  if (MacroNameTok.getIdentifierInfo() &&
+      originalCgControlName(MacroNameTok.getIdentifierInfo()->getName()))
+    originalCgControlChanged = true;
   auditExternalNvidiaSampleHelperPreprocessorUse(
       Range.getBegin(), MacroNameTok, "defined");
   auditFrozenNvidiaSampleHelperMacroDependency(
@@ -9131,6 +9412,7 @@ void AscifyAction::MacroUndefined(
     const clang::MacroDefinition &MD) {
   if (MacroNameTok.getIdentifierInfo() != nullptr) {
     const auto name = MacroNameTok.getIdentifierInfo()->getName();
+    if (originalCgControlName(name)) originalCgControlChanged = true;
     ++profilerMacroUndefinitions[name.str()];
     if (name == "__has_include") profilerAvailabilityControlModified = true;
   }
@@ -9171,6 +9453,7 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
     return;
   const llvm::StringRef name =
       MacroNameTok.getIdentifierInfo()->getName();
+  if (originalCgControlName(name)) originalCgControlChanged = true;
   ++profilerMacroDefinitions[name.str()];
   if (name == "__has_include") {
     const auto *info = getCompilerInstance().getPreprocessor().getMacroInfo(
@@ -10876,6 +11159,8 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
   observeCudaRuntimeApiMacroUse(MacroNameTok, MD);
   if (MacroNameTok.getIdentifierInfo() == nullptr)
     return;
+  if (originalCgControlName(MacroNameTok.getIdentifierInfo()->getName()))
+    originalCgControlChanged = true;
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
   const clang::MacroInfo *macroInfo = MD.getMacroInfo();
@@ -12461,6 +12746,7 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
 void AscifyAction::EndSourceFileAction() {
   if (cudaRuntimeApiBoundaryFailed)
     return;
+  if (!sealOriginalCgProviders()) return;
   finalizeCudaAttributeGuards();
   if (localHeaderContext != nullptr && localHeaderContext->depth == 0 &&
       localHeaderContext->plan != nullptr) {
@@ -12992,6 +13278,7 @@ void AscifyAction::ExecuteAction() {
   // Reset the contextual token watcher above before any diagnostic early exit.
   if (getCompilerInstance().getDiagnostics().hasErrorOccurred())
     return;
+  if (!sealOriginalCgProviders()) return;
   // All PP callbacks and Sema have completed. Seal the entire conditional
   // proof BEFORE either surface audit, and long before output publication.
   // EndSourceFileAction must never create a late audit exception.

@@ -1,9 +1,11 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "clang/Tooling/CommonOptionsParser.h"
@@ -49,6 +51,9 @@ struct LocalHeaderInputEvidence {
   std::string tokenSha256;
   std::string macroSha256;
   std::map<std::string, std::string> fileSha256;
+  // Unparsed original SDK providers are data witnesses, never AST/macro owners.
+  std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> providerIdentities;
+  std::map<std::string, std::uint64_t> providerSizes;
   std::map<std::string, std::string> pathBindings;
   std::string changedPathBinding;
   std::map<std::string, unsigned> fileEntries;
