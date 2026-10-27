@@ -249,6 +249,14 @@ __device__ void sync(const thread_block&);
     ]:
         yield dict(case(name, source, accepted=False, flags=flags),
                    product_alias={'H': 'cooperative_groups.h'}, origin_boundary_expected=True)
+    for name, source, flags in [
+        ('compiler_default_cli_same_value', base, ('-D_CG_CLUSTER_INTRINSICS_AVAILABLE=1',)),
+        ('compiler_default_late_redefine', base +
+         '#undef _CG_CLUSTER_INTRINSICS_AVAILABLE\n#define _CG_CLUSTER_INTRINSICS_AVAILABLE 1\n', ()),
+        ('compiler_default_observation', base +
+         '#ifdef _CG_CLUSTER_INTRINSICS_AVAILABLE\nint cluster_control_seen;\n#endif\n', ()),
+    ]:
+        yield origin(name, flags, source=source, provider='{cuda}/include/cooperative_groups.h')
 
 
 def sha(path):

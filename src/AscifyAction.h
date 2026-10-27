@@ -44,6 +44,7 @@ THE SOFTWARE.
 namespace ct = clang::tooling;
 namespace mat = clang::ast_matchers;
 using namespace llvm;
+namespace clang { class MacroInfo; }
 
 /**
   * A FrontendAction that ascifies CUDA programs.
@@ -125,6 +126,11 @@ private:
   std::string originalCgSdkRoot;
   bool originalCgControlChanged = false;
   bool originalCgInquiry = false;
+  const clang::MacroInfo *originalCgCompilerDefaultMacro = nullptr;
+  clang::SourceLocation originalCgCompilerDefaultDefinition;
+  OriginalCgInput originalCgCompilerDefaultInput;
+  bool proveOriginalCgCompilerDefault(const clang::MacroInfo *macro,
+      clang::SourceLocation identifier, bool capture);
   bool proveOriginalCgInclude(clang::SourceLocation location,
       const clang::Token &includeToken, llvm::StringRef name, bool angled,
       clang::CharSourceRange filenameRange, llvm::StringRef searchPath,

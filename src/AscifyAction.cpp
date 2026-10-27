@@ -5358,6 +5358,66 @@ bool AscifyAction::sealProfilerAvailabilityProof() {
   return true;
 }
 
+// This is one parsed compiler definition, not authority borrowed from the
+// unparsed original CG inputs. Caller mentions remain forbidden even at 1.
+bool AscifyAction::proveOriginalCgCompilerDefault(const clang::MacroInfo *macro,
+    clang::SourceLocation identifier, bool capture) {
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  if (!frontendCompatibility.enabled() || macro == nullptr ||
+      !identifier.isValid() || !identifier.isFileID() ||
+      macro->getDefinitionLoc() != identifier ||
+      !ordinaryRuntimeProfileInput(compiler) ||
+      !frontendCgMacroTokens(*macro, compiler.getPreprocessor(), {"1"}))
+    return false;
+  const auto file = source.getFileID(identifier);
+  const auto token = macro->tokens_begin();
+  if (file.isInvalid() || !token->is(clang::tok::numeric_constant) ||
+      !token->getLocation().isValid() || !token->getLocation().isFileID() ||
+      source.getFileID(token->getLocation()) != file ||
+      !isOwnedCudaCompilerInput(file, compiler))
+    return false;
+  llvm::SmallString<256> selectedRoot, ownedRoot, path;
+  if (llvm::sys::fs::real_path(compiler.getHeaderSearchOpts().ResourceDir, selectedRoot) ||
+      llvm::sys::fs::real_path(ownedClangResourceDirectory(), ownedRoot) ||
+      selectedRoot != ownedRoot)
+    return false;
+  llvm::SmallString<256> expected(ownedRoot);
+  llvm::sys::path::append(expected, "include", "__clang_cuda_runtime_wrapper.h");
+  const auto *entry = source.getFileEntryForID(file);
+  const auto filename = source.getFilename(identifier);
+  bool invalid = false;
+  const auto bytes = source.getBufferData(file, &invalid);
+  const char *hash = "6caeb75ad8b888bc93141b700608cf3581f334fc5cc0971e96e3f699e86ceb45";
+  const llvm::StringRef directive = "#define _CG_CLUSTER_INTRINSICS_AVAILABLE 1\n";
+  const auto offset = bytes.find(directive);
+  if (entry == nullptr || entry->getSize() != 18786 || invalid || bytes.size() != 18786 ||
+      llvm::sys::fs::real_path(filename, path) || path != expected ||
+      !physicalSourceFileMatches(filename, *entry, source) ||
+      contextualInputSha256(bytes) != hash || offset == llvm::StringRef::npos ||
+      bytes.find(directive, offset + 1) != llvm::StringRef::npos ||
+      source.getFileOffset(identifier) != offset + llvm::StringRef("#define ").size() ||
+      source.getFileOffset(token->getLocation()) != offset + directive.size() - 2)
+    return false;
+  OriginalCgInput input{path.str().str(), hash, entry->getUniqueID().getDevice(),
+      entry->getUniqueID().getFile(), 18786};
+  if (capture) {
+    if (originalCgCompilerDefaultMacro != nullptr || originalCgControlChanged)
+      return false;
+    originalCgCompilerDefaultMacro = macro;
+    originalCgCompilerDefaultDefinition = identifier;
+    originalCgCompilerDefaultInput = input;
+    return true;
+  }
+  return macro == originalCgCompilerDefaultMacro &&
+      identifier == originalCgCompilerDefaultDefinition &&
+      input.path == originalCgCompilerDefaultInput.path &&
+      input.sha256 == originalCgCompilerDefaultInput.sha256 &&
+      input.device == originalCgCompilerDefaultInput.device &&
+      input.file == originalCgCompilerDefaultInput.file &&
+      input.size == originalCgCompilerDefaultInput.size;
+}
+
 bool AscifyAction::proveOriginalCgInclude(clang::SourceLocation location,
     const clang::Token &includeToken, llvm::StringRef name, bool angled,
     clang::CharSourceRange filenameRange, llvm::StringRef searchPath,
@@ -5490,9 +5550,16 @@ bool AscifyAction::proveOriginalCgInclude(clang::SourceLocation location,
         return reject("original CG role changed between includes");
     } else originalCgInputs.push_back(input);
   }
-  for (const auto &control : originalCgControls())
-    if (pp.getMacroDefinitionAtLoc(pp.getIdentifierInfo(control), location))
+  for (const auto &control : originalCgControls()) {
+    const auto definition = pp.getMacroDefinitionAtLoc(pp.getIdentifierInfo(control), location);
+    if (control == "_CG_CLUSTER_INTRINSICS_AVAILABLE") {
+      if (definition.isAmbiguous() || !definition.getModuleMacros().empty() ||
+          !proveOriginalCgCompilerDefault(definition.getMacroInfo(),
+              originalCgCompilerDefaultDefinition, false))
+        return reject("original CG projection has no exact compiler-owned default control");
+    } else if (definition)
       return reject("original CG projection requires an unmodified default control state");
+  }
   originalCgSdkRoot = physicalSdk.str().str();
   originalCgIncludes.push_back(name.str() + ":" + candidate.str().str());
   return true;
@@ -5524,6 +5591,9 @@ bool AscifyAction::sealOriginalCgProviders() {
       return fail();
   }
   if (originalCgIncludes.empty()) return true;
+  if (!proveOriginalCgCompilerDefault(compiler.getPreprocessor().getMacroInfo(
+          compiler.getPreprocessor().getIdentifierInfo("_CG_CLUSTER_INTRINSICS_AVAILABLE")),
+          originalCgCompilerDefaultDefinition, false)) return fail();
   llvm::SmallString<256> root(CudaPath.getValue()), canonical;
   llvm::sys::path::append(root, "include");
   if (llvm::sys::fs::real_path(root, canonical) || canonical != originalCgSdkRoot) return fail();
@@ -5540,9 +5610,14 @@ bool AscifyAction::sealOriginalCgProviders() {
       clang::Token token;
       lexer.LexFromRawLexer(token);
       if (token.is(clang::tok::eof)) break;
-      if (token.is(clang::tok::raw_identifier) && originalCgControlName(
-              clang::Lexer::getSpelling(token, source, compiler.getLangOpts())))
-        originalCgControlChanged = true;
+      if (token.is(clang::tok::raw_identifier)) {
+        const auto name = clang::Lexer::getSpelling(token, source, compiler.getLangOpts());
+        if (originalCgControlName(name) &&
+            !(name == "_CG_CLUSTER_INTRINSICS_AVAILABLE" &&
+              proveOriginalCgCompilerDefault(originalCgCompilerDefaultMacro,
+                  token.getLocation(), false)))
+          originalCgControlChanged = true;
+      }
       // Decoded strings also close escaped pragma push/pop targets. This
       // bounded default mode does not admit caller mentions of private CG controls.
       if (token.is(clang::tok::string_literal)) {
@@ -5554,7 +5629,9 @@ bool AscifyAction::sealOriginalCgProviders() {
     }
   }
   if (originalCgControlChanged) return fail();
-  for (const auto &input : originalCgInputs) {
+  auto providerInputs = originalCgInputs;
+  providerInputs.push_back(originalCgCompilerDefaultInput);
+  for (const auto &input : providerInputs) {
     llvm::SmallString<256> physical;
     auto entry = source.getFileManager().getFileRef(input.path);
     if (!entry) { llvm::consumeError(entry.takeError()); return fail(); }
@@ -8859,6 +8936,9 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
   originalCgSdkRoot.clear();
   originalCgControlChanged = false;
   originalCgInquiry = false;
+  originalCgCompilerDefaultMacro = nullptr;
+  originalCgCompilerDefaultDefinition = {};
+  originalCgCompilerDefaultInput = {};
   davC310TargetRecipe.reset();
   if (!NoLowerDeviceDoubleParams) {
     Finder->addMatcher(
@@ -9453,7 +9533,11 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
     return;
   const llvm::StringRef name =
       MacroNameTok.getIdentifierInfo()->getName();
-  if (originalCgControlName(name)) originalCgControlChanged = true;
+  if (originalCgControlName(name) &&
+      !(name == "_CG_CLUSTER_INTRINSICS_AVAILABLE" &&
+        proveOriginalCgCompilerDefault(getCompilerInstance().getPreprocessor().getMacroInfo(
+            MacroNameTok.getIdentifierInfo()), MacroNameTok.getLocation(), true)))
+    originalCgControlChanged = true;
   ++profilerMacroDefinitions[name.str()];
   if (name == "__has_include") {
     const auto *info = getCompilerInstance().getPreprocessor().getMacroInfo(
