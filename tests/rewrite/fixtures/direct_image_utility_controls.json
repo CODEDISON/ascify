@@ -1,0 +1,70 @@
+{
+  "schema": "ascify.direct-image-utility-controls.v1",
+  "scope": "Additive original-syntax-first frontend controls only; original15 matrix unchanged. No target compiler or device.",
+  "original_syntax_status": "NOT_EXECUTED",
+  "cases": [
+    {
+      "name": "native_instance_reflection",
+      "accepted": true,
+      "source": "#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\nusing Native = Exception<std::runtime_error>;\nstatic_assert(sizeof(Native)>0,\"native host instance\");\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "flags": [],
+      "setup": {}
+    },
+    {
+      "name": "unproved_parent",
+      "accepted": false,
+      "source": "#include <exception.h>\n#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "flags": [],
+      "setup": {}
+    },
+    {
+      "name": "mutated_utility_same_name",
+      "accepted": false,
+      "source": "#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "flags": [],
+      "setup": {
+        "mutate": "exception.h"
+      }
+    },
+    {
+      "name": "remapped_utility_same_bytes",
+      "accepted": false,
+      "source": "#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "flags": [],
+      "setup": {
+        "remap": "exception.h"
+      }
+    },
+    {
+      "name": "macro_ctor_reflection",
+      "accepted": false,
+      "source": "#include <helper_cuda.h>\n#define Std_Exception(x) Std_Exception((sizeof(Std_Exception),(x)))\n#include <helper_image.h>\n#include <helper_string.h>\n#undef Std_Exception\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "flags": [],
+      "setup": {},
+      "syntax_status": "NOT_EXECUTED; must pass real original CUDA syntax before a refusal counts"
+    },
+    {
+      "name": "guard_define_undef_history",
+      "accepted": false,
+      "source": "#include <helper_cuda.h>\n#define COMMON_EXCEPTION_H_\n#undef COMMON_EXCEPTION_H_\n#include <helper_image.h>\n#include <helper_string.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "flags": [],
+      "setup": {}
+    },
+    {
+      "name": "cli_exit_failure_same_value",
+      "accepted": false,
+      "source": "#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "flags": [
+        "-DEXIT_FAILURE=1"
+      ],
+      "setup": {}
+    },
+    {
+      "name": "texture_identity_alias_base_reflection",
+      "accepted": false,
+      "source": "#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\nusing HiddenLayout = Exception<cudaExtent>;\nstruct DerivedHostRecord : HiddenLayout {};\nstatic_assert(sizeof(DerivedHostRecord)>0,\"caller reflection\");\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "flags": [],
+      "setup": {}
+    }
+  ]
+}

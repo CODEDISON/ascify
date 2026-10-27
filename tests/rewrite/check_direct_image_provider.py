@@ -73,8 +73,28 @@ def main():
         (path / 'process.json').write_text(json.dumps({'returncode': result.returncode}) + '\n')
         return result
 
-    seed_output = seed_bundle = None
+    seed_inputs = out / 'publication_seed_inputs'
+    seed_inputs.mkdir()
+    seed_source = seed_inputs / 'root.cu'
+    seed_header = seed_inputs / 'publication_seed.cuh'
+    seed_source.write_text('#include <cuda_runtime.h>\n#include "publication_seed.cuh"\n'
+                           'int main(){return ascify_seed_value(17); }\n')
+    seed_header.write_text('#pragma once\ninline int ascify_seed_value(int v){return v;}\n')
+    seed_before = inventory(seed_inputs)
+    seed_language = ['-x', 'cuda', '-std=c++17', '-fgpu-rdc', '-I' + str(seed_inputs)]
+    cccl = args.cuda_path / 'include/cccl'
+    if (cccl / 'cuda/std/type_traits').is_file():
+        seed_language += ['-I' + str(cccl)]
+    state['managed_seed_publications'] = []
     try:
+        seed_syntax = command([args.clang, '--cuda-host-only', '-nocudalib',
+                               '--cuda-path=' + str(args.cuda_path),
+                               '-resource-dir=' + str(args.resource_dir),
+                               '-Wno-unknown-cuda-version', *seed_language,
+                               '-fsyntax-only', seed_source], out / 'publication_seed_original_syntax')
+        assert seed_syntax.returncode == 0, ('managed seed original CUDA syntax invalid', seed_syntax.stderr)
+        state['managed_seed_original_syntax_returncode'] = seed_syntax.returncode
+        state['managed_seed_inputs_sha256'] = seed_before
         for case in cases:
             label = case['name']
             accepted = case['expected_new_graph_or_legacy_acceptance']
@@ -113,10 +133,37 @@ def main():
             output = directory / 'published.cce'
             bundle = Path(str(output) + '.headers')
             if not accepted:
-                assert seed_output is not None and seed_bundle is not None
-                shutil.copy2(seed_output, output)
-                shutil.copytree(seed_bundle, bundle)
+                # Publish at the exact destination: manifests contain absolute
+                # owner/output paths, so a copied bundle is not our seed proof.
+                seed_receipt = directory / 'managed_seed_receipt.json'
+                seeded = command([args.binary, seed_source, '--cuda-path=' + str(args.cuda_path),
+                                  '--clang-resource-directory=' + str(args.resource_dir),
+                                  '--frontend-compat=ascify-admitted-v1', '--target-policy=dav-c310-vec',
+                                  '--target-recipe=none', '--simt-math=precise', '--default-preprocessor',
+                                  '--local-headers-recursive', '--migration-receipt=' + str(seed_receipt),
+                                  '-o', output, '--', *seed_language], directory / 'managed_seed_convert')
+                assert seeded.returncode == 0 and json.loads(seed_receipt.read_text())['status'] == 'succeeded'
+                assert inventory(seed_inputs) == seed_before, (label, 'managed seed input changed')
+                assert bundle.is_dir() and not bundle.is_symlink(), (label, 'managed seed bundle absent')
+                marker = bundle / '.ascify-local-closure'
+                assert marker.is_file() and not marker.is_symlink()
+                manifest = marker.read_text().splitlines()
+                assert manifest[0] == 'schema=1'
+                assert 'root_source=' + str(seed_source) in manifest
+                assert 'root_artifact=' + str(output) in manifest
+                quoted = re.findall(r'(?m)^#\s*include\s*"([^"\r\n]+)"', output.read_text())
+                assert len(quoted) == 1 and not Path(quoted[0]).is_absolute(), (label, quoted)
+                reachable = output.parent / quoted[0]
+                relative = reachable.relative_to(bundle)
+                assert '..' not in relative.parts and relative.name.endswith('.dpp')
+                assert reachable.is_file() and not reachable.is_symlink()
+                assert all(not parent.is_symlink() for parent in reachable.parents if parent != out.parent)
+                expected_header = 'header=' + str(seed_header) + '\t' + str(reachable)
+                assert [line for line in manifest if line.startswith('header=')] == [expected_header]
+                assert 'ascify_seed_value' in reachable.read_text()
                 prior = sha(output), inventory(bundle)
+                state['managed_seed_publications'].append(dict(name=label, receipt_sha256=sha(seed_receipt),
+                                                               output_sha256=prior[0], bundle_sha256=prior[1]))
             destinations = [output] if accepted else [output, directory / 'fresh.cce']
             for attempt, destination in enumerate(destinations):
                 receipt = directory / ('receipt_' + str(attempt) + '.json')
@@ -140,7 +187,7 @@ def main():
                 assert converted.returncode == 0 and record['status'] == 'succeeded', (label, diagnostic)
                 text = destination.read_text()
                 assert '#include <helper_cuda.h>' not in text and 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS' in text
-                assert bundle.is_dir() and not bundle.is_symlink(), (label, 'published managed bundle absent')
+                assert not bundle.exists() and not bundle.is_symlink(), (label, 'orphan bundle for root-only TU')
                 if label.startswith('direct_'):
                     assert '#include <helper_functions.h>' not in text
                     assert '#include <helper_image.h>' in text and '#include <helper_string.h>' in text
@@ -170,11 +217,11 @@ def main():
                     assert outputs[0] == outputs[1] == b'40000000 7fc00001 00000000 40400000 1 2 3\n', outputs
                 else:
                     assert 'Ascify direct-image MAX replay v1:' not in diagnostic
-                if seed_output is None:
-                    seed_output, seed_bundle = output, bundle
             state['cases'].append(dict(name=label, passed=True, accepted=accepted,
                                        original_syntax_returncode=syntax.returncode, input_sha256=snapshot))
             (out / 'summary.json').write_text(json.dumps(state, indent=2) + '\n')
+        assert inventory(seed_inputs) == seed_before, 'managed seed input changed'
+        assert len(state['managed_seed_publications']) == 10, 'all managed refusal gates required'
         assert inventory(args.helper_root) == helper_before, 'original helpers changed'
         assert all(sha(Path(p)) == value for p, value in before.items()), 'tools/SDK changed'
         state['passed'] = True

@@ -192,8 +192,8 @@ private:
     bool skipped = false;
   };
   struct DirectImageWitness {
-    DirectImageInclude cudaRoot, imageRoot, cudaString, imageString;
-    DirectImageNode cuda, image, string;
+    DirectImageInclude cudaRoot, imageRoot, cudaString, imageString, utilityInclude;
+    DirectImageNode cuda, image, string, utility;
     std::vector<DirectImageInclude> repeats;
     std::string rootSha256;
     const clang::MacroInfo *max = nullptr, *epsilon = nullptr;
@@ -201,6 +201,29 @@ private:
     clang::SourceLocation invocation;
     bool requested = false, invalid = false;
   } directImageWitness;
+  struct DirectImageUtilityMacroUse {
+    std::string name;
+    clang::SourceLocation token, spelling, expansion, definition;
+    clang::SourceRange range;
+    const clang::MacroInfo *macro = nullptr;
+    bool arguments = false, ambiguous = false;
+    DirectImageNode provider;
+  };
+  struct DirectImageUtilityControl {
+    std::string name, kind;
+    clang::SourceLocation location;
+    const clang::MacroInfo *macro = nullptr;
+  };
+  std::vector<DirectImageUtilityMacroUse> directImageUtilityMacroUses;
+  std::vector<DirectImageUtilityControl> directImageUtilityControls;
+  bool directImageUtilityInvalid = false;
+  void recordDirectImageUtilityControl(llvm::StringRef name, llvm::StringRef kind,
+      clang::SourceLocation location, const clang::MacroInfo *macro);
+  void observeDirectImageUtilityMacro(const clang::Token &name,
+      const clang::MacroDefinition &definition, clang::SourceRange range,
+      const clang::MacroArgs *arguments);
+  bool sealDirectImageUtility();
+  bool isProvedDirectImageUtilityFile(clang::FileID file);
   void observeDirectImageInclude(clang::SourceLocation hash,
       const clang::Token &directive, llvm::StringRef name,
       clang::CharSourceRange range, llvm::StringRef resolved,
