@@ -4883,6 +4883,7 @@ void AscifyAction::FileChanged(
       initiallyTrustedSystemFileIdentities.count(identity) != 0;
   const bool wasUntrusted =
       initiallyUntrustedSystemFileIdentities.count(identity) != 0;
+  observeDirectImageEntry(file, !wasTrusted && !wasUntrusted);
   if (!wasTrusted && !wasUntrusted) {
     if (frozenRole == FrozenOfficialNvidiaSampleHelperFunctions &&
         frozenNvidiaSampleDirectFunctionsRootIdentities.count(identity) != 0) {
@@ -5733,6 +5734,8 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
 
   const bool recognizedNvidiaHelper =
       isRecognizedNvidiaSampleHelperCuda(resolved_file_name);
+  observeDirectImageInclude(hash_loc, includeToken, file_name, filename_range,
+                            resolved_file_name, module);
   if (!SM.isWrittenInMainFile(hash_loc)) {
     if (recognizedNvidiaHelper) {
       nvidiaSampleHelperUnsupportedMacroUse = true;
@@ -5991,6 +5994,7 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
 void AscifyAction::FileSkipped(const clang::FileEntry& skippedFile,
                                const clang::Token& filenameToken,
                                StringRef resolvedPath) {
+  observeDirectImageSkip(skippedFile, filenameToken, resolvedPath);
   const auto location = filenameToken.getLocation();
   if (!location.isFileID())
     return;
@@ -8931,6 +8935,7 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
   Finder.reset(new mat::MatchFinder);
   scalar64Plan = {};
   nttpVoidCallPlan = {};
+  directImageWitness = {};
   originalCgInputs.clear();
   originalCgIncludes.clear();
   originalCgSdkRoot.clear();
@@ -11309,9 +11314,9 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
           macroInfo != nullptr && Args != nullptr &&
           !MacroNameTok.getLocation().isMacroID() &&
           !Range.getBegin().isMacroID() && !Range.getEnd().isMacroID() &&
-          frozenOfficialNvidiaSampleHelperFunctionsSeen &&
-          isDirectFrozenFunctionsImageProviderInstance(
-              macroInfo->getDefinitionLoc()) &&
+          ((frozenOfficialNvidiaSampleHelperFunctionsSeen &&
+            isDirectFrozenFunctionsImageProviderInstance(macroInfo->getDefinitionLoc())) ||
+           isProvedDirectImageInstance(macroInfo->getDefinitionLoc())) &&
           activeFrozenHelperImageMinBodyMatches(
               *macroInfo, getCompilerInstance().getPreprocessor());
       if (!nonReflectiveImageMin)
@@ -11443,6 +11448,8 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
       return;
     }
   }
+  if (MacroNameTok.getIdentifierInfo()->getName() == "MAX")
+    (void)requestDirectImageMaxReplay(MacroNameTok, MD, Range, Args);
   if (MacroNameTok.getIdentifierInfo()->getName() == "MAX" &&
       preservedMaxNeeded) {
     if (!admitPreservedMaxExpansion(MacroNameTok, MD, Range, Args)) {
@@ -11661,6 +11668,8 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
 }
 
 void AscifyAction::rewriteProvenNvidiaSampleHelperMacros() {
+  if (!sealDirectImageWitness())
+    nvidiaSampleHelperUnsupportedMacroUse = true;
   // Replacements are accumulated without rollback support. Restrict closure
   // to one direct recognized include so include removal is atomic: duplicate
   // includes keep both directives and every original helper macro call.
@@ -12105,8 +12114,9 @@ bool AscifyAction::admitPreservedMaxExpansion(
       preservedMaxProvider == nullptr || arguments == nullptr ||
       arguments->getNumMacroArguments() != 2 || !location.isFileID() ||
       !range.getBegin().isFileID() || !range.getEnd().isFileID()) return false;
-  const bool image = frozenOfficialNvidiaSampleHelperFunctionsSeen &&
-      isDirectFrozenFunctionsImageProviderInstance(location);
+  const bool image = (frozenOfficialNvidiaSampleHelperFunctionsSeen &&
+      isDirectFrozenFunctionsImageProviderInstance(location)) ||
+      isProvedDirectImageInstance(location);
   if (!image && !ownedPreservedMaxLocation(location)) return false;
   bool invalidBuffer = false;
   const auto buffer = source.getBufferData(source.getFileID(location), &invalidBuffer);
@@ -12378,6 +12388,269 @@ void AscifyAction::auditSkippedNvidiaSampleHelperElifDirective(
       << directive << " keeps all helper edits\n";
 }
 
+bool AscifyAction::directImageIncludeContains(const DirectImageInclude &include,
+    clang::SourceLocation location) {
+  auto &source = getCompilerInstance().getSourceManager();
+  return include.hash.isValid() && include.end.isValid() && include.end.isFileID() &&
+      location.isValid() && location.isFileID() &&
+      source.getFileID(location) == source.getFileID(include.hash) &&
+      source.getFileOffset(location) >= source.getFileOffset(include.hash) &&
+      source.getFileOffset(location) <= source.getFileOffset(include.end);
+}
+
+bool AscifyAction::directImageNodeMatches(const DirectImageNode &node, unsigned role) {
+  auto &source = getCompilerInstance().getSourceManager();
+  if (node.file.isInvalid()) return false;
+  const auto begin = source.getLocForStartOfFile(node.file);
+  const auto *entry = source.getFileEntryForID(node.file);
+  bool invalid = false;
+  const auto bytes = source.getBufferData(node.file, &invalid);
+  return entry != nullptr && !invalid && entry->getSize() == node.size &&
+      entry->getUniqueID().getDevice() == node.device &&
+      entry->getUniqueID().getFile() == node.inode &&
+      contextualCanonicalPath(source.getFilename(begin)) == node.path &&
+      frozenNvidiaSampleHelperFileRole(source, begin) == role &&
+      bytes.size() == node.size && contextualInputSha256(bytes) == node.sha256 &&
+      physicalSourceFileMatches(node.path, *entry, source);
+}
+
+void AscifyAction::observeDirectImageInclude(clang::SourceLocation hash,
+    const clang::Token &directive, llvm::StringRef name,
+    clang::CharSourceRange range, llvm::StringRef resolved,
+    const clang::Module *module) {
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  auto &w = directImageWitness;
+  const auto &options = compiler.getPreprocessorOpts();
+  if (!ordinaryRuntimeProfileInput(compiler) || module != nullptr ||
+      !options.RemappedFiles.empty() || !options.RemappedFileBuffers.empty() ||
+      !compiler.getHeaderSearchOpts().VFSOverlayFiles.empty() ||
+      !hash.isValid() || !hash.isFileID() || !range.getBegin().isFileID() ||
+      !range.getEnd().isFileID() || directive.getIdentifierInfo() == nullptr ||
+      directive.getIdentifierInfo()->getPPKeywordID() != clang::tok::pp_include ||
+      source.getFileID(hash) != source.getFileID(range.getBegin()) ||
+      source.getFileID(hash) != source.getFileID(range.getEnd())) return;
+  bool invalid = false;
+  const auto text = clang::Lexer::getSourceText(range, source, compiler.getLangOpts(), &invalid);
+  if (invalid || (text != name && text != "<" + name.str() + ">" &&
+      text != "\"" + name.str() + "\"" && text != "<" + name.str() &&
+      text != "\"" + name.str())) return;
+  auto intent = [&]() {
+    DirectImageInclude result;
+    const auto path = contextualCanonicalPath(resolved);
+    auto entry = source.getFileManager().getFileRef(resolved);
+    if (!entry) { llvm::consumeError(entry.takeError()); return result; }
+    if (path.empty() || !physicalSourceFileMatches(path, entry->getFileEntry(), source))
+      return result;
+    result.hash = hash; result.end = range.getEnd(); result.path = path;
+    result.device = entry->getFileEntry().getUniqueID().getDevice();
+    result.inode = entry->getFileEntry().getUniqueID().getFile();
+    if (result.device == 0 && result.inode == 0) return DirectImageInclude();
+    return result;
+  };
+  const auto parent = source.getFileID(hash);
+  if (source.isWrittenInMainFile(hash)) {
+    if (preprocessorConditionalDepth != 0 || !ownedPreservedMaxLocation(hash)) return;
+    if (name == "helper_cuda.h") {
+      if (w.cudaRoot.hash.isValid()) { w.invalid = true; return; }
+      w.cudaRoot = intent();
+      w.rootSha256 = contextualInputSha256(source.getBufferData(source.getMainFileID()));
+    } else if (name == "helper_image.h" && w.cuda.file.isValid()) {
+      const auto candidate = intent();
+      if (w.imageRoot.hash.isValid()) {
+        if (!candidate.hash.isValid() || candidate.path != w.imageRoot.path ||
+            candidate.device != w.imageRoot.device || candidate.inode != w.imageRoot.inode)
+          w.invalid = true;
+        else w.repeats.push_back(candidate);
+        return;
+      }
+      w.imageRoot = candidate;
+      const auto *macro = compiler.getPreprocessor().getMacroInfo(
+          compiler.getPreprocessor().getIdentifierInfo("MAX"));
+      if (macro == nullptr || macro != preservedMaxProvider || preservedMaxProviderIsCaller ||
+          !macro->getDefinitionLoc().isFileID() ||
+          source.getFileID(macro->getDefinitionLoc()) != w.cuda.file ||
+          !activeFrozenHelperCudaMaxBodyMatches(*macro, compiler.getPreprocessor()))
+        w.invalid = true;
+      else w.max = macro;
+    }
+  } else if (name == "helper_string.h" && parent == w.cuda.file) {
+    if (w.cudaString.hash.isValid()) w.invalid = true;
+    else w.cudaString = intent();
+  } else if (name == "helper_string.h" && parent == w.image.file) {
+    if (w.imageString.hash.isValid()) w.invalid = true;
+    else {
+      w.imageString = intent();
+      if (!w.imageString.hash.isValid() || w.string.file.isInvalid() ||
+          w.imageString.path != w.string.path || w.imageString.device != w.string.device ||
+          w.imageString.inode != w.string.inode) w.invalid = true;
+    }
+  }
+}
+
+void AscifyAction::observeDirectImageEntry(clang::FileID file, bool firstPhysicalEntry) {
+  auto &source = getCompilerInstance().getSourceManager();
+  auto &w = directImageWitness;
+  const auto include = source.getIncludeLoc(file);
+  auto capture = [&](const DirectImageInclude &intent, unsigned role, DirectImageNode &node) {
+    if (!directImageIncludeContains(intent, include)) return false;
+    const auto *entry = source.getFileEntryForID(file);
+    bool invalid = false;
+    const auto bytes = source.getBufferData(file, &invalid);
+    const auto path = contextualCanonicalPath(source.getFilename(source.getLocForStartOfFile(file)));
+    if (!firstPhysicalEntry || entry == nullptr || invalid || node.file.isValid() ||
+        path != intent.path || entry->getUniqueID().getDevice() != intent.device ||
+        entry->getUniqueID().getFile() != intent.inode ||
+        frozenNvidiaSampleHelperFileRole(source, source.getLocForStartOfFile(file)) != role ||
+        !physicalSourceFileMatches(path, *entry, source)) { w.invalid = true; return true; }
+    node = {file, path, contextualInputSha256(bytes), intent.device, intent.inode,
+            static_cast<std::uint64_t>(bytes.size())};
+    return true;
+  };
+  if (capture(w.cudaRoot, FrozenOfficialNvidiaSampleHelperCuda, w.cuda)) return;
+  if (capture(w.cudaString, FrozenOfficialNvidiaSampleHelperString, w.string)) return;
+  if (capture(w.imageRoot, FrozenOfficialNvidiaSampleHelperImage, w.image)) return;
+  if (directImageIncludeContains(w.imageString, include)) w.invalid = true; // expected same-guard skip
+  for (const auto &repeat : w.repeats)
+    if (directImageIncludeContains(repeat, include)) w.invalid = true;
+}
+
+void AscifyAction::observeDirectImageSkip(const clang::FileEntry &entry,
+    const clang::Token &filename, llvm::StringRef resolved) {
+  auto &w = directImageWitness;
+  const auto path = contextualCanonicalPath(resolved);
+  auto skip = [&](DirectImageInclude &include) {
+    if (directImageIncludeContains(include, filename.getLocation()) &&
+        include.path == path && entry.getUniqueID().getDevice() == include.device &&
+        entry.getUniqueID().getFile() == include.inode) include.skipped = true;
+  };
+  skip(w.imageString);
+  for (auto &repeat : w.repeats) skip(repeat);
+}
+
+bool AscifyAction::isProvedDirectImageInstance(clang::SourceLocation location) {
+  auto &w = directImageWitness;
+  auto &source = getCompilerInstance().getSourceManager();
+  return w.requested && !w.invalid && location.isValid() && location.isFileID() &&
+      source.getFileID(location) == w.image.file &&
+      directImageNodeMatches(w.image, FrozenOfficialNvidiaSampleHelperImage) &&
+      getCompilerInstance().getPreprocessor().getMacroInfo(
+          getCompilerInstance().getPreprocessor().getIdentifierInfo("MAX")) == w.max;
+}
+
+bool AscifyAction::requestDirectImageMaxReplay(const clang::Token &name,
+    const clang::MacroDefinition &definition, clang::SourceRange range,
+    const clang::MacroArgs *arguments) {
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  auto &pp = compiler.getPreprocessor();
+  auto &w = directImageWitness;
+  if (w.image.file.isInvalid() || !name.getLocation().isFileID() ||
+      source.getFileID(name.getLocation()) != w.image.file) return false;
+  if (w.invalid || w.requested || arguments == nullptr || arguments->getNumMacroArguments() != 2 ||
+      range.getBegin() != name.getLocation() || !range.getEnd().isFileID() ||
+      source.getFileID(range.getEnd()) != w.image.file || definition.isAmbiguous() ||
+      !definition.getModuleMacros().empty() || definition.getMacroInfo() != w.max ||
+      w.max == nullptr || preservedMaxProvider != w.max || preservedMaxProviderIsCaller ||
+      !w.imageString.skipped || !directImageNodeMatches(w.cuda, FrozenOfficialNvidiaSampleHelperCuda) ||
+      !directImageNodeMatches(w.string, FrozenOfficialNvidiaSampleHelperString) ||
+      !directImageNodeMatches(w.image, FrozenOfficialNvidiaSampleHelperImage)) return false;
+  const auto bytes = source.getBufferData(w.image.file);
+  const llvm::StringRef call = "MAX((float)epsilon, __MIN_EPSILON_ERROR)";
+  const auto offset = bytes.find(call);
+  const auto end = clang::Lexer::getLocForEndOfToken(range.getEnd(), 0, source, compiler.getLangOpts());
+  if (offset == llvm::StringRef::npos || bytes.find(call, offset + 1) != llvm::StringRef::npos ||
+      source.getFileOffset(name.getLocation()) != offset || !end.isFileID() ||
+      source.getFileID(end) != w.image.file || source.getFileOffset(end) != offset + call.size()) return false;
+  const std::vector<std::string> expected[] = {{"(", "float", ")", "epsilon"}, {"__MIN_EPSILON_ERROR"}};
+  for (unsigned i = 0; i != 2; ++i) {
+    std::vector<std::string> actual;
+    for (const auto *token = arguments->getUnexpArgument(i); token->isNot(clang::tok::eof); ++token) {
+      if (actual.size() == 4 || !token->getLocation().isFileID() ||
+          source.getFileID(token->getLocation()) != w.image.file) return false;
+      actual.push_back(pp.getSpelling(*token));
+    }
+    if (actual != expected[i]) return false;
+  }
+  if (pp.getMacroInfo(pp.getIdentifierInfo("float")) || pp.getMacroInfo(pp.getIdentifierInfo("epsilon"))) return false;
+  const auto *epsilon = pp.getMacroInfo(pp.getIdentifierInfo("__MIN_EPSILON_ERROR"));
+  if (epsilon == nullptr || !epsilon->getDefinitionLoc().isFileID() ||
+      source.getFileID(epsilon->getDefinitionLoc()) != w.image.file ||
+      !frontendCgMacroTokens(*epsilon, pp, {"1e-3f"})) return false;
+  const char *guards[] = {"COMMON_HELPER_CUDA_H_", "COMMON_HELPER_IMAGE_H_", "COMMON_HELPER_STRING_H_"};
+  const clang::FileID owners[] = {w.cuda.file, w.image.file, w.string.file};
+  for (unsigned i = 0; i != 3; ++i) {
+    const auto *guard = pp.getMacroInfo(pp.getIdentifierInfo(guards[i]));
+    if (guard == nullptr || guard->isFunctionLike() || guard->getNumTokens() != 0 ||
+        !guard->getDefinitionLoc().isFileID() || source.getFileID(guard->getDefinitionLoc()) != owners[i]) return false;
+    w.guards[i] = guard;
+  }
+  w.epsilon = epsilon; w.invocation = name.getLocation(); w.requested = true;
+  preservedMaxNeeded = true; preservedMaxReplayRequired = true;
+  llvm::errs() << "Ascify direct-image MAX replay v1: one literal consumer; exact CUDA macro epoch; functions_root="
+               << (frozenOfficialNvidiaSampleHelperFunctionsSeen ? 1 : 0) << "\n";
+  return true;
+}
+
+bool AscifyAction::sealDirectImageWitness() {
+  auto &w = directImageWitness;
+  if (!w.requested) return true;
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  auto &pp = compiler.getPreprocessor();
+  const char *controls[] = {"COMMON_HELPER_CUDA_H_", "COMMON_HELPER_IMAGE_H_",
+                           "COMMON_HELPER_STRING_H_", "__MIN_EPSILON_ERROR"};
+  const auto fail = [&]() { w.invalid = true; nvidiaSampleHelperUnsupportedMacroUse = true; return false; };
+  if (w.invalid || !w.imageString.skipped || nvidiaSampleHelperIncludes.size() != 1 ||
+      nvidiaSampleHelperIncludes.front().hashLocation != w.cudaRoot.hash ||
+      !ownedPreservedMaxLocation(w.cudaRoot.hash) || !ownedPreservedMaxLocation(w.imageRoot.hash) ||
+      contextualInputSha256(source.getBufferData(source.getMainFileID())) != w.rootSha256 ||
+      pp.getMacroInfo(pp.getIdentifierInfo("MAX")) != w.max || preservedMaxProvider != w.max ||
+      !activeFrozenHelperCudaMaxBodyMatches(*w.max, pp) ||
+      pp.getMacroInfo(pp.getIdentifierInfo(controls[3])) != w.epsilon ||
+      !frontendCgMacroTokens(*w.epsilon, pp, {"1e-3f"}) ||
+      !directImageNodeMatches(w.cuda, FrozenOfficialNvidiaSampleHelperCuda) ||
+      !directImageNodeMatches(w.image, FrozenOfficialNvidiaSampleHelperImage) ||
+      !directImageNodeMatches(w.string, FrozenOfficialNvidiaSampleHelperString)) return fail();
+  for (unsigned i = 0; i != 3; ++i)
+    if (pp.getMacroInfo(pp.getIdentifierInfo(controls[i])) != w.guards[i]) return fail();
+  for (const auto &repeat : w.repeats) if (!repeat.skipped) return fail();
+  auto mentions = [&](llvm::StringRef text) {
+    return std::any_of(std::begin(controls), std::end(controls),
+        [&](const char *control) { return text.contains(control); });
+  };
+  for (const auto &macro : compiler.getPreprocessorOpts().Macros)
+    if (mentions(macro.first) || llvm::StringRef(macro.first).contains("push_macro") ||
+        llvm::StringRef(macro.first).contains("pop_macro")) return fail();
+  const auto main = source.getBufferData(source.getMainFileID());
+  clang::Lexer lexer(source.getLocForStartOfFile(source.getMainFileID()), compiler.getLangOpts(),
+      main.begin(), main.begin(), main.end());
+  for (;;) {
+    clang::Token token; lexer.LexFromRawLexer(token);
+    if (token.is(clang::tok::eof)) break;
+    if (token.is(clang::tok::raw_identifier)) {
+      const auto word = pp.getSpelling(token);
+      if (mentions(word) || word == "push_macro" || word == "pop_macro") return fail();
+    }
+    if (token.is(clang::tok::string_literal)) {
+      clang::StringLiteralParser literal(llvm::ArrayRef<clang::Token>(&token, 1),
+          source, compiler.getLangOpts(), compiler.getTarget(), nullptr);
+      if (literal.hadError || mentions(literal.GetString())) return fail();
+    }
+  }
+  if (localHeaderContext && localHeaderContext->inputEvidence) {
+    auto &evidence = *localHeaderContext->inputEvidence;
+    for (const auto *node : {&w.cuda, &w.image, &w.string}) {
+      const auto path = contextualRecordPathBinding(evidence, node->path);
+      if (path.empty()) return fail();
+      evidence.fileSha256[path] = node->sha256;
+      evidence.providerIdentities[path] = {node->device, node->inode};
+      evidence.providerSizes[path] = node->size;
+    }
+  }
+  return true;
+}
+
 bool AscifyAction::isDirectFrozenFunctionsImageProviderInstance(
     clang::SourceLocation imageLocation) {
   clang::SourceManager &sourceManager =
@@ -12529,6 +12802,8 @@ void AscifyAction::auditFrozenNvidiaSampleHelperMacroDependency(
 }
 
 void AscifyAction::finalizeNvidiaSampleHelperClosure() {
+  if (!sealDirectImageWitness())
+    nvidiaSampleHelperUnsupportedMacroUse = true;
   if (nvidiaSampleHelperIncludes.empty())
     return;
   if (!provePreservedMaxFinalState())

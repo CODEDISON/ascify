@@ -1,0 +1,258 @@
+{
+  "schema": "ascify.direct-image.planned-original-CUDA-matrix.v1",
+  "cases": [
+    {
+      "name": "legacy_functions_before_cuda",
+      "expected_new_graph_or_legacy_acceptance": true,
+      "source": "#include <helper_functions.h>\n#include <helper_cuda.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "compiler_flags": [],
+      "fixture_only_setup": null,
+      "contract_checked": "旧Functions根及Image provider路径原样对照；不借新direct事实。",
+      "required_checks": [
+        "legacy witness remains valid",
+        "source/target final MAX tokens equal"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
+    },
+    {
+      "name": "legacy_cuda_before_functions",
+      "expected_new_graph_or_legacy_acceptance": true,
+      "source": "#include <helper_cuda.h>\n#include <helper_functions.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "compiler_flags": [],
+      "fixture_only_setup": null,
+      "contract_checked": "旧CUDA→Functions→Image内部MAX路径原样对照。",
+      "required_checks": [
+        "existing FunctionsSeen source unchanged",
+        "no new root provenance shortcut"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
+    },
+    {
+      "name": "direct_default",
+      "expected_new_graph_or_legacy_acceptance": true,
+      "source": "#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "compiler_flags": [],
+      "fixture_only_setup": null,
+      "contract_checked": "单个直接CUDA根、直接Image根及String依赖，root没有MAX调用；实际Image内部事件必须请求精确CUDA MAX重放。",
+      "required_checks": [
+        "Functions root count 0",
+        "Image and String remain included",
+        "CUDA MAX literal definition replayed at original CUDA include",
+        "default EPS dependency owner is this exact Image instance"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
+    },
+    {
+      "name": "direct_preserved_effects",
+      "expected_new_graph_or_legacy_acceptance": true,
+      "source": "#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\n#ifndef MAX\n#define MAX(a,b) ((a < b) ? b : a)\n#endif\nstatic int count;\nstatic float left(){++count;return 3.0f;}\nstatic float right(){++count;return 3.0f;}\nstatic float effects(){return MIN(MAX(left(),right()),MAX(1.0f,2.0f));}\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "compiler_flags": [],
+      "fixture_only_setup": null,
+      "contract_checked": "复用既有MAX最终定义、inactive fallback、调用次数及非反射Image MIN证明；不改变参数/求值次序。",
+      "required_checks": [
+        "same provider epoch before/after Image",
+        "whole published include closure",
+        "NaN/tie/signed-zero/evaluation-count macro-only CPU oracle",
+        "additional low-precedence expression equality"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
+    },
+    {
+      "name": "direct_repeated_image",
+      "expected_new_graph_or_legacy_acceptance": true,
+      "source": "#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\n#include <helper_image.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "compiler_flags": [],
+      "fixture_only_setup": null,
+      "contract_checked": "Image正常完整guard重复：首Entry只授权一次，第二个直接include须为同UID且实际FileSkipped；CUDA可移除include仍恰好1个。",
+      "required_checks": [
+        "one Image entered instance",
+        "repeat skip adds no new authority",
+        "String skip binds same physical provider"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
+    },
+    {
+      "name": "mutated_image",
+      "expected_new_graph_or_legacy_acceptance": false,
+      "source": "#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "compiler_flags": [],
+      "fixture_only_setup": {
+        "copy_helpers_to_private_fixture": true,
+        "mutate": "helper_image.h",
+        "edit": "append one harmless comment after whole file",
+        "original_upstream_files_untouched": true
+      },
+      "contract_checked": "同名实际选中image全字节身份不匹配；不得借basename或另一role授权。",
+      "required_checks": [
+        "original syntax remains valid",
+        "whole helper transaction refuses",
+        "managed output/bundle unchanged"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
+    },
+    {
+      "name": "mutated_cuda",
+      "expected_new_graph_or_legacy_acceptance": false,
+      "source": "#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "compiler_flags": [],
+      "fixture_only_setup": {
+        "copy_helpers_to_private_fixture": true,
+        "mutate": "helper_cuda.h",
+        "edit": "append one harmless comment after whole file",
+        "original_upstream_files_untouched": true
+      },
+      "contract_checked": "同名实际选中cuda全字节身份不匹配；不得借basename或另一role授权。",
+      "required_checks": [
+        "original syntax remains valid",
+        "whole helper transaction refuses",
+        "managed output/bundle unchanged"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
+    },
+    {
+      "name": "mutated_string",
+      "expected_new_graph_or_legacy_acceptance": false,
+      "source": "#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "compiler_flags": [],
+      "fixture_only_setup": {
+        "copy_helpers_to_private_fixture": true,
+        "mutate": "helper_string.h",
+        "edit": "append one harmless comment after whole file",
+        "original_upstream_files_untouched": true
+      },
+      "contract_checked": "同名实际选中string全字节身份不匹配；不得借basename或另一role授权。",
+      "required_checks": [
+        "original syntax remains valid",
+        "whole helper transaction refuses",
+        "managed output/bundle unchanged"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
+    },
+    {
+      "name": "macro_image_include",
+      "expected_new_graph_or_legacy_acceptance": false,
+      "source": "#include <helper_cuda.h>\n#define PICK_IMAGE <helper_image.h>\n#include PICK_IMAGE\n#include <helper_string.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "compiler_flags": [],
+      "fixture_only_setup": null,
+      "contract_checked": "相同physical Image经宏include进入，缺直接literal-root事实。",
+      "required_checks": [
+        "no direct-image witness",
+        "no helper-only partial publication"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
+    },
+    {
+      "name": "preincluded_image_first_entry",
+      "expected_new_graph_or_legacy_acceptance": false,
+      "source": "#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "compiler_flags": [
+        "-include",
+        "{helpers}/helper_image.h"
+      ],
+      "fixture_only_setup": null,
+      "contract_checked": "Image首次由CLI -include进入；后面的直接include/FileSkipped不能追授首Entry资格或靠system_header升权。",
+      "required_checks": [
+        "first physical identity parent is not a direct main root",
+        "no retroactive promotion"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
+    },
+    {
+      "name": "remapped_image_same_bytes",
+      "expected_new_graph_or_legacy_acceptance": false,
+      "source": "#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "compiler_flags": [],
+      "fixture_only_setup": {
+        "copy_exact_image_bytes_to_private_file": true,
+        "clang_remap_file": {
+          "from": "{helpers}/helper_image.h",
+          "to": "{case}/remapped_image.h"
+        }
+      },
+      "contract_checked": "对Image做caller remap，即使替换buffer字节相同也无真实physical实例证明。",
+      "required_checks": [
+        "original CUDA syntax gate independently valid",
+        "SM override and UID/bytes guard reject",
+        "existing publication unchanged"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
+    },
+    {
+      "name": "max_same_body_restore",
+      "expected_new_graph_or_legacy_acceptance": false,
+      "source": "#include <helper_cuda.h>\n#pragma push_macro(\"MAX\")\n#undef MAX\n#define MAX(a,b) (a>b?a:b)\n#pragma pop_macro(\"MAX\")\n#include <helper_image.h>\n#include <helper_string.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "compiler_flags": [],
+      "fixture_only_setup": null,
+      "contract_checked": "同值重定义/恢复不能消除MAX epoch和pragma历史；原MacroInfo指针回归也不清除sticky refusal。",
+      "required_checks": [
+        "history remains rejected",
+        "no clearing existing unsupported flags"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
+    },
+    {
+      "name": "reflection_stringize",
+      "expected_new_graph_or_legacy_acceptance": false,
+      "source": "#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\n#ifndef MAX\n#define MAX(a,b) ((a < b) ? b : a)\n#endif\n#define OBSERVE(x) ((void)sizeof(#x),(x))\nstatic float observed(){return OBSERVE(MAX(1.0f,2.0f));}\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "compiler_flags": [],
+      "fixture_only_setup": null,
+      "contract_checked": "Image根不授权caller反射；参数prescan中的真实MAX token也不能跳过外层#观察。",
+      "required_checks": [
+        "all enclosing observer ranges retained",
+        "old and fresh output/bundle atomicity"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
+    },
+    {
+      "name": "epsilon_conditional_override",
+      "expected_new_graph_or_legacy_acceptance": false,
+      "source": "#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\nint main(){\n  cudaChannelFormatDesc format=cudaCreateChannelDesc<float>();\n  cudaArray_t array=nullptr;\n  checkCudaErrors(cudaMallocArray(&array,&format,2,2));\n  return 0;\n}\n",
+      "compiler_flags": [
+        "-D__MIN_EPSILON_ERROR=0.25f?1.0f:0.0f"
+      ],
+      "fixture_only_setup": null,
+      "contract_checked": "初版只接Image-owned literal 1e-3f依赖；未证CLI输入传递不因header hash或重放而变成macro权限。条件表达式可区分两种MAX宏体。",
+      "required_checks": [
+        "active EPS provider is CLI, not Image",
+        "whole transaction refuses",
+        "no automatic -D copying"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
+    },
+    {
+      "name": "mixed_runtime_driver_atomic",
+      "expected_new_graph_or_legacy_acceptance": false,
+      "source": "#include <cuda.h>\nstatic const char* _cudaGetErrorEnum(CUresult) { return \"driver status\"; }\n\n#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\n\nvoid reject_driver_status() {\n  checkCudaErrors(cudaDeviceSynchronize());\n  checkCudaErrors(cuInit(0));\n}\n",
+      "compiler_flags": [],
+      "fixture_only_setup": null,
+      "contract_checked": "复用已有原语法Driver status fixture，再混合已准入Runtime；任何未闭合域保留整个helper/include/guard/宏事务。",
+      "required_checks": [
+        "both helper calls retain together or whole conversion fails",
+        "no partial status success",
+        "no SM sizing change"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
+    }
+  ],
+  "total": 15,
+  "expected_admit": 5,
+  "expected_refuse": 10,
+  "all_original_syntax_pending": true,
+  "case_strings_only_not_a_test_runner": true,
+  "existing_MAX_regressions_remain_required": "/Users/edconeone/Desktop/EverythingEverywhere/WORKSPACE/ascendcify_work/projects/ascify_scope63_20261026/source_cg_compiler_default_v3/tests/rewrite/check_sample_helper_max_preservation.py"
+}

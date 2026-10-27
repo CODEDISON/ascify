@@ -180,6 +180,42 @@ private:
   bool preservedMaxProviderIsCaller = false;
   bool preservedMaxNeeded = false;
   bool preservedMaxReplayRequired = false;
+  struct DirectImageNode {
+    clang::FileID file;
+    std::string path, sha256;
+    std::uint64_t device = 0, inode = 0, size = 0;
+  };
+  struct DirectImageInclude {
+    clang::SourceLocation hash, end;
+    std::string path;
+    std::uint64_t device = 0, inode = 0;
+    bool skipped = false;
+  };
+  struct DirectImageWitness {
+    DirectImageInclude cudaRoot, imageRoot, cudaString, imageString;
+    DirectImageNode cuda, image, string;
+    std::vector<DirectImageInclude> repeats;
+    std::string rootSha256;
+    const clang::MacroInfo *max = nullptr, *epsilon = nullptr;
+    const clang::MacroInfo *guards[3] = {nullptr, nullptr, nullptr};
+    clang::SourceLocation invocation;
+    bool requested = false, invalid = false;
+  } directImageWitness;
+  void observeDirectImageInclude(clang::SourceLocation hash,
+      const clang::Token &directive, llvm::StringRef name,
+      clang::CharSourceRange range, llvm::StringRef resolved,
+      const clang::Module *module);
+  void observeDirectImageEntry(clang::FileID file, bool firstPhysicalEntry);
+  void observeDirectImageSkip(const clang::FileEntry &entry,
+      const clang::Token &filename, llvm::StringRef resolved);
+  bool directImageNodeMatches(const DirectImageNode &node, unsigned role);
+  bool directImageIncludeContains(const DirectImageInclude &include,
+      clang::SourceLocation location);
+  bool isProvedDirectImageInstance(clang::SourceLocation location);
+  bool requestDirectImageMaxReplay(const clang::Token &name,
+      const clang::MacroDefinition &definition, clang::SourceRange range,
+      const clang::MacroArgs *arguments);
+  bool sealDirectImageWitness();
   std::vector<NvidiaSampleTemplateGuard> nvidiaSampleTemplateGuards;
   std::vector<NvidiaSampleInactiveBranch> nvidiaSampleInactiveBranches;
   std::vector<SemanticRewriteRange> provenKernelAttributeCalleeRanges;
