@@ -12551,7 +12551,7 @@ void AscifyAction::observeDirectImageEntry(clang::FileID file, bool firstPhysica
       w.invalid = true;
       return;
     }
-    capture(w.utilityInclude, FrozenOfficialNvidiaSampleHelperNone, w.utility);
+    capture(w.utilityInclude, FrozenNvidiaSampleHelperNone, w.utility);
     return;
   }
   if (directImageIncludeContains(w.imageString, include)) w.invalid = true; // expected same-guard skip
@@ -12707,7 +12707,7 @@ bool AscifyAction::sealDirectImageUtility() {
   if (directImageUtilityInvalid || file.isInvalid() ||
       w.utility.size != 6168 || w.utility.sha256 !=
           "ad043023a652bf3610671aad88237383c7bf2e17c66f8da5830d1d668fe7bbe7" ||
-      !directImageNodeMatches(w.utility, FrozenOfficialNvidiaSampleHelperNone) ||
+      !directImageNodeMatches(w.utility, FrozenNvidiaSampleHelperNone) ||
       !directImageIncludeContains(w.utilityInclude, source.getIncludeLoc(file)) ||
       source.getFileID(w.utilityInclude.hash) != w.image.file ||
       w.utilityInclude.path != w.utility.path ||
@@ -12736,7 +12736,7 @@ bool AscifyAction::sealDirectImageUtility() {
       source.getFileOffset(use.token) != failureOffset ||
       !frontendCgMacroTokens(*macro, pp, {"1"}) ||
       pp.getMacroInfo(pp.getIdentifierInfo("EXIT_FAILURE")) != macro ||
-      !use.definition.isFileID() || !directImageNodeMatches(use.provider, FrozenOfficialNvidiaSampleHelperNone) ||
+      !use.definition.isFileID() || !directImageNodeMatches(use.provider, FrozenNvidiaSampleHelperNone) ||
       !source.isInSystemHeader(use.definition) ||
       !(pathIsWithinPhysicalDirectory(use.provider.path, "/usr/include") ||
         pathIsWithinPhysicalDirectory(use.provider.path, "/usr/lib/gcc"))) return false;
