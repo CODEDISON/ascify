@@ -219,7 +219,7 @@ __device__ void sync(const thread_block&);
     yield origin('origin_explicit_sdk', ('-I{cuda}/include',), accepted=True,
                  provider='{cuda}/include/cooperative_groups.h')
     yield origin('origin_sdk_before_shadow', ('-I{cuda}/include', '-I{case}/shadow'),
-                 accepted=True, files=shadow, provider='{cuda}/include/cooperative_groups.h')
+                 accepted=False, files=shadow, provider='shadow/cooperative_groups.h')
     yield origin('origin_shadow_before_sdk', ('-I{case}/shadow', '-I{cuda}/include'), files=shadow)
     repeated = base.replace('#include <cooperative_groups.h>\n',
                             '#include <cooperative_groups.h>\n#include <cooperative_groups.h>\n')
