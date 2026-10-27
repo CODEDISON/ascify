@@ -348,6 +348,7 @@ private:
       clang::SourceLocation imageLocation);
   bool admitFrozenHelperMaxFallback(const clang::Token &macroNameToken);
   bool ownedPreservedMaxLocation(clang::SourceLocation location);
+  bool ownedNttpVoidCallLocation(clang::SourceLocation location);
   bool recordPreservedMaxFallback(const clang::Token &macroNameToken,
                                   const clang::MacroDefinition &definition);
   bool recordPreservedMaxDefinition(const clang::Token &macroNameToken);

@@ -188,6 +188,10 @@ struct LocalHeaderRewriteContext {
   // original root path using Tool.run, never runAndSave on an input file.
   const std::string *virtualInput = nullptr;
   LocalHeaderInputEvidence *inputEvidence = nullptr;
+  // Internal source-only joint input capability, set solely by contextualize
+  // after the original root, include boundaries and leaf bytes are verified.
+  // It grants no publication before the outer token/macro/path/input checks.
+  bool sourceOnlyJointInput = false;
   bool requireHelperTransaction = false;
   bool helperTransactionCommitted = false;
 

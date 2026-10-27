@@ -1140,6 +1140,8 @@ bool ascifySourceWithLocalHeaderClosure(
       jointContext.virtualInput = &flattened;
       jointContext.inputEvidence = &jointEvidence;
       jointContext.requireHelperTransaction = requireHelperTransaction;
+      jointContext.sourceOnlyJointInput = !requireHelperTransaction &&
+          !originalPlan.inheritedSourceHeaders().empty();
       if (!ascifySingleSource(mainSourceAbsPath, pathString(stagedRoot), compDB,
                               OptionsParserPtr, ascify_exe, mainSourceAbsPath, false,
                               &jointContext) || jointPlan.failed() ||

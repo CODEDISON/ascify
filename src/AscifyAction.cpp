@@ -11577,6 +11577,31 @@ bool AscifyAction::ownedPreservedMaxLocation(clang::SourceLocation location) {
       source.getFilename(location), *entry, source);
 }
 
+bool AscifyAction::ownedNttpVoidCallLocation(clang::SourceLocation location) {
+  if (!location.isFileID()) return false;
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  const auto file = source.getFileID(location);
+  const auto *entry = source.getFileEntryForID(file);
+  const auto &preprocessor = compiler.getPreprocessorOpts();
+  if (entry == nullptr || source.isFileOverridden(entry) ||
+      !preprocessor.RemappedFiles.empty() || !preprocessor.RemappedFileBuffers.empty()) return false;
+  if (ownedPreservedMaxLocation(location)) return true;
+  if (file != source.getMainFileID() || localHeaderContext == nullptr ||
+      !localHeaderContext->sourceOnlyJointInput || localHeaderContext->requireHelperTransaction ||
+      localHeaderContext->depth != 0 || localHeaderContext->plan == nullptr ||
+      localHeaderContext->plan->failed() || localHeaderContext->virtualInput == nullptr ||
+      localHeaderContext->inputEvidence == nullptr ||
+      localHeaderContext->sourcePath != localHeaderContext->plan->rootSourcePath() ||
+      localHeaderContext->artifactPath != localHeaderContext->plan->rootArtifactPath() ||
+      source.getFilename(location) != localHeaderContext->plan->rootSourcePath()) return false;
+  // This is the exact unpublished joint buffer, not the physical root. Rebuild
+  // facts in this AST; LocalHeader.cpp still verifies full evidence to publish.
+  bool invalid = false;
+  const auto bytes = source.getBufferData(file, &invalid);
+  return !invalid && bytes == *localHeaderContext->virtualInput;
+}
+
 bool AscifyAction::recordPreservedMaxFallback(
     const clang::Token &name, const clang::MacroDefinition &definition) {
   auto &compiler = getCompilerInstance();
@@ -13067,7 +13092,7 @@ void AscifyAction::ExecuteAction() {
   std::string nttpVoidError;
   clang::SourceLocation nttpVoidLocation;
   if (!ascify::ProveNttpVoidCalls(getCompilerInstance().getASTContext(),
-          [&](clang::SourceLocation location) { return ownedPreservedMaxLocation(location); },
+          [&](clang::SourceLocation location) { return ownedNttpVoidCallLocation(location); },
           nttpCgRecord,
           [&](const clang::FunctionDecl* function) {
             return function && function->hasAttr<clang::CUDADeviceAttr>() &&
@@ -13343,7 +13368,7 @@ void AscifyAction::ExecuteAction() {
     std::vector<SemanticRewriteRange> ranges;
     for (const auto location : nttpVoidCallPlan.qualifications) {
       if (!location.isFileID() || !SM.isWrittenInMainFile(location) ||
-          !ownedPreservedMaxLocation(location)) {
+          !ownedNttpVoidCallLocation(location)) {
         nttpVoidError = "qualification has no literal main-file owner";
         break;
       }

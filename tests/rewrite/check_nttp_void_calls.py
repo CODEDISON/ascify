@@ -63,10 +63,14 @@ def fixtures():
     base = complete()
 
     def case(name, source, accepted=True, files=None, flags=(), needs=True,
-             retained=(), qualifiers=('::leaf<', '::relay<'), recursive=False):
-        return dict(name=name, source=source, accepted=accepted, files=files or {},
-                    flags=list(flags), needs=needs, retained=list(retained),
-                    qualifiers=list(qualifiers), recursive=recursive)
+             retained=(), qualifiers=('::leaf<', '::relay<'), recursive=False,
+             remap_file=None):
+        result = dict(name=name, source=source, accepted=accepted, files=files or {},
+                      flags=list(flags), needs=needs, retained=list(retained),
+                      qualifiers=list(qualifiers), recursive=recursive)
+        if remap_file is not None:
+            result['remap_file'] = remap_file
+        return result
 
     yield case('all40', base, retained=('volatile float* p', 'const float* input',
                'cg::thread_block block', 'first_kernel<512,true>', 'second_kernel<1,false>'))
@@ -193,6 +197,10 @@ __device__ void sync(const thread_block&);
 '''
     yield case('same_named_cg_header', base, accepted=False,
                files={'cooperative_groups.h': fake})
+    yield case('line_spoofed_cg_header', base, accepted=False,
+               files={'cooperative_groups.h': '#line 1 "cooperative_groups.h"\n' + fake})
+    yield case('caller_remapped_root', base, accepted=False,
+               files={'remapped.cu': base}, remap_file='remapped.cu')
 
 
 def sha(path):
@@ -307,6 +315,10 @@ def main():
             inputs = {str(p): sha(p) for p in directory.iterdir() if p.is_file()}
             language = ['-x', 'cuda', '-std=c++17', '-fgpu-rdc',
                         '-I' + str(directory), *sdk_flags, *case['flags']]
+            if 'remap_file' in case:
+                remapped = directory / case['remap_file']
+                assert case['remap_file'] in case['files'] and remapped.is_file()
+                language += ['-Xclang', '-remap-file', '-Xclang', str(source) + ';' + str(remapped)]
             syntax = [str(args.clang), '--cuda-host-only', '-nocudalib',
                       '--cuda-path=' + str(args.cuda_path), '-Wno-unknown-cuda-version',
                       '-fsyntax-only', *language, str(source)]
