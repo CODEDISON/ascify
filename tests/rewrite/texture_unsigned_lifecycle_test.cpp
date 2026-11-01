@@ -185,5 +185,35 @@ int main() {
   assert(std::memcmp(readback, values, sizeof(values)) == 0);
   assert(ascify::cudaDestroyTextureObject(token) == ACL_SUCCESS);
   assert(ascify::cudaFreeArray(array) == ACL_SUCCESS);
+
+  // Actual host create publishes mode2 only for normalized mirror. The
+  // unnormalized setting becomes clamp; third-axis mirror does not alter XY.
+  assert(ascify::cudaMallocArray(&array,&channel,4,2)==ACL_SUCCESS);
+  assert(ascify::cudaMemcpyToArray(array,0,0,values,sizeof(values),ACL_MEMCPY_HOST_TO_DEVICE)==ACL_SUCCESS);
+  resource.res.array.array=array;
+  for(bool norm:{false,true})for(unsigned axis=0;axis<3;++axis) {
+    texture=point_texture();texture.normalizedCoords=norm;
+    texture.addressMode[axis]=ascify::cudaAddressModeMirror;
+    assert(ascify::cudaCreateTextureObject(&token,&resource,&texture,nullptr)==ACL_SUCCESS);
+    const auto *d=reinterpret_cast<const ascify::detail::TextureSamplingDescriptor *>(token);
+    assert(d->wrap_x==(norm&&axis==0?2U:0U)&&d->wrap_y==(norm&&axis==1?2U:0U));
+    const float x=axis==0?-.25f:.25f,y=axis==1?-.75f:.25f;
+    const unsigned expected=!norm?values[0]:axis==1?values[5]:values[1];
+    assert(ascify::tex2D<unsigned int>(token,x,y)==expected);
+    assert(ascify::cudaDestroyTextureObject(token)==ACL_SUCCESS);
+  }
+  texture=point_texture();texture.normalizedCoords=1;
+  texture.addressMode[0]=ascify::cudaAddressModeMirror;
+  texture.addressMode[1]=ascify::cudaAddressModeWrap;
+  assert(ascify::cudaCreateTextureObject(&token,&resource,&texture,nullptr)==ACL_SUCCESS);
+  assert(ascify::tex2D<unsigned int>(token,-.25f,-.25f)==values[5]);
+  assert(ascify::cudaDestroyTextureObject(token)==ACL_SUCCESS);
+  const unsigned before_border=allocation_calls;
+  for(unsigned axis=0;axis<3;++axis) {
+    texture=point_texture();texture.addressMode[axis]=ascify::cudaAddressModeBorder;token=123;
+    assert(ascify::cudaCreateTextureObject(&token,&resource,&texture,nullptr)==ACL_ERROR_FEATURE_UNSUPPORTED);
+    assert(token==123&&allocation_calls==before_border);
+  }
+  assert(ascify::cudaFreeArray(array)==ACL_SUCCESS);
   assert(allocations.empty() && allocation_calls == free_calls);
 }

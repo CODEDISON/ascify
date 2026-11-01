@@ -19,6 +19,11 @@ enum TextureSampleKind : uint32_t {
 inline constexpr uint32_t TextureDescriptorVersion = 0x54580002U;
 inline constexpr uint32_t TextureFilterPoint = 0x32544600U;
 inline constexpr uint32_t TextureFilterLinear = 0x32544601U;
+// Existing v2 readers admit only 0/1 and reject mode2 before any texel read.
+// Keep those encodings and the descriptor layout/error offset unchanged.
+enum TextureAddressMode : uint32_t {
+  TextureAddressClamp = 0, TextureAddressWrap = 1, TextureAddressMirror = 2
+};
 
 // Private host/device ABI. The public CUDA token remains an opaque 64-bit
 // integer; every nonzero address below is owned by the real ACL allocator.
@@ -30,7 +35,7 @@ struct TextureSamplingDescriptor {
   uint32_t height;
   uint32_t layers;
   uint32_t normalized;
-  uint32_t wrap_x;
+  uint32_t wrap_x; // Legacy spelling; now holds TextureAddressMode.
   uint32_t wrap_y;
   uint32_t linear;
   uint32_t layered;
@@ -69,8 +74,8 @@ __aicore__ ASCIFY_FORCEINLINE int textureAddressIndex(int value, int extent,
 
 __aicore__ ASCIFY_FORCEINLINE float textureLoadFloat(
     const TextureSamplingDescriptor *descriptor, int x, int y, int layer) {
-  x = textureAddressIndex(x, static_cast<int>(descriptor->width), descriptor->wrap_x != 0);
-  y = textureAddressIndex(y, static_cast<int>(descriptor->height), descriptor->wrap_y != 0);
+  x = textureAddressIndex(x, static_cast<int>(descriptor->width), descriptor->wrap_x == TextureAddressWrap);
+  y = textureAddressIndex(y, static_cast<int>(descriptor->height), descriptor->wrap_y == TextureAddressWrap);
   const uint64_t address = descriptor->data + uint64_t(layer) * descriptor->layer_bytes +
       uint64_t(y) * descriptor->pitch_bytes + uint64_t(x) * sizeof(float);
   const float value = *reinterpret_cast<const float *>(address);
@@ -80,13 +85,21 @@ __aicore__ ASCIFY_FORCEINLINE float textureLoadFloat(
 }
 
 __aicore__ ASCIFY_FORCEINLINE float textureCoordinate(
-    float coordinate, uint32_t extent, bool normalized, bool wrap) {
+    float coordinate, uint32_t extent, bool normalized, uint32_t mode) {
   if (normalized) {
-    if (wrap) coordinate -= floorf(coordinate);
+    if (mode == TextureAddressWrap) coordinate -= floorf(coordinate);
+    else if (mode == TextureAddressMirror) {
+      // A period-two triangle is even in x. Reduce a finite nonnegative FP32
+      // value without converting a huge coordinate to an integer, subtracting
+      // a tiny negative fraction from one, or overflowing 2*floor(abs(x)/2).
+      const float magnitude = fabsf(coordinate);
+      const float period = magnitude - 2.0f * floorf(magnitude * 0.5f);
+      coordinate = period > 1.0f ? 2.0f - period : period;
+    }
     else coordinate = coordinate < 0.0f ? 0.0f : coordinate > 1.0f ? 1.0f : coordinate;
     return coordinate * static_cast<float>(extent);
   }
-  // Unnormalized wrap is normalized to clamp when constructing the descriptor.
+  // Unnormalized wrap/mirror become clamp when constructing the descriptor.
   const float bound = static_cast<float>(extent);
   return coordinate < 0.0f ? 0.0f : coordinate > bound ? bound : coordinate;
 }
@@ -103,7 +116,8 @@ __aicore__ ASCIFY_FORCEINLINE bool textureSamplingHeader(
       descriptor->width && descriptor->width <= (1U << 20) &&
       descriptor->height && descriptor->height <= (1U << 20) &&
       descriptor->layers && descriptor->layers <= (1U << 20) &&
-      descriptor->normalized <= 1 && descriptor->wrap_x <= 1 && descriptor->wrap_y <= 1 &&
+      descriptor->normalized <= 1 && descriptor->wrap_x <= TextureAddressMirror &&
+      descriptor->wrap_y <= TextureAddressMirror &&
       (!descriptor->wrap_x || descriptor->normalized) &&
       (!descriptor->wrap_y || descriptor->normalized) && descriptor->layered <= 1 &&
       (descriptor->layered != 0) == layered && layer >= 0 &&
@@ -114,9 +128,9 @@ __aicore__ ASCIFY_FORCEINLINE bool textureSamplingHeader(
 __aicore__ ASCIFY_FORCEINLINE bool textureSampleCoordinates(
     const TextureSamplingDescriptor *descriptor, float &x, float &y) {
   x = textureCoordinate(x, descriptor->width, descriptor->normalized != 0,
-                        descriptor->wrap_x != 0);
+                        descriptor->wrap_x);
   y = textureCoordinate(y, descriptor->height, descriptor->normalized != 0,
-                        descriptor->wrap_y != 0);
+                        descriptor->wrap_y);
   // Clamp/reduce first, then bound the transformed values before *any*
   // float-to-int conversion. This also covers extreme finite inputs,
   // normalized multiplication and negative zero without undefined casts.
@@ -183,9 +197,9 @@ __aicore__ ASCIFY_FORCEINLINE unsigned int textureSampleUnsigned(
     return 0;
   }
   const int ix = textureAddressIndex(static_cast<int>(floorf(x)),
-      static_cast<int>(descriptor->width), descriptor->wrap_x != 0);
+      static_cast<int>(descriptor->width), descriptor->wrap_x == TextureAddressWrap);
   const int iy = textureAddressIndex(static_cast<int>(floorf(y)),
-      static_cast<int>(descriptor->height), descriptor->wrap_y != 0);
+      static_cast<int>(descriptor->height), descriptor->wrap_y == TextureAddressWrap);
   const uint64_t address = descriptor->data + uint64_t(layer) * descriptor->layer_bytes +
       uint64_t(iy) * descriptor->pitch_bytes + uint64_t(ix) * sizeof(unsigned int);
   return *reinterpret_cast<const unsigned int *>(address);
@@ -200,13 +214,13 @@ __aicore__ ASCIFY_FORCEINLINE bool textureRGBAWrapCoordinateAdmitted(
   // this unresolved boundary for the new RGBA domain; retain legacy scalar
   // coordinate behavior. Caller has already proved both inputs finite.
   return !descriptor->normalized ||
-      ((!descriptor->wrap_x || x >= 0.0f || x - floorf(x) != 1.0f) &&
-       (!descriptor->wrap_y || y >= 0.0f || y - floorf(y) != 1.0f));
+      ((descriptor->wrap_x != TextureAddressWrap || x >= 0.0f || x - floorf(x) != 1.0f) &&
+       (descriptor->wrap_y != TextureAddressWrap || y >= 0.0f || y - floorf(y) != 1.0f));
 }
 __aicore__ ASCIFY_FORCEINLINE uchar4 textureLoadRGBA(
     const TextureSamplingDescriptor *descriptor, int x, int y, int layer) {
-  x = textureAddressIndex(x, static_cast<int>(descriptor->width), descriptor->wrap_x != 0);
-  y = textureAddressIndex(y, static_cast<int>(descriptor->height), descriptor->wrap_y != 0);
+  x = textureAddressIndex(x, static_cast<int>(descriptor->width), descriptor->wrap_x == TextureAddressWrap);
+  y = textureAddressIndex(y, static_cast<int>(descriptor->height), descriptor->wrap_y == TextureAddressWrap);
   const uint64_t address = descriptor->data + uint64_t(layer) * descriptor->layer_bytes +
       uint64_t(y) * descriptor->pitch_bytes + uint64_t(x) * 4;
   const auto *bytes = reinterpret_cast<const unsigned char *>(address);

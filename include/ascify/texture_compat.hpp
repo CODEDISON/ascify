@@ -428,7 +428,8 @@ inline aclError cudaCreateTextureObject(cudaTextureObject_t *output,
     return ACL_ERROR_FEATURE_UNSUPPORTED;
   for(unsigned i=0;i<4;++i) if(texture->borderColor[i]!=0) return ACL_ERROR_FEATURE_UNSUPPORTED;
   for(unsigned i=0;i<3;++i) if(texture->addressMode[i]!=cudaAddressModeWrap &&
-      texture->addressMode[i]!=cudaAddressModeClamp) return ACL_ERROR_FEATURE_UNSUPPORTED;
+      texture->addressMode[i]!=cudaAddressModeClamp &&
+      texture->addressMode[i]!=cudaAddressModeMirror) return ACL_ERROR_FEATURE_UNSUPPORTED;
   // Hold owner provenance stable until the descriptor is published. cudaFree
   // and cudaDeviceReset take this same lock before invoking texture callbacks.
   detail::RuntimeLockGuard allocationGuard(detail::runtimeAllocationRegistry().lock);
@@ -512,8 +513,14 @@ inline aclError cudaCreateTextureObject(cudaTextureObject_t *output,
   value.width=static_cast<uint32_t>(width);value.height=static_cast<uint32_t>(height);
   value.layers=static_cast<uint32_t>(record->layers);value.layered=record->layered;
   value.normalized=texture->normalizedCoords;
-  value.wrap_x=value.normalized && texture->addressMode[0]==cudaAddressModeWrap;
-  value.wrap_y=value.normalized && texture->addressMode[1]==cudaAddressModeWrap;
+  value.wrap_x=!value.normalized ? detail::TextureAddressClamp :
+      texture->addressMode[0]==cudaAddressModeWrap ? detail::TextureAddressWrap :
+      texture->addressMode[0]==cudaAddressModeMirror ? detail::TextureAddressMirror :
+      detail::TextureAddressClamp;
+  value.wrap_y=!value.normalized ? detail::TextureAddressClamp :
+      texture->addressMode[1]==cudaAddressModeWrap ? detail::TextureAddressWrap :
+      texture->addressMode[1]==cudaAddressModeMirror ? detail::TextureAddressMirror :
+      detail::TextureAddressClamp;
   value.linear=texture->filterMode==cudaFilterModeLinear
       ? detail::TextureFilterLinear : detail::TextureFilterPoint;
   value.unsigned_element=sample_kind;

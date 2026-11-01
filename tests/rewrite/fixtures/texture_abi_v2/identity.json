@@ -1,0 +1,13 @@
+{
+  "base_commit": "2c56ad1c6a7d951f660b32412445c3531a29596d",
+  "sampling_source": "include/ascify/texture_sampling.hpp",
+  "sampling_sha256": "9c84b4dc5c4fb8c1ac37947b3244ae1abf82965c00ffdfbb847fbfa66094811e",
+  "wrappers_source": "include/ascify/texture_compat.hpp",
+  "wrappers_source_sha256": "10453a18e546f805bed2432d2273d5933d82fe6a846d2d22abc41ff3c9695204",
+  "wrappers_exact_source_slice": [
+    28141,
+    32255
+  ],
+  "wrappers_sha256": "7e1dc6954f75f958ab872ee8c3d5fc14c2e9b902f4b513fdab071d852431640b",
+  "purpose": "Exactoldv2sampler/publicwrapperbodiesinatestrenamednamespace; mode2mustrejectbeforeprotectedtexelreads. NoNPUevidence."
+}

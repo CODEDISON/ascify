@@ -63,6 +63,8 @@ run_check "ordinary malloc texture ownership and lifecycle" \
   sh "$rewrite_dir/check_texture_malloc_host.sh"
 run_check "RGBA texture host arithmetic, ABI and lifecycle" \
   sh "$rewrite_dir/check_texture_rgba_host.sh"
+run_check "normalized mirror texture addressing and prior-reader rejection" \
+  sh "$rewrite_dir/check_texture_mirror_host.sh"
 run_check "dependent sample-helper emitted type domain" \
   "$python" -B "$rewrite_dir/check_sample_helper_template_domain.py"
 run_check "narrow cooperative-groups compatibility contract" \
