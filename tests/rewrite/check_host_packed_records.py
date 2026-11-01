@@ -45,7 +45,10 @@ def main():
         ('shadow_witness_syntax', False, False, '#define __builtin_offsetof(...) 0\n' + PACK + MAIN, [], [], None),
         ('pack_option', False, False, PACK + MAIN, ['-fpack-struct=2'], [], None),
         ('module_option', False, False, PACK + MAIN, ['-fmodules'], [], None),
-        ('retained_preprocessor', False, False, PACK + MAIN, [], ['retain'], None),
+        ('ordinary_host_without_cuda_preprocessor_flag', True, False,
+            '#if 0\n#error host must skip inactive conditionals\n#endif\n' + PACK + MAIN,
+            [], ['no_default_flag'], None),
+        ('host_amap', False, False, PACK + MAIN, [], ['amap'], None),
         ('caller_overlay_root', False, False, PACK + MAIN, [], ['overlay'], None),
         ('caller_overlay_header', False, True, PACK, [], ['overlay'], None),
         ('caller_remap', False, False, PACK + MAIN, [], ['remap'], None),
@@ -101,8 +104,10 @@ def main():
                 '--target-policy=dav-c310-vec', '--simt-math=fast',
                 '--frontend-compat=ascify-admitted-v1', '--local-headers-recursive',
                 '-I' + str(inputs), '-o', destination]
-            if 'retain' not in options:
+            if 'no_default_flag' not in options:
                 argv.append('--default-preprocessor')
+            if 'amap' in options:
+                argv.append('--amap')
             argv += ['--', '-x', 'c++', '-std=c++17', '-I' + str(inputs), *flags]
             if 'overlay' in options:
                 argv += ['-ivfsoverlay', str(overlay)]
@@ -128,7 +133,7 @@ def main():
                 assert converted.returncode != 0, (name, 'unexpected admission')
                 if 'overlay' in options:
                     assert 'VFS overlay' in diagnostic, (name, diagnostic)
-                elif 'remap' in options:
+                elif 'remap' in options or 'amap' in options:
                     assert 'host C++ input language conflicts' in diagnostic, (name, diagnostic)
                 else:
                     assert 'packed-record' in diagnostic, (name, diagnostic)
