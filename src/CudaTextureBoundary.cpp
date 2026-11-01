@@ -16,12 +16,12 @@ constexpr const char *Names[] = {
   "cudaMallocPitch", "cudaMallocArray", "cudaMalloc3DArray", "cudaFreeArray",
   "cudaMemcpy2D", "cudaMemset2D", "cudaMemcpyToArray", "cudaMemcpy2DToArray", "cudaMemcpy3D",
   "cudaCreateTextureObject", "cudaDestroyTextureObject", "cudaCreateChannelDesc",
-  "make_cudaExtent", "make_cudaPos", "make_cudaPitchedPtr", "tex2D", "tex2DLayered",
+  "make_cudaExtent", "make_cudaPos", "make_cudaPitchedPtr", "tex2D", "tex2DLayered", "texCubemap",
   "cudaArray", "cudaArray_t", "cudaArray_const_t", "cudaTextureObject_t",
   "cudaChannelFormatDesc", "cudaChannelFormatKind", "cudaResourceDesc",
   "cudaResourceType", "cudaTextureDesc", "cudaTextureAddressMode",
   "cudaTextureFilterMode", "cudaTextureReadMode", "cudaPitchedPtr", "cudaExtent",
-  "cudaPos", "cudaMemcpy3DParms", "cudaArrayLayered", "cudaResourceViewDesc",
+  "cudaPos", "cudaMemcpy3DParms", "cudaArrayLayered", "cudaArrayCubemap", "cudaResourceViewDesc",
   "cudaChannelFormatKindSigned", "cudaChannelFormatKindUnsigned",
   "cudaChannelFormatKindFloat", "cudaChannelFormatKindNone",
   "cudaResourceTypeArray", "cudaResourceTypeMipmappedArray", "cudaResourceTypeLinear",
@@ -244,6 +244,15 @@ bool ValidateCudaTextureBoundary(clang::ASTContext &context,
         }
         if (call==nullptr || call->getDirectCallee()!=function || strip(call->getCallee())!=reference)
           return fail(reference->getExprLoc(),"texture function is not a direct call");
+        if (function->getName()=="texCubemap") {
+          const auto *arguments=function->getTemplateSpecializationArgs();
+          if (arguments==nullptr || arguments->size()!=1 ||
+              arguments->get(0).getKind()!=clang::TemplateArgument::Type ||
+              !context.hasSameType(arguments->get(0).getAsType(),context.FloatTy) ||
+              !context.hasSameType(function->getReturnType(),context.FloatTy) ||
+              call->getNumArgs()!=4)
+            return fail(reference->getExprLoc(),"cubemap requires one exact float32 return-value fetch");
+        }
         if (const auto *arguments=function->getTemplateSpecializationArgs()) {
           if (arguments->size()!=1 || arguments->get(0).getKind()!=clang::TemplateArgument::Type)
             return fail(reference->getExprLoc(),"texture template requires one exact admitted SDK type");

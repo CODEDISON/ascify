@@ -1,0 +1,130 @@
+{
+  "schema": "ascify.cube-frontend-case-draft.v1",
+  "status": "not executed; original SDK syntax validity and new CLI outcomes both pending",
+  "prefix": "#include <cuda_runtime.h>\n",
+  "frozen_helper_case_prefix": "Use the existing exact frozen helper/context test prefix and physical SDK manifest; do not mock SDK declarations.",
+  "math_modes": [
+    "precise",
+    "fast"
+  ],
+  "fast_expected": "Only emitted texCubemap function name becomes texCubemapFast; both retain bounded center domain.",
+  "atomic_refusal_contract": "After original SDK syntax passes, run both a fresh destination and a prior root/bundle; require failure and exact prior hashes/no fresh publication/staging. No expectation weakening for Runtime/Driver or physical SDK provenance.",
+  "cases": [
+    {
+      "name": "float_fetch",
+      "body": "__global__ void k(float*p,cudaTextureObject_t t){p[0]=texCubemap<float>(t,1.f,-.5f,.5f);}",
+      "expected": "commit",
+      "expected_fragment": "ascify::texCubemap<float>"
+    },
+    {
+      "name": "cube_allocate",
+      "body": "void f(){cudaArray*a=nullptr;auto c=cudaCreateChannelDesc<float>();cudaMalloc3DArray(&a,&c,make_cudaExtent(4,4,6),cudaArrayCubemap);}",
+      "expected": "commit",
+      "expected_fragment": "make_cudaExtent(4,4,6),0x04)"
+    },
+    {
+      "name": "flag_int_prvalue",
+      "body": "auto flag=cudaArrayCubemap;static_assert(__is_same(decltype(flag),int),\"int\");static_assert(__is_same(decltype((cudaArrayCubemap)),int),\"int\");",
+      "expected": "commit",
+      "expected_fragment": "decltype((0x04))"
+    },
+    {
+      "name": "frozen_helper_status",
+      "body": "void f(){cudaArray*a=nullptr;auto c=cudaCreateChannelDesc<float>();checkCudaErrors(cudaMalloc3DArray(&a,&c,make_cudaExtent(4,4,6),cudaArrayCubemap));}",
+      "expected": "commit",
+      "expected_fragment": "ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaMalloc3DArray"
+    },
+    {
+      "name": "other_type_unsigned_int",
+      "body": "__global__ void k(unsigned int*p,cudaTextureObject_t t){p[0]=texCubemap<unsigned int>(t,1.f,-.5f,.5f);}",
+      "expected": "refuse",
+      "expected_fragment": null
+    },
+    {
+      "name": "other_type_float4",
+      "body": "__global__ void k(float4*p,cudaTextureObject_t t){p[0]=texCubemap<float4>(t,1.f,-.5f,.5f);}",
+      "expected": "refuse",
+      "expected_fragment": null
+    },
+    {
+      "name": "other_type_uchar4",
+      "body": "__global__ void k(uchar4*p,cudaTextureObject_t t){p[0]=texCubemap<uchar4>(t,1.f,-.5f,.5f);}",
+      "expected": "refuse",
+      "expected_fragment": null
+    },
+    {
+      "name": "qualified",
+      "body": "__global__ void k(float*p,cudaTextureObject_t t){p[0]=::texCubemap<float>(t,1.f,-.5f,.5f);}",
+      "expected": "refuse",
+      "expected_fragment": null
+    },
+    {
+      "name": "indirect",
+      "body": "__global__ void k(float*p,cudaTextureObject_t t){auto f=&texCubemap<float>;p[0]=f(t,1.f,-.5f,.5f);}",
+      "expected": "refuse",
+      "expected_fragment": null
+    },
+    {
+      "name": "foreign",
+      "body": "float texCubemap(int,float,float,float);__global__ void k(float*p){p[0]=texCubemap(0,1.f,-.5f,.5f);}",
+      "expected": "refuse",
+      "expected_fragment": null
+    },
+    {
+      "name": "macro_call",
+      "body": "#define FETCH(t,x,y,z) texCubemap<float>(t,x,y,z)\n__global__ void k(float*p,cudaTextureObject_t t){p[0]=FETCH(t,1.f,-.5f,.5f);}",
+      "expected": "refuse",
+      "expected_fragment": null
+    },
+    {
+      "name": "target_macro",
+      "body": "#define texCubemapFast user_fetch\n__global__ void k(float*p,cudaTextureObject_t t){p[0]=texCubemap<float>(t,1.f,-.5f,.5f);}",
+      "expected": "refuse",
+      "expected_fragment": null
+    },
+    {
+      "name": "template",
+      "body": "template<class T>__global__ void k(T*p,cudaTextureObject_t t){p[0]=texCubemap<T>(t,1.f,-.5f,.5f);}",
+      "expected": "refuse",
+      "expected_fragment": null
+    },
+    {
+      "name": "flag_stringize",
+      "body": "#define S(x) #x\nconst char*s=S(cudaArrayCubemap);",
+      "expected": "refuse",
+      "expected_fragment": null
+    },
+    {
+      "name": "flag_defined",
+      "body": "#if defined(cudaArrayCubemap)\nint yes;\n#endif",
+      "expected": "refuse",
+      "expected_fragment": null
+    },
+    {
+      "name": "flag_ifdef",
+      "body": "#ifdef cudaArrayCubemap\nint yes;\n#endif",
+      "expected": "refuse",
+      "expected_fragment": null
+    },
+    {
+      "name": "flag_redefine",
+      "body": "#undef cudaArrayCubemap\n#define cudaArrayCubemap 0x04\nint flag=cudaArrayCubemap;",
+      "expected": "refuse",
+      "expected_fragment": null
+    },
+    {
+      "name": "flag_forward",
+      "body": "#define ID(x) (x)\nint flag=ID(cudaArrayCubemap);",
+      "expected": "refuse",
+      "expected_fragment": null
+    },
+    {
+      "name": "record_reflection",
+      "body": "int size=sizeof(cudaTextureDesc);",
+      "expected": "refuse",
+      "expected_fragment": null
+    }
+  ],
+  "new_frontend_run": false,
+  "native_CCEC_device_authorized": false
+}

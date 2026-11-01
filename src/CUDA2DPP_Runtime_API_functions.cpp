@@ -66,6 +66,7 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   m["make_cudaPitchedPtr"] = {"ascify::make_cudaPitchedPtr", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["tex2D"] = {"ascify::tex2D", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["tex2DLayered"] = {"ascify::tex2DLayered", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["texCubemap"] = {"ascify::texCubemap", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   // Device management
   // CUDA owns lazy runtime/context creation. Route all lifecycle-sensitive
   // calls through the compatibility manager instead of assuming an ACL

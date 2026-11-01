@@ -96,9 +96,50 @@ separate gates. No sample source, algorithm, input or oracle is modified.
 
 ## Accepted surface
 
-The frontend requires physical CUDA SDK declarations and direct literal references. The SDK `cudaArrayLayered` macro is materialized as its exact `0x01` literal, retaining its int prvalue type; unproved enclosing macro observers are rejected. Texture calls inside `checkCudaErrors` require the authenticated frozen helper and its successfully committed rewrite transaction. It maps single-component float32 or unsigned-int32 arrays, layered 2D arrays, owned pitched allocations, and corresponding `tex2D`/`tex2DLayered` calls. Descriptor fields retain their CUDA meanings; descriptor binary layout is private. User declarations, indirect function calls, macro-generated names, general layout/reflection, and dependent texture fetches are rejected. Literal zero initialization and a narrowly proved native `memset` of exactly the same whole descriptor are admitted.
+The frontend requires physical CUDA SDK declarations and direct literal references. The SDK `cudaArrayLayered` and `cudaArrayCubemap` macros are materialized as their exact `0x01` and `0x04` literals, retaining their int prvalue types; unproved enclosing macro observers are rejected. Texture calls inside `checkCudaErrors` require the authenticated frozen helper and its successfully committed rewrite transaction. It maps single-component float32 or unsigned-int32 arrays, layered 2D arrays, owned pitched allocations, and corresponding `tex2D`/`tex2DLayered` calls. The bounded float32 cubemap contract below adds a separate topology. Descriptor fields retain their CUDA meanings; descriptor binary layout is private. User declarations, indirect function calls, macro-generated names, general layout/reflection, and dependent texture fetches are rejected. Literal zero initialization and a narrowly proved native `memset` of exactly the same whole descriptor are admitted.
 
-The public APIs include array/pitch allocation and free, 2D row copies and memset, copies to an array, array/pointer `cudaMemcpy3D`, texture creation/destruction, and the associated descriptors. Width/height/layer extents are positive and at most 2^20. Pitches and pointer offsets are bytes; an array endpoint makes the copy extent width count four-byte texels. Bounds and multiplication overflow are checked. Arrays support float32, unsigned-int32 and the experimental RGBA8 format, with no flags except the layered flag for layered allocation. Resource views, mipmaps, normalized integer reads outside RGBA8, sRGB, border addressing, and other unsupported descriptor settings return an explicit error.
+## Bounded cubemap center reads
+
+`cudaMalloc3DArray` admits the exact `cudaArrayCubemap` flag for a nonzero square
+float32 scalar array with six faces. Allocation and `cudaMemcpy3D` retain the
+existing checked sizes, allocator ownership and device/context lifetime rules.
+Layered cubemaps, combined flags, surface access and resource views remain outside
+this adapter. Face order and orientation follow
+[CUDA 13 Table 6](https://docs.nvidia.com/cuda/archive/13.0.0/cuda-c-programming-guide/index.html#cubemap-textures):
+positive X, negative X, positive Y, negative Y, positive Z, negative Z.
+
+`texCubemap<float>` and `texCubemapFast<float>` have the same narrow reading
+domain. The face width must be a power of two from 1 through 2^20. All three
+direction components must be finite, with a unique largest magnitude exactly
+1. After the Table 6 face projection, both coordinates must be exact texel
+centers. An inverse dyadic check rejects adjacent floats that merely rounded
+to an integer pixel. Both point and linear filters are admitted at these centers;
+all other interpolation weights are zero. Normalized coordinates and element
+float32 reads are required. Wrap, Clamp and Mirror descriptor fields are checked,
+but admitted reads never touch an edge or require their remapping rules.
+
+Ties, the zero vector, nonunit dominant axes, non-power-of-two reads, noncentral
+coordinates, nonfinite selected texels, border mode and seamless filtering are
+explicitly rejected through the existing sticky error and blocking host checks.
+Fast mode does not widen the cubemap domain. No arbitrary cubemap projection,
+bilinear interpolation or seam behavior is claimed.
+
+Cube owners and descriptors carry an independent topology tag 2 and a distinct
+CubeFloat sample kind. They never masquerade as ordinary six-layer textures.
+The private descriptor remains 72 bytes with its error pointer at offset 64;
+the existing allocator reserves 96 bytes. Frozen v1/v2 readers reject Cube
+descriptors before texel reads. All consumers must be rebuilt together for the
+new kind/topology semantics; unchanged layout alone does not permit mixing
+consumer versions.
+
+The original `simpleCubemapTexture` default workload uses 64x64x6 generated
+float values, two launches and the full 24,576-element absolute-error comparison
+with inclusive tolerance 0.005. It lies inside the center domain. Its regression
+branch skips that comparison and writes only one face, so it cannot establish
+full-sample acceptance. CPU model tests establish neither target compilation nor
+an original sample device result.
+
+The public APIs include array/pitch allocation and free, 2D row copies and memset, copies to an array, array/pointer `cudaMemcpy3D`, texture creation/destruction, and the associated descriptors. Width/height/layer extents are positive and at most 2^20. Pitches and pointer offsets are bytes; an array endpoint makes the copy extent width count four-byte texels. Bounds and multiplication overflow are checked. Ordinary and layered arrays support float32, unsigned-int32 and the experimental RGBA8 format; layered allocation requires its exact layered flag. The separate float32 cubemap allocation requires its exact cubemap flag under the bounded center-read contract above. Other flag combinations remain unsupported. Resource views, mipmaps, normalized integer reads outside RGBA8, sRGB, border addressing, and other unsupported descriptor settings return an explicit error.
 
 When the explicit frontend compatibility profile is enabled, the texture record audit recognizes its exact product-owned, forced host-math include. Only that inclusion's unchanged dependent template declarations receive the utility exception; actual macro expansions in it disable the exception. Every entered include instance is audited separately, so a caller that undefines the include guard and includes the same physical header again does not inherit the forced inclusion's exception. Caller templates, copied or shadow headers, and concrete texture-layout observations remain subject to the same audit.
 

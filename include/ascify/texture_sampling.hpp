@@ -13,6 +13,7 @@ namespace detail {
 enum TextureSampleKind : uint32_t {
   TextureSampleFloat = 0x54580211U,
   TextureSampleUnsigned = 0x54580212U,
+  TextureSampleCubeFloat = 0x54580231U,
   TextureSampleRGBAElement = 0x54580221U,
   TextureSampleRGBANormalized = 0x54580222U
 };
@@ -23,6 +24,9 @@ inline constexpr uint32_t TextureFilterLinear = 0x32544601U;
 // Keep those encodings and the descriptor layout/error offset unchanged.
 enum TextureAddressMode : uint32_t {
   TextureAddressClamp = 0, TextureAddressWrap = 1, TextureAddressMirror = 2
+};
+enum TextureTopology : uint32_t {
+  TextureTopologyPlain = 0, TextureTopologyLayered = 1, TextureTopologyCube = 2
 };
 
 // Private host/device ABI. The public CUDA token remains an opaque 64-bit
@@ -38,7 +42,7 @@ struct TextureSamplingDescriptor {
   uint32_t wrap_x; // Legacy spelling; now holds TextureAddressMode.
   uint32_t wrap_y;
   uint32_t linear;
-  uint32_t layered;
+  uint32_t layered; // Legacy spelling; TextureTopology, including distinct Cube=2.
   uint32_t unsigned_element; // Legacy spelling; v2 holds TextureSampleKind.
   uint32_t abi_version;
   uint64_t error;
@@ -82,6 +86,55 @@ __aicore__ ASCIFY_FORCEINLINE float textureLoadFloat(
   // CUDA hardware's non-finite texel/filter behavior is outside the admitted
   // numerical contract. Surface it through the same observable sticky error.
   return __builtin_isfinite(value) ? value : textureSamplingReject(descriptor);
+}
+
+// Initial cubemap support deliberately admits only exact texel centers on
+// power-of-two square faces. A rounded projection is not a center proof.
+__aicore__ ASCIFY_FORCEINLINE bool textureCubeCenterIndex(
+    float axis, uint32_t extent, int &index) {
+  const float pixel = (axis + 1.0f) * (0.5f * static_cast<float>(extent)) - 0.5f;
+  if (!__builtin_isfinite(pixel) || pixel < 0.0f ||
+      pixel >= static_cast<float>(extent) || pixel != floorf(pixel)) return false;
+  index = static_cast<int>(pixel); // Finite and within [0,2^20) first.
+  // The integer numerator and its division by a bounded power of two are
+  // exact FP32 dyadics. Reject adjacent floats that rounded to this pixel.
+  const int numerator = 2 * index + 1 - static_cast<int>(extent);
+  return axis == static_cast<float>(numerator) / static_cast<float>(extent);
+}
+
+__aicore__ ASCIFY_FORCEINLINE float textureSampleCubeFloat(
+    unsigned long long token, float x, float y, float z) {
+  const auto *descriptor = reinterpret_cast<const TextureSamplingDescriptor *>(token);
+  const uint32_t width = descriptor->width;
+  // Distinct kind and topology reject ordinary 2D/layered handles and make
+  // old v1/v2 readers reject new cube descriptors before a texel GM read.
+  if (descriptor->abi_version != TextureDescriptorVersion ||
+      descriptor->unsigned_element != TextureSampleCubeFloat ||
+      descriptor->layered != TextureTopologyCube || descriptor->layers != 6 ||
+      !width || width > (1U << 20) || (width & (width - 1)) ||
+      descriptor->height != width || descriptor->normalized != 1 ||
+      descriptor->wrap_x > TextureAddressMirror || descriptor->wrap_y > TextureAddressMirror ||
+      (descriptor->linear != TextureFilterPoint && descriptor->linear != TextureFilterLinear) ||
+      !__builtin_isfinite(x) || !__builtin_isfinite(y) || !__builtin_isfinite(z))
+    return textureSamplingReject(descriptor);
+  const float ax = fabsf(x), ay = fabsf(y), az = fabsf(z);
+  float s = 0.0f, t = 0.0f;
+  int face = 0;
+  // CUDA 13 Programming Guide Table6. Only a strict, unit major axis is
+  // admitted; no tie, zero-vector, general division or seam rule is guessed.
+  if (ax > ay && ax > az && ax == 1.0f) {
+    face = x > 0.0f ? 0 : 1; s = x > 0.0f ? -z : z; t = -y;
+  } else if (ay > ax && ay > az && ay == 1.0f) {
+    face = y > 0.0f ? 2 : 3; s = x; t = y > 0.0f ? z : -z;
+  } else if (az > ax && az > ay && az == 1.0f) {
+    face = z > 0.0f ? 4 : 5; s = z > 0.0f ? x : -x; t = -y;
+  } else return textureSamplingReject(descriptor);
+  int ix = 0, iy = 0;
+  if (!textureCubeCenterIndex(s, width, ix) ||
+      !textureCubeCenterIndex(t, width, iy)) return textureSamplingReject(descriptor);
+  // At an exact center point/linear agree, with zero other weights. There
+  // are no cross-face or edge accesses in this explicitly bounded contract.
+  return textureLoadFloat(descriptor, ix, iy, face);
 }
 
 __aicore__ ASCIFY_FORCEINLINE float textureCoordinate(

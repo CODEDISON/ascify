@@ -80,6 +80,7 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_TYPE_NAME_MAP = [] {
   m["cudaPos"] = {"ascify::cudaPos", CONV_TYPE, API_RUNTIME, SEC::MEMORY};
   m["cudaMemcpy3DParms"] = {"ascify::cudaMemcpy3DParms", CONV_TYPE, API_RUNTIME, SEC::MEMORY};
   m["cudaArrayLayered"] = {"0x01", CONV_DEFINE, API_RUNTIME, SEC::MEMORY};
+  m["cudaArrayCubemap"] = {"0x04", CONV_DEFINE, API_RUNTIME, SEC::MEMORY};
   m["cudaResourceViewDesc"] = {"ascify::cudaResourceViewDesc", CONV_TYPE, API_RUNTIME, SEC::MEMORY};
   m["cudaChannelFormatKindSigned"] = {"ascify::cudaChannelFormatKindSigned", CONV_TYPE, API_RUNTIME, SEC::MEMORY};
   m["cudaChannelFormatKindUnsigned"] = {"ascify::cudaChannelFormatKindUnsigned", CONV_TYPE, API_RUNTIME, SEC::MEMORY};

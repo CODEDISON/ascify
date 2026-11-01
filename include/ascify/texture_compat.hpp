@@ -18,7 +18,8 @@ struct TextureAllocation {
   int32_t device = -1;
   void *context = nullptr;
   unsigned references = 0;
-  bool array = false, layered = false;
+  bool array = false;
+  TextureTopology topology = TextureTopologyPlain;
   TextureChannelKind channel_kind = TextureChannelInvalid;
   bool borrowed = false;
 };
@@ -154,7 +155,7 @@ inline void textureInstallHooks() {
 }
 
 inline aclError textureAllocate(TextureAllocation **result, size_t width,
-    size_t height, size_t layers, bool array, bool layered,
+    size_t height, size_t layers, bool array, TextureTopology topology,
     TextureChannelKind channel_kind = TextureChannelInvalid) {
   // Bounds also keep all sampler integer conversions and float extents exact.
   if (!width || !height || !layers || width > (1U<<20) || height > (1U<<20) ||
@@ -181,7 +182,7 @@ inline aclError textureAllocate(TextureAllocation **result, size_t width,
   status = ::aclrtMalloc(&storage,bytes,ACL_MEM_MALLOC_HUGE_FIRST);
   if (status != ACL_SUCCESS) return status;
   if (!storage) return ACL_ERROR_RT_MEMORY_ALLOCATION;
-  *slot = {storage,bytes,pitch,width,height,layers,device,context,0,array,layered,channel_kind};
+  *slot = {storage,bytes,pitch,width,height,layers,device,context,0,array,topology,channel_kind};
   *result = slot;
   return ACL_SUCCESS;
 }
@@ -220,7 +221,7 @@ inline aclError textureCopyRows(void *dst, size_t dpitch, const void *src,
 inline aclError cudaMallocPitch(void **pointer, size_t *pitch, size_t width, size_t height) {
   if (!pointer || !pitch) return ACL_ERROR_RT_PARAM_INVALID;
   detail::TextureAllocation *record = nullptr;
-  aclError status = detail::textureAllocate(&record,width,height,1,false,false);
+  aclError status = detail::textureAllocate(&record,width,height,1,false,detail::TextureTopologyPlain);
   if (status == ACL_SUCCESS) { *pointer=record->storage; *pitch=record->pitch; }
   return status;
 }
@@ -238,7 +239,7 @@ inline aclError cudaMallocArray(cudaArray_t *array, const cudaChannelFormatDesc 
   const auto channel_kind = detail::textureChannelKind(*channel);
   if (flags || channel_kind == detail::TextureChannelInvalid) return ACL_ERROR_FEATURE_UNSUPPORTED;
   detail::TextureAllocation *record=nullptr;
-  aclError status=detail::textureAllocate(&record,width,height,1,true,false,
+  aclError status=detail::textureAllocate(&record,width,height,1,true,detail::TextureTopologyPlain,
       channel_kind);
   if(status==ACL_SUCCESS) *array=reinterpret_cast<cudaArray_t>(record);
   return status;
@@ -247,10 +248,15 @@ inline aclError cudaMalloc3DArray(cudaArray_t *array, const cudaChannelFormatDes
     cudaExtent extent, unsigned flags=0) {
   if (!array || !channel) return ACL_ERROR_RT_PARAM_INVALID;
   const auto channel_kind = detail::textureChannelKind(*channel);
-  if (flags != cudaArrayLayered || channel_kind == detail::TextureChannelInvalid)
+  detail::TextureTopology topology=detail::TextureTopologyLayered;
+  if (flags == cudaArrayCubemap) {
+    if (channel_kind != detail::TextureChannelFloat || extent.width != extent.height ||
+        extent.depth != 6) return ACL_ERROR_FEATURE_UNSUPPORTED;
+    topology=detail::TextureTopologyCube;
+  } else if (flags != cudaArrayLayered || channel_kind == detail::TextureChannelInvalid)
     return ACL_ERROR_FEATURE_UNSUPPORTED;
   detail::TextureAllocation *record=nullptr;
-  aclError status=detail::textureAllocate(&record,extent.width,extent.height,extent.depth,true,true,
+  aclError status=detail::textureAllocate(&record,extent.width,extent.height,extent.depth,true,topology,
       channel_kind);
   if(status==ACL_SUCCESS) *array=reinterpret_cast<cudaArray_t>(record);
   return status;
@@ -302,7 +308,7 @@ inline aclError cudaMemcpyToArray(cudaArray_t array,size_t x,size_t y,const void
   if(status!=ACL_SUCCESS) return status;
   detail::TextureLock guard;
   auto *record=detail::textureArray(array);
-  if(!record || record->layered || !detail::textureOwned(*record,device,context) ||
+  if(!record || record->topology != detail::TextureTopologyPlain || !detail::textureOwned(*record,device,context) ||
       y>=record->height || x>record->pitch) return ACL_ERROR_RT_PARAM_INVALID;
   const size_t offset=y*record->pitch+x;
   if(bytes>record->bytes-offset) return ACL_ERROR_RT_PARAM_INVALID;
@@ -334,7 +340,7 @@ inline aclError cudaMemcpy2DToArray(cudaArray_t array,size_t x,size_t y,const vo
   if(status!=ACL_SUCCESS) return status;
   detail::TextureLock guard;
   auto *record=detail::textureArray(array);
-  if(!record || record->layered || !detail::textureOwned(*record,device,context) ||
+  if(!record || record->topology != detail::TextureTopologyPlain || !detail::textureOwned(*record,device,context) ||
       x>record->pitch || width>record->pitch-x ||
       y>record->height || height>record->height-y)
     return ACL_ERROR_RT_PARAM_INVALID;
@@ -478,7 +484,7 @@ inline aclError cudaCreateTextureObject(cudaTextureObject_t *output,
       // Each descriptor owns its geometry; one ordinary allocation can back
       // multiple distinct valid pitches. The host slot pins the generation
       // until all its descriptors are destroyed, even after storage is freed.
-      *record={owner->pointer,owner->bytes,0,0,0,1,device,context,0,false,false,
+      *record={owner->pointer,owner->bytes,0,0,0,1,device,context,0,false,detail::TextureTopologyPlain,
                detail::TextureChannelInvalid,true};
       detail::textureInstallHooks();
     }
@@ -487,7 +493,12 @@ inline aclError cudaCreateTextureObject(cudaTextureObject_t *output,
   } else return ACL_ERROR_FEATURE_UNSUPPORTED;
   if(!record || !detail::textureOwned(*record,device,context)) return ACL_ERROR_RT_PARAM_INVALID;
   detail::TextureSampleKind sample_kind=detail::TextureSampleFloat;
-  if(channel_kind==detail::TextureChannelRGBA) {
+  if(record->topology==detail::TextureTopologyCube) {
+    if(!record->array || record->width!=record->height || record->layers!=6 ||
+        channel_kind!=detail::TextureChannelFloat || texture->normalizedCoords!=1 ||
+        texture->readMode!=cudaReadModeElementType) return ACL_ERROR_FEATURE_UNSUPPORTED;
+    sample_kind=detail::TextureSampleCubeFloat;
+  } else if(channel_kind==detail::TextureChannelRGBA) {
     sample_kind=texture->readMode==cudaReadModeNormalizedFloat
         ? detail::TextureSampleRGBANormalized : detail::TextureSampleRGBAElement;
     if(sample_kind==detail::TextureSampleRGBAElement && texture->filterMode!=cudaFilterModePoint)
@@ -511,7 +522,7 @@ inline aclError cudaCreateTextureObject(cudaTextureObject_t *output,
   value.data=reinterpret_cast<uint64_t>(record->storage);
   value.pitch_bytes=pitch; value.layer_bytes=record->pitch*record->height;
   value.width=static_cast<uint32_t>(width);value.height=static_cast<uint32_t>(height);
-  value.layers=static_cast<uint32_t>(record->layers);value.layered=record->layered;
+  value.layers=static_cast<uint32_t>(record->layers);value.layered=record->topology;
   value.normalized=texture->normalizedCoords;
   value.wrap_x=!value.normalized ? detail::TextureAddressClamp :
       texture->addressMode[0]==cudaAddressModeWrap ? detail::TextureAddressWrap :
@@ -559,6 +570,22 @@ inline aclError cudaDestroyTextureObject(cudaTextureObject_t texture) {
     return flag ? ACL_ERROR_FEATURE_UNSUPPORTED : ACL_SUCCESS;
   }
   return ACL_ERROR_RT_PARAM_INVALID;
+}
+
+// Bounded cubemap center reads only. Fast keeps the same strict domain.
+template<typename T>
+__aicore__ ASCIFY_FORCEINLINE T texCubemap(cudaTextureObject_t texture,float x,float y,float z) {
+  static_assert(std::is_same<T,float>::value,"Ascify cubemap requires float32 center fetches");
+#if defined(ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS) && defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
+  return detail::textureSampleCubeFloat(texture,x,y,z);
+#else
+  static_assert(detail::dependentFalse<T>::value,"Ascify cubemap requires the admitted pure-SIMT API");
+  return T{};
+#endif
+}
+template<typename T>
+__aicore__ ASCIFY_FORCEINLINE T texCubemapFast(cudaTextureObject_t texture,float x,float y,float z) {
+  return texCubemap<T>(texture,x,y,z);
 }
 
 template<typename T>

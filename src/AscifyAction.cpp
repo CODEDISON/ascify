@@ -1493,6 +1493,8 @@ void AscifyAction::FindAndReplace(StringRef name,
       repName = "ascify::tex2DFast";
     else if (name == "tex2DLayered" && repName == "ascify::tex2DLayered")
       repName = "ascify::tex2DLayeredFast";
+    else if (name == "texCubemap" && repName == "ascify::texCubemap")
+      repName = "ascify::texCubemapFast";
   }
   auto &SM = getCompilerInstance().getSourceManager();
   ct::Replacement Rep(SM, sl, name.size(), repName.str());
@@ -11772,8 +11774,8 @@ bool AscifyAction::isAdmittedCudaTextureMacroUse(clang::SourceLocation location)
   clang::Token token;
   if (clang::Lexer::getRawToken(written,token,source,getCompilerInstance().getLangOpts(),true))
     return false;
-  const bool layeredFlag=clang::Lexer::getSpelling(token,source,
-      getCompilerInstance().getLangOpts())=="cudaArrayLayered";
+  const auto flagName=clang::Lexer::getSpelling(token,source,getCompilerInstance().getLangOpts());
+  const bool arrayFlag=flagName=="cudaArrayLayered" || flagName=="cudaArrayCubemap";
   const NvidiaSampleHelperMacroCandidate *helper=nullptr;
   for (const auto &candidate:nvidiaSampleHelperMacroCandidates) {
     const auto &range=candidate.invocationRange;
@@ -11788,7 +11790,7 @@ bool AscifyAction::isAdmittedCudaTextureMacroUse(clang::SourceLocation location)
   // SDK flag's own single-token expansion may enclose this literal token.
   for (const auto &range:cudaLaneIdMacroRanges) {
     if (range.file!=file || offset<range.beginOffset || offset>=range.endOffset) continue;
-    if (layeredFlag && range.beginOffset==offset &&
+    if (arrayFlag && range.beginOffset==offset &&
         range.endOffset==offset+token.getLength()) continue;
     if (helper && range.beginOffset==helper->invocationRange.beginOffset &&
         range.endOffset==helper->invocationRange.endOffset) continue;
@@ -11836,7 +11838,8 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
           frontendCompatibility.canonicalRoot + "/host_math.h")
     macroAlteredFrontendHostMathFileIds.insert(
         sourceManager.getFileID(profileUse).getHashValue());
-  if (MacroNameTok.getIdentifierInfo()->getName() == "cudaArrayLayered" && macroInfo != nullptr) {
+  const auto arrayFlagName=MacroNameTok.getIdentifierInfo()->getName();
+  if ((arrayFlagName == "cudaArrayLayered" || arrayFlagName == "cudaArrayCubemap") && macroInfo != nullptr) {
     const auto definition = sourceManager.getSpellingLoc(macroInfo->getDefinitionLoc());
     const auto written = sourceManager.getSpellingLoc(MacroNameTok.getLocation());
     if (definition.isValid() && written.isValid() &&
@@ -11844,10 +11847,11 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
         sourceManager.isWrittenInMainFile(written) && !macroInfo->isFunctionLike() &&
         macroInfo->getNumTokens()==1 &&
         macroInfo->tokens_begin()->is(clang::tok::numeric_constant) &&
-        getCompilerInstance().getPreprocessor().getSpelling(*macroInfo->tokens_begin())=="0x01") {
+        getCompilerInstance().getPreprocessor().getSpelling(*macroInfo->tokens_begin())==
+            (arrayFlagName=="cudaArrayLayered" ? "0x01" : "0x04")) {
       clang::Token token;
       if (!clang::Lexer::getRawToken(written,token,sourceManager,getCompilerInstance().getLangOpts(),true) &&
-          clang::Lexer::getSpelling(token,sourceManager,getCompilerInstance().getLangOpts()) == "cudaArrayLayered")
+          clang::Lexer::getSpelling(token,sourceManager,getCompilerInstance().getLangOpts()) == arrayFlagName)
         cudaTextureLiteralOffsets.insert(sourceManager.getFileOffset(written));
     }
   }

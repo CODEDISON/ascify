@@ -43,6 +43,7 @@ using cudaArray_t = cudaArray *;
 using cudaArray_const_t = const cudaArray *;
 using cudaTextureObject_t = unsigned long long;
 inline constexpr unsigned cudaArrayLayered = 1U;
+inline constexpr unsigned cudaArrayCubemap = 4U;
 
 enum cudaResourceType {
   cudaResourceTypeArray = 0,
