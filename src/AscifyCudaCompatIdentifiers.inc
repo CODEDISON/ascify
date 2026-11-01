@@ -393,6 +393,7 @@
     "cudaDeviceProp",
     "cudaDeviceReset",
     "cudaDeviceSynchronize",
+    "cudaErrorAssert",
     "cudaEventCreate",
     "cudaEventDestroy",
     "cudaEventElapsedTime",
