@@ -10970,8 +10970,9 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     bool VisitTypeLoc(clang::TypeLoc type) {
       if (scalar64.scalarSignatureTypeLocs.count(type.getOpaqueData())) return true;
       // Exact signature/local T occurrences of a three-statement pointer swap.
-      // The emitted guard is mandatory; children/instances still traverse.
-      if (!textureOnly && hostPointerSwap.typeLocs.count(type.getOpaqueData())) return true;
+      // Both audit routes require the same closed plan and emitted guard;
+      // children/instances and inquiry operands still traverse normally.
+      if (hostPointerSwap.typeLocs.count(type.getOpaqueData())) return true;
       return inspect(type.getType(), type.getBeginLoc());
     }
     bool VisitArrayTypeLoc(clang::ArrayTypeLoc type) {
@@ -10998,7 +10999,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       // a transactional global qualification. Never a void/record/body bypass.
       if (nttpVoid.expressions.count(expression)) return true;
       // Inquiry visitors never consult this set; body traversal never stops.
-      if (!textureOnly && hostPointerSwap.expressions.count(expression)) return true;
+      if (hostPointerSwap.expressions.count(expression)) return true;
       // A fixed scalar NTTP call can retain a dependent Expr type until
       // overload resolution, even though no SDK record can enter its type.
       // Prove only this expression; normal traversal still visits its body,
@@ -14702,7 +14703,10 @@ void AscifyAction::ExecuteAction() {
   }
   std::string hostPointerSwapError;
   clang::SourceLocation hostPointerSwapLocation;
-  if (cudaRuntimeApiHeaderAdmitted && !ascify::ProveHostPointerSwaps(
+  // Runtime and literal-texture entry points share this exact proof. Do not
+  // promote cuda_runtime.h to the broader runtime-API header admission.
+  const auto proveHostPointerSwaps = [&]() {
+    if (!ascify::ProveHostPointerSwaps(
           getCompilerInstance().getASTContext(),
           [&](clang::SourceLocation location) { return ownedNttpVoidCallLocation(location); },
           [&](const clang::CallExpr* call) {
@@ -14748,23 +14752,26 @@ void AscifyAction::ExecuteAction() {
           }, !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks &&
               TargetPolicy == "dav-c310-vec" && TargetRecipe == "none",
           hostPointerSwapPlan, hostPointerSwapLocation, hostPointerSwapError)) {
-    const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
-        clang::DiagnosticsEngine::Error, "host pointer-swap boundary: %0");
-    getCompilerInstance().getDiagnostics().Report(hostPointerSwapLocation, diagnostic) << hostPointerSwapError;
-    cudaRuntimeApiBoundaryFailed = true;
-    return;
-  }
-  if (!hostPointerSwapPlan.contextualHeaders.empty()) {
-    if (localHeaderContext == nullptr || localHeaderContext->plan == nullptr) {
       const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
-          clang::DiagnosticsEngine::Error, "host pointer-swap boundary: selected header requires its joint source transaction");
-      getCompilerInstance().getDiagnostics().Report(diagnostic);
+          clang::DiagnosticsEngine::Error, "host pointer-swap boundary: %0");
+      getCompilerInstance().getDiagnostics().Report(hostPointerSwapLocation, diagnostic) << hostPointerSwapError;
       cudaRuntimeApiBoundaryFailed = true;
-      return;
+      return false;
     }
-    for (const auto& path : hostPointerSwapPlan.contextualHeaders)
-      localHeaderContext->plan->requireInheritedSourceContext(path);
-  }
+    if (!hostPointerSwapPlan.contextualHeaders.empty()) {
+      if (localHeaderContext == nullptr || localHeaderContext->plan == nullptr) {
+        const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+            clang::DiagnosticsEngine::Error, "host pointer-swap boundary: selected header requires its joint source transaction");
+        getCompilerInstance().getDiagnostics().Report(diagnostic);
+        cudaRuntimeApiBoundaryFailed = true;
+        return false;
+      }
+      for (const auto& path : hostPointerSwapPlan.contextualHeaders)
+        localHeaderContext->plan->requireInheritedSourceContext(path);
+    }
+    return true;
+  };
+  if (cudaRuntimeApiHeaderAdmitted && !proveHostPointerSwaps()) return;
   if (cudaRuntimeApiHeaderAdmitted && !auditCudaRuntimeApiRecords(false)) {
     cudaRuntimeApiBoundaryFailed = true;
     return;
@@ -15006,10 +15013,15 @@ void AscifyAction::ExecuteAction() {
   // separate cuda_runtime_api.h admission flag. Its texture records still
   // require the same ABI/reflection proof, without broadening the old raw-PP
   // Runtime boundary to this other entry point.
-  if (!cudaRuntimeApiHeaderAdmitted && !cudaTextureLiteralOffsets.empty() &&
-      !auditCudaRuntimeApiRecords(true)) {
-    cudaRuntimeApiBoundaryFailed = true;
-    return;
+  if (!cudaRuntimeApiHeaderAdmitted && !cudaTextureLiteralOffsets.empty()) {
+    // Texture validation above established actual literal SDK uses. Rebuild
+    // the exact host pointer domains in this AST before the texture audit;
+    // dormant primaries still receive their mandatory empty-domain guard.
+    if (!proveHostPointerSwaps()) return;
+    if (!auditCudaRuntimeApiRecords(true)) {
+      cudaRuntimeApiBoundaryFailed = true;
+      return;
+    }
   }
   if (nttpVoidCallPlan.used()) {
     ct::Replacements staged(*replacements);

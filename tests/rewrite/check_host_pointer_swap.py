@@ -17,12 +17,14 @@ SWAP = 'template<class T> inline void swap_values(T &a,T &b){T temporary=a;a=b;b
 CALL = 'void use(float *p,float *q){swap_values(p,q);}\n'
 GUARD_MESSAGE = 'host pointer swap is only proven for the emitted pointer type domain'
 EMPTY_GUARD_MESSAGE = 'host pointer swap has no proven body instance in this translation unit'
+TEXTURE_PREFIX = '#include <cuda_runtime.h>\n'
+TEXTURE_MARKER = 'void texture_contract_marker(){cudaResourceDesc resource{};(void)resource;}\n'
 
 
 def fixtures():
-    def case(name, body=SWAP + CALL, accepted=False, files=None, recursive=False, flags=(), domain=('float *',)):
-        return dict(name=name, source=PREFIX + body, accepted=accepted, files=files or {},
-                    recursive=recursive, flags=list(flags), domain=list(domain))
+    def case(name, body=SWAP + CALL, accepted=False, files=None, recursive=False, flags=(), domain=('float *',), prefix=PREFIX):
+        return dict(name=name, source=prefix + body, accepted=accepted, files=files or {},
+                    recursive=recursive, flags=list(flags), domain=list(domain), prefix=prefix)
     yield case('float_pointer', accepted=True)
     yield case('renamed', (SWAP + CALL).replace('swap_values', 'rotate_addresses').replace(
         'temporary', 'saved').replace('class T', 'typename Element').replace('T &', 'Element &').replace(
@@ -99,6 +101,41 @@ def fixtures():
     yield case('unselected_system_header', '#include <values.h>\n' + CALL,
                files={'values.h': SWAP}, flags=['isystem'])
     yield case('remapped_root', files={'replacement.cu': PREFIX + SWAP + CALL}, flags=['remap'])
+    # Preserve the original 55 cases and their full Runtime entry bytes.
+    # These cases deliberately have no direct cuda_runtime_api.h include.
+    # A real texture record token drives the separate texture-only audit.
+    def texture(name, body=SWAP + CALL, **kwargs):
+        return case('texture_' + name, TEXTURE_MARKER + body, prefix=TEXTURE_PREFIX, **kwargs)
+    yield texture('float_pointer', accepted=True)
+    yield texture('selected_header_joint', '#include "values.h"\n' + CALL,
+                  accepted=True, files={'values.h': '#ifndef VALUES_H\n#define VALUES_H\n' + SWAP + '#endif\n'}, recursive=True)
+    yield texture('new_and_sdk_allocation', SWAP +
+                  'void use(){float *p=new float[4];float *q;cudaMalloc(&q,16);swap_values(p,q);}\n', accepted=True)
+    yield texture('zero_instance_header', '#include "values.h"\nint retained;\n',
+                  accepted=True, files={'values.h': SWAP}, recursive=True, domain=())
+    # Match the original project's helper transaction: helper use, texture
+    # entry and the primary all belong to a selected parent-context header.
+    yield case('texture_contextual_frozen_helper', '#include "values.h"\n', accepted=True,
+               files={'values.h': '#ifndef VALUES_H\n#define VALUES_H\n#include <helper_cuda.h>\n' +
+                      SWAP + TEXTURE_MARKER + 'void allocate_then_swap(){float *p;float *q;'
+                      'checkCudaErrors(cudaMalloc(&p,16));checkCudaErrors(cudaMalloc(&q,16));'
+                      'swap_values(p,q);}\n#endif\n'}, recursive=True,
+               flags=['frozen_common'], prefix=TEXTURE_PREFIX)
+    yield texture('nonpointer', SWAP + 'void use(float a,float b){swap_values(a,b);}\n')
+    yield texture('SDK_record_pointee', SWAP + 'void use(cudaDeviceProp *a,cudaDeviceProp *b){swap_values(a,b);}\n')
+    yield texture('SDK_scalar_alias_pointee', SWAP + 'void use(cudaTextureObject_t *a,cudaTextureObject_t *b){swap_values(a,b);}\n')
+    yield texture('reflection_T', SWAP.replace('b=temporary;', 'b=temporary;(void)sizeof(T);') + CALL)
+    yield texture('reflection_texture', SWAP + CALL + 'unsigned bytes=sizeof(cudaResourceDesc);\n')
+    yield texture('pointer_reference_escape', 'void change(float *&);\n' + SWAP +
+                  'void use(float *p,float *q){change(p);swap_values(p,q);}\n')
+    yield texture('fake_system_allocator_signature', '#include <fake_allocator.h>\n' + SWAP +
+                  'void use(float *p,float *q){cudaMalloc((void**)&p,16);swap_values(p,q);}\n',
+                  files={'fake_allocator.h': '#pragma GCC system_header\ncudaError_t cudaMalloc(void **p,int n);\n'}, flags=['isystem'])
+    yield texture('caller_allocator_redeclaration', 'extern "C" __host__ cudaError_t cudaMalloc(void **p,size_t n);\n' + SWAP +
+                  'void use(float *p,float *q){cudaMalloc((void**)&p,size_t(16));swap_values(p,q);}\n')
+    yield texture('zero_using_export', SWAP + 'namespace other{using ::swap_values;}\n')
+    yield texture('zero_unresolved_future_call', SWAP + 'template<class U>void future(U &a,U &b){swap_values(a,b);}\n')
+    yield texture('guard_trait_macro_restore', '#define __is_same(a,b) true\n' + SWAP + '#undef __is_same\n' + CALL)
 
 
 def sha(path):
@@ -124,6 +161,9 @@ def main():
     for name in ['binary', 'clang', 'cuda-path', 'resource-dir', 'evidence-dir']:
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--case', action='append', default=[])
+    parser.add_argument('--common-path', type=Path,
+                        default=Path(__file__).resolve().parent / 'fixtures/nvidia_samples/Common',
+                        help='Physical frozen NVIDIA Common headers for the helper-transaction case')
     args = parser.parse_args()
     args.evidence_dir.mkdir(parents=True, exist_ok=False)
     identities = {str(p.resolve()): sha(p) for p in [Path(__file__), args.binary, args.clang]}
@@ -157,6 +197,11 @@ def main():
                 flags = ['-x', 'cuda', '-std=c++17', '-isystem', str(folder)]
             if 'remap' in case['flags']:
                 flags += ['-Xclang', '-remap-file', '-Xclang', str(source) + ';' + str(folder / 'replacement.cu')]
+            if 'frozen_common' in case['flags']:
+                for name in ['helper_cuda.h', 'helper_string.h']:
+                    header = (args.common_path / name).resolve()
+                    identities.setdefault(str(header), sha(header))
+                flags += ['-I' + str(args.common_path)]
             row = dict(name=case['name'], accepted=case['accepted'], passed=False, inputs=inputs)
             summary['cases'].append(row);save()
             original = syntax(folder, 'original_syntax', source, flags)
@@ -185,7 +230,7 @@ def main():
                 row['emitted_template_sha256'] = hashlib.sha256(template.encode()).hexdigest()
                 if empty:
                     probe = folder / 'empty_primary_uninstantiated.cu'
-                    probe.write_text(PREFIX + template + 'int retained;\n')
+                    probe.write_text(case['prefix'] + template + 'int retained;\n')
                     assert syntax(folder, 'empty_primary_uninstantiated', probe, ['-x', 'cuda', '-std=c++17']).returncode == 0
                 for label, dtype, accepted in [(('guard_domain_' + str(i)), dtype, True) for i, dtype in enumerate(case['domain'])] + [
                     ('guard_future_SDK_record', 'cudaDeviceProp *', False),
@@ -194,7 +239,7 @@ def main():
                     ('guard_future_void_pointer', 'void *', False),
                     ('guard_future_unobserved_builtin', 'short *', False)]:
                     probe = folder / (label + '.cu')
-                    probe.write_text(PREFIX + template + 'void future(){' + dtype + ' a=nullptr;' + dtype +
+                    probe.write_text(case['prefix'] + template + 'void future(){' + dtype + ' a=nullptr;' + dtype +
                                      ' b=nullptr;' + name + '(a,b);}\n')
                     result = syntax(folder, label, probe, ['-x', 'cuda', '-std=c++17'])
                     assert (result.returncode == 0) is accepted, (case['name'], label, result.stderr)
