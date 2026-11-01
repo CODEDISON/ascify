@@ -14,7 +14,7 @@ HELPERS = ROOT / 'tests/rewrite/fixtures/nvidia_samples/Common'
 PREFIX = ('#include <cuda.h>\n'
           'static const char* _cudaGetErrorEnum(CUresult) { return "driver status"; }\n'
           '#include <cuda_runtime.h>\n#include <helper_cuda.h>\n')
-RESIDUAL = 'int observe_core_map(){return _ConvertSMVer2Cores(7,0);}\n'
+RESIDUAL = 'int observe_unmapped_helper(){return ftoi(1.5f);}\n'
 LEGAL = 'void memory_check(){checkCudaErrors(cudaDeviceSynchronize());}\n'
 TEMPLATE = ('template<class T> void memory_check(T* p){checkCudaErrors(cudaFree(p));}\n'
             'void instantiate(){memory_check<int>(nullptr);}\n')
@@ -52,7 +52,7 @@ def main():
         cases += [(label + '_residual_before', RESIDUAL + body, kind),
                   (label + '_residual_after', body + RESIDUAL, kind)]
     cases += [('first_residual_preserved', RESIDUAL +
-               'int observe_other_helper(){return ftoi(1.5f);}\n' + LEGAL, 'retained')]
+               'const char* observe_other_helper(){return _ConvertSMVer2ArchName(7,0);}\n' + LEGAL, 'retained')]
     rows = []
 
     def run(argv, directory):
@@ -96,7 +96,7 @@ def main():
             assert inventory(inputs) == before, (name, 'source mutation')
             diagnostic = result.stderr.decode(errors='replace')
             if kind != 'committed':
-                assert "residual helper declaration '_ConvertSMVer2Cores'" in diagnostic, (name, diagnostic)
+                assert "residual helper declaration 'ftoi'" in diagnostic, (name, diagnostic)
             if kind == 'refused':
                 assert result.returncode != 0, (name, 'foreign/Driver status admitted')
                 assert 'status domain not proven; conversion refused' in diagnostic, (name, diagnostic)
@@ -117,7 +117,7 @@ def main():
                                     '::ascify::sampleFindCudaDevice'):
                         assert emitted not in text, (name, 'partial helper transaction', emitted)
                     if name == 'first_residual_preserved':
-                        assert "residual helper declaration 'ftoi'" not in diagnostic, name
+                        assert "residual helper declaration '_ConvertSMVer2ArchName'" not in diagnostic, name
                 else:
                     assert '#include <helper_cuda.h>' not in text, name
                     assert 'ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS' in text and 'include removed' in diagnostic, name

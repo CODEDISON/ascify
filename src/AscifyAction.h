@@ -85,6 +85,12 @@ private:
     bool rewritten = false;
   };
 
+  struct NvidiaSampleSMCoresCandidate {
+    clang::SourceLocation nameLocation;
+    SemanticRewriteRange rewriteRange;
+    std::string target;
+  };
+
   struct NvidiaSampleExpandedMacroCandidate {
     clang::SourceLocation location;
     SemanticRewriteRange range;
@@ -175,6 +181,7 @@ private:
       nvidiaSampleHelperMacroCandidates;
   std::vector<NvidiaSampleFindDeviceCandidate>
       nvidiaSampleFindDeviceCandidates;
+  std::vector<NvidiaSampleSMCoresCandidate> nvidiaSampleSMCoresCandidates;
   std::vector<NvidiaSampleExpandedMacroCandidate> nvidiaSampleExpandedMacros;
   std::vector<SemanticRewriteRange> nvidiaSampleMacroObservationRanges;
   struct PreservedMaxFallback {
@@ -258,6 +265,8 @@ private:
   std::set<std::string> recognizedNvidiaSampleHelperPaths;
   std::set<unsigned> nvidiaSampleHelperNormalMacroOffsets;
   std::set<unsigned> nvidiaSampleFindDeviceNormalOffsets;
+  std::set<unsigned> nvidiaSampleSMCoresNormalOffsets;
+  bool nvidiaSampleSMCoresUnsupportedUse = false;
   std::vector<bool> nvidiaSampleHelperCudaFileStack;
   std::vector<clang::FileID> nvidiaSampleRetainedFileIds;
   std::set<unsigned> nvidiaSampleRetainedFileIdHashes;

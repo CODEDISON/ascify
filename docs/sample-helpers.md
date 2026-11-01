@@ -266,8 +266,39 @@ source as well as the process result: a residual declaration, an
 `unsupported_declaration=1` / `include kept` record or a retained original
 `helper_cuda.h` dependency requires separate source support and review. It does
 not become supported because the converter returned zero. In particular,
-`_ConvertSMVer2Cores` can affect workload sizing and cannot be removed as a pure
-display operation or mapped to an invented NVIDIA SM core count.
+`_ConvertSMVer2Cores` affects workload sizing and is supported only as an exact,
+version-preserving host-table lookup. The authenticated complete helper file
+SHA selects `sampleSMVersionToCoresV130` or `sampleSMVersionToCoresV134`. Both
+retain the original table, sentinel, control flow and fallback stdout. SM0xa7
+is a useful distinction: v13.0 prints its fallback and returns128; v13.4 has a
+silent table entry returning128. A merged latest table would change behaviour.
+
+The mapped call must be a physical, unqualified direct call to the frozen
+global `int(int,int)` host function, inside an ordinary evaluated non-template
+host function. The proof checks every redeclaration, definition macros and the
+resolved native printf closure. It admits only the callee token; ordinary
+argument/type auditing remains active. Indirect calls, reflection, macros,
+foreign same-named declarations and unproved retained observations are refused.
+The printf proof accepts only the observed ordinary external-C, bodyless
+declaration, across every redeclaration, with implicit builtin/format attributes.
+A system-header marker alone proves nothing: definitions, fortify wrappers,
+assembler aliases and other semantic attributes are refused. Runtime symbol and
+provider admission remain separate checks.
+The mapping is published atomically with the existing helper include/status
+transaction. The original signed-shift/addition defined-input domain remains;
+no new behaviour is promised for inputs for which the original C++ was undefined.
+
+The result is a legacy NVIDIA table value, never a physical NPU CUDA-core count.
+The product's capability epoch7.0 therefore gives the original table value64.
+Samples retain their original heuristic using this value and the queried vector
+core count, including all prints and scaling. For a queried count of at least3,
+alignedTypes keeps49,999,872 bytes and384 launches; transpose defaults to1024²
+and808 launches. Smaller queried counts use the original scaling formula. Actual
+properties and printed sizes must be bound in any future full-sample acceptance;
+the converter does not reduce inputs or loops. Transpose's coarse/fine routines
+use self-comparison and have no raw dump, so a future acceptance must account for
+that oracle limitation separately. CPU table/stdout tests do not prove frontend,
+CCEC, device execution or successful original-sample acceptance.
 
 The runtime helpers are in [ascify_cuda_compat.hpp](../include/ascify/ascify_cuda_compat.hpp); context
 handling is in [LocalHeader.cpp](../src/LocalHeader.cpp). Updating a frozen provider requires reviewing

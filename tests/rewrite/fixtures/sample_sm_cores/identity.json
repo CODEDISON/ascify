@@ -1,0 +1,7 @@
+{
+  "source_profile": "Exact function bytes extracted from authenticated official helper_cuda.h; test namespace supplies only namespace scope, function body unchanged.",
+  "files": {
+    "v13_0_function.inc": "43192b0a31b8db15f638601b729eed8b78ec5b02ab503a97107c93724c0864a9",
+    "v13_4_function.inc": "91337f55b9ee45fdf2306ccb5459b954bcd9419bc5abf198155218059802a474"
+  }
+}
