@@ -34,6 +34,7 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_TYPE_NAME_MAP = [] {
   m["cudaErrorMemoryAllocation"] = {"ACL_ERROR_RT_MEMORY_ALLOCATION",    CONV_DEFINE, API_RUNTIME, SEC::ERROR_HANDLING};
   m["cudaErrorInvalidDevice"]    = {"ACL_ERROR_RT_INVALID_DEVICEID",     CONV_DEFINE, API_RUNTIME, SEC::ERROR_HANDLING};
   m["cudaErrorNotReady"]         = {"ACL_ERROR_RT_EVENT_NOT_COMPLETE",   CONV_DEFINE, API_RUNTIME, SEC::ERROR_HANDLING};
+  m["cudaErrorAssert"]           = {"ascify::cudaErrorAssert",           CONV_DEFINE, API_RUNTIME, SEC::ERROR_HANDLING};
   // Stream type
   m["cudaStream_t"]              = {"aclrtStream",                       CONV_TYPE, API_RUNTIME, SEC::STREAM};
   m["cudaHostFn_t"] = {"ascify::cudaHostFn_t", CONV_TYPE, API_RUNTIME, SEC::STREAM};

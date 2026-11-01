@@ -129,6 +129,13 @@ inline constexpr unsigned int cudaStreamDefault = 0x00U;
 inline constexpr unsigned int cudaStreamNonBlocking = 0x01U;
 inline constexpr unsigned int cudaEventWaitDefault = 0x00U;
 inline constexpr unsigned int cudaEventWaitExternal = 0x01U;
+// CUDA-domain device-assert status code (cuda_runtime_api value 719). The
+// acl runtime has no assert-specific error result and never produces this
+// code; the constant is retained with its original value so original CUDA
+// equality checks (error == cudaErrorAssert) compile and evaluate exactly
+// against CUDA-domain codes. It makes no claim that device assert failures
+// are surfaced through cudaGetLastError().
+inline constexpr aclError cudaErrorAssert = static_cast<aclError>(719);
 // Retain CUDA's reserved handle values for explicit rejection where an ACL
 // default stream cannot provide the corresponding implicit-stream ordering.
 inline const aclrtStream cudaStreamLegacy =

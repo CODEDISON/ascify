@@ -868,10 +868,11 @@ bool isAdmittedCudaRuntimeStatusCall(
   // Every admitted name is implemented by ascify_cuda_compat.hpp or its
   // symbol adapter with an aclError result. Errors (including unavailable
   // device symbol registration) remain errors; domain proof is not a claim
-  // that every runtime operation succeeds. Occupancy, Driver APIs, library
-  // statuses, and arbitrary integer-valued calls stay outside the set even
-  // when wrapped by NVIDIA's
-  // generic checkCudaErrors macro.
+  // that every runtime operation succeeds. Driver APIs, library statuses,
+  // and arbitrary integer-valued calls stay outside the set even when
+  // wrapped by NVIDIA's generic checkCudaErrors macro. The documented
+  // occupancy estimate is admitted because it is implemented with an
+  // aclError result like every other name here.
   static const char *const admittedNames[] = {
       "cudaMalloc", "cudaFree", "cudaMemcpy", "cudaMemcpyAsync",
       "cudaMallocPitch", "cudaMallocArray", "cudaMalloc3DArray", "cudaFreeArray",
@@ -894,6 +895,7 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaEventCreate", "cudaEventDestroy", "cudaEventRecord",
       "cudaEventSynchronize", "cudaEventElapsedTime", "cudaEventQuery",
       "cudaGetLastError", "cudaPeekAtLastError",
+      "cudaOccupancyMaxActiveBlocksPerMultiprocessor",
   };
   if (std::find_if(std::begin(admittedNames), std::end(admittedNames),
                    [&](const char *admitted) { return name == admitted; }) ==
@@ -2239,6 +2241,7 @@ static bool requiresCudaCompatHeader(llvm::StringRef name) {
          name == "cudaDevAttrMaxSharedMemoryPerBlockOptin" ||
          name == "cudaPeekAtLastError" ||
          name == "cudaOccupancyMaxActiveBlocksPerMultiprocessor" ||
+         name == "cudaErrorAssert" ||
          name == "__shfl_sync" ||
          name == "__shfl_up_sync" ||
          name == "__shfl_down_sync" ||
