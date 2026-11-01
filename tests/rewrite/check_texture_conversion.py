@@ -9,6 +9,14 @@ import shutil
 import subprocess
 
 CASES = [
+    ('array_copy2d_direct','void f(cudaArray*a,const void*p){auto e=cudaMemcpy2DToArray(a,4,1,p,32,16,3,cudaMemcpyHostToDevice);}', ['ascify::cudaMemcpy2DToArray(a,4,1,p,32,16,3,ACL_MEMCPY_HOST_TO_DEVICE)']),
+    ('array_copy2d_helper','#include <helper_cuda.h>\nvoid f(cudaArray*a,const void*p){checkCudaErrors(cudaMemcpy2DToArray(a,4,1,p,32,16,3,cudaMemcpyDeviceToDevice));}', ['ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaMemcpy2DToArray']),
+    ('array_copy2d_address','auto p=&cudaMemcpy2DToArray;', None),
+    ('array_copy2d_qualified','void f(cudaArray*a,const void*p){::cudaMemcpy2DToArray(a,0,0,p,32,16,3,cudaMemcpyHostToDevice);}', None),
+    ('array_copy2d_user_namespace','namespace user{int cudaMemcpy2DToArray(int);void f(){cudaMemcpy2DToArray(1);}}', None),
+    ('array_copy2d_macro','#define COPY(a,p) cudaMemcpy2DToArray(a,0,0,p,32,16,3,cudaMemcpyHostToDevice)\nvoid f(cudaArray*a,const void*p){COPY(a,p);}', None),
+    ('array_copy2d_redeclaration','extern "C" cudaError_t cudaMemcpy2DToArray(cudaArray_t,size_t,size_t,const void*,size_t,size_t,size_t,cudaMemcpyKind);void f(cudaArray*a,const void*p){cudaMemcpy2DToArray(a,0,0,p,32,16,3,cudaMemcpyHostToDevice);}', None),
+    ('array_copy2d_name_observation','#define S0(x) #x\n#define S(x) S0(x)\nconst char*p=S(cudaMemcpy2DToArray);cudaTextureDesc d{};', None),
     ('float_fetch','__global__ void k(float*p,cudaTextureObject_t t){p[0]=tex2D<float>(t,.5f,.5f);}', ['ascify::tex2D<float>']),
     ('unsigned_fetch','__global__ void k(unsigned int*p,cudaTextureObject_t t){p[0]=tex2D<unsigned int>(t,.5f,.5f);}', ['ascify::tex2D<unsigned int>']),
     ('unsigned_layered_fetch','__global__ void k(unsigned int*p,cudaTextureObject_t t){p[0]=tex2DLayered<unsigned int>(t,.5f,.5f,1);}', ['ascify::tex2DLayered<unsigned int>']),

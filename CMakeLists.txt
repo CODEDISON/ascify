@@ -62,6 +62,7 @@ if(NOT ASCIFY_CLANG_TESTS_ONLY)
     src/ImplicitCudaHeaders.cpp
     src/LLVMCompat.cpp
     src/LocalHeader.cpp
+    src/PackedRecordBoundary.cpp
     src/MigrationReceipt.cpp
     src/MigrationReceiptIO.cpp
     src/NttpVoidCall.cpp

@@ -37,6 +37,7 @@ THE SOFTWARE.
 #include "DavC310TargetRecipe.h"
 #include "CudaVec3AbiBoundary.h"
 #include "ReplacementsFrontendActionFactory.h"
+#include "PackedRecordBoundary.h"
 #include "Statistics.h"
 #include "Scalar64Lowering.h"
 #include "NttpVoidCall.h"
@@ -106,6 +107,10 @@ private:
   LocalHeaderRewriteContext *localHeaderContext = nullptr;
   const ascify::HostCxxRootInputWitness *hostRootInput = nullptr;
   bool isWitnessedProfilerHostRoot(clang::FileID file);
+  std::string contextualPragmaEvents;
+  ascify::PackedRecordBoundary packedRecords;
+  bool finalizePackedRecordEdits(const std::vector<ct::Replacement> &owned);
+  void recordContextPragmaSource(clang::FileID file);
   std::set<std::string> siblingSourceMacroContextUsers;
   std::set<std::string> systemSourceMacroContextUsers;
   ascify::FrontendCompatibilityConfig frontendCompatibility;

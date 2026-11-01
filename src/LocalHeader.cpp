@@ -101,6 +101,13 @@ bool writeManifest(const std::string &path,
     out << "context_standard_preprocessing=1\n";
     out << "context_tokens_sha256=" << proof.tokenSha256 << "\n";
     out << "context_macros_sha256=" << proof.macroSha256 << "\n";
+    out << "context_pragma_events_sha256=" << proof.pragmaSha256 << "\n";
+    for (const auto &item : plan.contextInlines()) {
+      const auto once = proof.contextOnceLineOffsets.find(item.sourcePath);
+      if (once != proof.contextOnceLineOffsets.end())
+        for (const auto offset : once->second)
+          out << "context_once_line=" << item.sourcePath << "\t" << offset << "\n";
+    }
     for (const auto &input : proof.fileSha256)
       out << "context_input=" << input.first << "\t" << input.second << "\n";
     for (const auto &binding : proof.pathBindings)
@@ -109,6 +116,11 @@ bool writeManifest(const std::string &path,
       out << "context_original_edge=" << edge.parentSourcePath << "\t"
           << edge.childSourcePath << "\t" << edge.sourceOffset << "\t"
           << edge.originalSpelling << "\n";
+    for (const auto &edge : proof.originalEdges)
+      if (edge.physicallySkipped)
+        out << "context_skipped_edge=" << edge.parentSourcePath << "\t"
+            << edge.childSourcePath << "\t" << edge.sourceOffset << "\t"
+            << edge.filenameOffset << "\n";
     for (const auto &item : plan.contextInlines())
       out << "context_inline=" << item.sourcePath << "\t" << item.sourceSha256
           << "\t" << item.includeOffset << "\n";
@@ -1011,6 +1023,7 @@ bool ascifySourceWithLocalHeaderClosure(
   rootContext.artifactPath = plan.rootArtifactPath();
   rootContext.depth = 0;
   rootContext.inputEvidence = recursive ? &discoveryEvidence : nullptr;
+  rootContext.allowInheritedHelperDiscovery = recursive;
   bool ok = ascifySingleSource(
       mainSourceAbsPath, pathString(stagedRoot), compDB, OptionsParserPtr,
       ascify_exe, mainSourceAbsPath, false, &rootContext);
@@ -1019,6 +1032,14 @@ bool ascifySourceWithLocalHeaderClosure(
                  << "Local-header root staging failed: "
                  << (plan.failed() ? plan.failureReason() : mainSourceAbsPath)
                  << "\n";
+    llvm::sys::fs::remove_directories(stagingRoot);
+    return false;
+  }
+
+  if (rootContext.deferredInheritedHelperDiscovery &&
+      (!recursive || plan.inheritedHelperHeaders().empty())) {
+    llvm::errs() << sAscify << sError
+                 << "Deferred helper discovery has no joint transaction\n";
     llvm::sys::fs::remove_directories(stagingRoot);
     return false;
   }
@@ -1052,10 +1073,16 @@ bool ascifySourceWithLocalHeaderClosure(
       originalContext.artifactPath = originalPlan.rootArtifactPath();
       originalContext.virtualInput = &originalInput;
       originalContext.inputEvidence = &originalEvidence;
+      originalContext.allowInheritedHelperDiscovery = true;
       if (!ascifySingleSource(mainSourceAbsPath, pathString(stagedRoot), compDB,
                               OptionsParserPtr, ascify_exe, mainSourceAbsPath, false,
                               &originalContext) || originalPlan.failed()) {
         plan.fail("original include-context proof parse failed");
+        return false;
+      }
+      if (originalContext.deferredInheritedHelperDiscovery !=
+          rootContext.deferredInheritedHelperDiscovery) {
+        plan.fail("inherited helper discovery state changed during proof parse");
         return false;
       }
       // The parse used this saved buffer, not a fresh read in FileChanged.
@@ -1063,7 +1090,14 @@ bool ascifySourceWithLocalHeaderClosure(
       const auto originalRootSha256 = inputSha256(originalInput);
       if (!originalEvidence.standardPreprocessing || originalRootSha256.empty() ||
           originalEvidence.fileSha256[originalPlan.rootSourcePath()] != originalRootSha256 ||
-          !originalEvidence.changedPathBinding.empty()) {
+          originalEvidence.parsedRootSourcePath != originalPlan.rootSourcePath() ||
+          discoveryEvidence.parsedRootSourcePath.empty() ||
+          originalEvidence.parsedRootSha256 != originalRootSha256 ||
+          discoveryEvidence.parsedRootSha256 != originalRootSha256 ||
+          originalEvidence.fileEntries[originalEvidence.parsedRootSourcePath] != 1 ||
+          discoveryEvidence.fileEntries[discoveryEvidence.parsedRootSourcePath] != 1 ||
+          !originalEvidence.changedPathBinding.empty() ||
+          !discoveryEvidence.changedPathBinding.empty()) {
         plan.fail("contextual root buffer identity or input path binding changed");
         return false;
       }
@@ -1080,29 +1114,184 @@ bool ascifySourceWithLocalHeaderClosure(
       struct InlineEdit { std::size_t begin, end; std::string text; };
       std::vector<InlineEdit> edits;
       std::vector<LocalHeaderContextInline> inlined;
+      bool replayLiteralPragmas = false;
+      const auto skippedInBothParses = [&](const LocalHeaderEdge &edge) {
+        if (!edge.directLiteral || !edge.physicallySkipped || edge.isAngled ||
+            edge.childSourcePath.empty() ||
+            originalEvidence.fileEntries[edge.childSourcePath] != 1)
+          return false;
+        return std::any_of(discoveryEvidence.originalEdges.begin(),
+                           discoveryEvidence.originalEdges.end(),
+                           [&](const LocalHeaderEdge &prior) {
+          return prior.directLiteral && prior.physicallySkipped && !prior.isAngled &&
+              prior.parentSourcePath == edge.parentSourcePath &&
+              prior.childSourcePath == edge.childSourcePath &&
+              prior.originalSpelling == edge.originalSpelling &&
+              prior.sourceOffset == edge.sourceOffset &&
+              prior.filenameOffset == edge.filenameOffset;
+        });
+      };
+      // Flattening a once-protected provider removes its physical once state.
+      // A retained sibling may otherwise enter that provider a second time,
+      // even if the sibling uses no parent declaration or helper macro. Close
+      // over those already-selected root siblings before constructing edits.
+      // This does not admit active nested includes or arbitrary include trees.
+      const auto samePhysicalEdge = [&](const LocalHeaderEdge &a,
+                                       const LocalHeaderEdge &b) {
+        // The two main buffers have identical saved-source bytes above, but
+        // discovery may use a physical temporary copy. Map only that root.
+        return a.parentSourcePath == originalEvidence.parsedRootSourcePath &&
+            b.parentSourcePath == discoveryEvidence.parsedRootSourcePath &&
+            a.childSourcePath == b.childSourcePath &&
+            a.originalSpelling == b.originalSpelling &&
+            a.sourceOffset == b.sourceOffset &&
+            a.filenameOffset == b.filenameOffset &&
+            a.directLiteral == b.directLiteral &&
+            a.isAngled == b.isAngled &&
+            a.physicallySkipped == b.physicallySkipped;
+      };
+      const auto singleRootEntry = [&](const LocalHeaderInputEvidence &evidence,
+                                        const std::string &path) {
+        const LocalHeaderEdge *found = nullptr;
+        for (const auto &edge : evidence.originalEdges) {
+          if (edge.parentSourcePath != evidence.parsedRootSourcePath ||
+              edge.childSourcePath != path) continue;
+          if (found != nullptr) return static_cast<const LocalHeaderEdge *>(nullptr);
+          found = &edge;
+        }
+        return found != nullptr && found->directLiteral && !found->isAngled &&
+            !found->physicallySkipped ? found : nullptr;
+      };
+      if (requireHelperTransaction) {
+        bool added = true;
+        while (added) {
+          added = false;
+          for (const auto &edge : originalEvidence.originalEdges) {
+            const auto &parent = edge.parentSourcePath;
+            if (!contextualHeaders.count(edge.childSourcePath) ||
+                contextualHeaders.count(parent) || parent == originalPlan.rootSourcePath())
+              continue;
+            const auto *originalRootEdge = singleRootEntry(originalEvidence, parent);
+            const auto *discoveryRootEdge = singleRootEntry(discoveryEvidence, parent);
+            if (!skippedInBothParses(edge) ||
+                originalEvidence.fileEntries[parent] != 1 ||
+                discoveryEvidence.fileEntries[parent] != 1 ||
+                discoveryEvidence.fileEntries[edge.childSourcePath] != 1 ||
+                !originalPlan.isSelectedRootHeader(parent) ||
+                !plan.isSelectedRootHeader(parent) ||
+                originalRootEdge == nullptr || discoveryRootEdge == nullptr ||
+                !samePhysicalEdge(*originalRootEdge, *discoveryRootEdge)) {
+              plan.fail("contextual skipped provider requires an identical selected root sibling: " + parent);
+              return false;
+            }
+            contextualHeaders.insert(parent);
+            added = true;
+          }
+        }
+      }
       for (const auto &path : contextualHeaders) {
         const LocalHeaderEdge *selected = nullptr;
-        unsigned edgeCount = 0;
-        for (const auto &edge : originalEvidence.originalEdges)
-          if (edge.childSourcePath == path) ++edgeCount;
+        unsigned rootEdgeCount = 0;
+        bool extraEntry = false;
+        for (const auto &edge : originalEvidence.originalEdges) {
+          if (edge.childSourcePath != path) continue;
+          if (edge.parentSourcePath == originalPlan.rootSourcePath())
+            ++rootEdgeCount;
+          else if (!skippedInBothParses(edge))
+            extraEntry = true;
+        }
         for (const auto &edge : originalPlan.edges())
           if (edge.childSourcePath == path) selected = &edge;
-        if (edgeCount != 1 || selected == nullptr ||
+        if (rootEdgeCount != 1 || extraEntry || selected == nullptr ||
             selected->parentSourcePath != originalPlan.rootSourcePath() ||
             originalEvidence.fileEntries[path] != 1) {
           plan.fail("contextual local header requires one direct include occurrence: " + path);
           return false;
         }
-        if (originalEvidence.pragmaFiles.count(path) ||
-            originalEvidence.quotedIncludeParents.count(path)) {
-          plan.fail("contextual local header requires a leaf without pragmas: " + path);
-          return false;
+        const bool hasPragmas = originalEvidence.pragmaFiles.count(path) != 0;
+        if (hasPragmas) {
+          if (!originalEvidence.literalContextPragmaFiles.count(path) ||
+              !discoveryEvidence.literalContextPragmaFiles.count(path) ||
+              !originalEvidence.ordinaryPhysicalInput || !discoveryEvidence.ordinaryPhysicalInput ||
+              originalEvidence.hasPhysicalLineDirective || discoveryEvidence.hasPhysicalLineDirective ||
+              originalEvidence.pragmaSha256.empty() ||
+              originalEvidence.pragmaSha256 != discoveryEvidence.pragmaSha256 ||
+              originalEvidence.contextOnceLineOffsets[path] !=
+                  discoveryEvidence.contextOnceLineOffsets[path]) {
+            plan.fail("contextual local header requires a leaf without pragmas; "
+                      "literal pragma replay is not proved: " + path);
+            return false;
+          }
+          replayLiteralPragmas = true;
         }
         std::string contents;
         if (!readFile(path, contents) || originalEvidence.fileSha256[path].empty() ||
             inputSha256(contents) != originalEvidence.fileSha256[path] ||
             originalEvidence.fileSha256[path] != discoveryEvidence.fileSha256[path]) {
           plan.fail("contextual local header changed or has no source identity: " + path);
+          return false;
+        }
+        if (hasPragmas) {
+          // Exactly one original file entry and every skipped re-entry were
+          // proven above. A moved once pragma would name the root file; blank
+          // only its physical line in the virtual copy. Joint token/macro and
+          // full non-once pragma event equality still have to pass below.
+          for (const auto offset : originalEvidence.contextOnceLineOffsets[path]) {
+            if (offset >= contents.size() || (offset && contents[offset - 1] != '\n')) {
+              plan.fail("contextual once has no physical line anchor: " + path);
+              return false;
+            }
+            const auto newline = contents.find('\n', offset);
+            if (newline == std::string::npos) {
+              plan.fail("contextual once requires a terminated physical line: " + path);
+              return false;
+            }
+            const auto line = contents.substr(offset, newline + 1 - offset);
+            static const std::regex onceLine(
+                R"re(^[ \t]*#[ \t]*pragma[ \t]+once[ \t]*(//[^\r\n]*)?\r?\n$)re");
+            if (!std::regex_match(line, onceLine)) {
+              plan.fail("contextual once line changed after source proof: " + path);
+              return false;
+            }
+            for (auto index = offset; index < newline; ++index)
+              if (contents[index] != '\r') contents[index] = ' ';
+          }
+        }
+        unsigned quotedEdges = 0;
+        for (const auto &edge : originalEvidence.originalEdges) {
+          if (edge.parentSourcePath != path || edge.isAngled) continue;
+          ++quotedEdges;
+          if (!requireHelperTransaction || !skippedInBothParses(edge) ||
+              edge.sourceOffset >= contents.size()) {
+            plan.fail("contextual local header requires a leaf without pragmas; "
+                      "nested include was not physically skipped: " + path);
+            return false;
+          }
+          const auto previous = contents.rfind('\n', edge.sourceOffset);
+          const auto begin = previous == std::string::npos ? 0 : previous + 1;
+          const auto newline = contents.find('\n', edge.sourceOffset);
+          const auto end = newline == std::string::npos ? contents.size() : newline + 1;
+          const auto line = contents.substr(begin, end - begin);
+          std::smatch match;
+          static const std::regex skippedLine(
+              R"re(^[ \t]*#[ \t]*include[ \t]+"([^"\r\n]+)"[ \t]*(//[^\r\n]*)?\r?\n?$)re");
+          if (!std::regex_match(line, match, skippedLine) ||
+              match[1].str() != edge.originalSpelling ||
+              line.find('\\') != std::string::npos ||
+              line.find("?" "?/") != std::string::npos ||
+              (begin > 1 && contents[begin - 2] == '\\')) {
+            plan.fail("contextual skipped include requires one literal directive line: " + path);
+            return false;
+          }
+          // This include contributed no tokens in either original parse.
+          // Remove only that directive in the virtual input, retaining line
+          // boundaries. Never replay its relative lookup from the root.
+          for (auto index = begin; index != end; ++index)
+            if (contents[index] != '\n' && contents[index] != '\r')
+              contents[index] = ' ';
+        }
+        if (originalEvidence.quotedIncludeParents.count(path) && quotedEdges == 0) {
+          plan.fail("contextual nested include has no bound edge: " + path);
           return false;
         }
         const auto offset = selected->sourceOffset;
@@ -1173,6 +1362,12 @@ bool ascifySourceWithLocalHeaderClosure(
       if (originalEvidence.providerIdentities != jointEvidence.providerIdentities ||
           originalEvidence.providerSizes != jointEvidence.providerSizes) {
         plan.fail("contextual original SDK provider identities changed during joint parse");
+        return false;
+      }
+      if (replayLiteralPragmas &&
+          (!jointEvidence.ordinaryPhysicalInput || jointEvidence.pragmaSha256.empty() ||
+           originalEvidence.pragmaSha256 != jointEvidence.pragmaSha256)) {
+        plan.fail("contextual literal pragma payload, order or position differs");
         return false;
       }
       if (!jointEvidence.changedPathBinding.empty()) {

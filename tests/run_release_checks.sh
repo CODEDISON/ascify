@@ -328,6 +328,20 @@ run_check "half2 syntax and separate rounding conversion" \
   sh "$rewrite_dir/check_half2_translation.sh"
 run_check "inherited parent helper conversion boundary" \
   "$python" -B "$rewrite_dir/check_inherited_sample_helper_context.py"
+run_check "inherited helper texture transaction boundary" \
+  "$python" -B "$rewrite_dir/check_context_helper_texture.py" \
+    --binary "$ASCIFY_BINARY" --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang++}" --evidence-dir "$work_dir/context_helper_texture"
+run_check "physically skipped contextual helper include boundary" \
+  "$python" -B "$rewrite_dir/check_context_skipped_includes.py"
+run_check "literal pragma contextual replay boundary" \
+  "$python" -B "$rewrite_dir/check_context_literal_pragmas.py"
+run_check "preserved packed integer record boundary" \
+  "$python" -B "$rewrite_dir/check_packed_record_conversion.py" \
+    --binary "$ASCIFY_BINARY" --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang++}" --evidence-dir "$work_dir/packed_records"
 run_check "quoted frozen sample-helper transaction ownership" \
   "$python" -B "$rewrite_dir/check_quoted_sample_helper.py"
 run_check "resolved device float frexp overload boundary" \

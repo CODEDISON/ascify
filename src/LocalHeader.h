@@ -42,6 +42,11 @@ struct LocalHeaderEdge {
   unsigned sourceOffset = 0;
   unsigned resumeLine = 0;
   std::string resumeFile;
+  // Original-context evidence only; ordinary closure edges leave defaults.
+  bool isAngled = false;
+  bool directLiteral = false;
+  unsigned filenameOffset = 0;
+  bool physicallySkipped = false;
 };
 
 // Evidence belongs to one parse of the original root include context. It is
@@ -50,6 +55,15 @@ struct LocalHeaderInputEvidence {
   bool standardPreprocessing = false;
   std::string tokenSha256;
   std::string macroSha256;
+  // Ordered literal pragma events include their full payload. Clang annotation
+  // tokens alone do not expose e.g. the count of an unroll directive.
+  std::string pragmaSha256;
+  bool hasPhysicalLineDirective = false;
+  bool ordinaryPhysicalInput = false;
+  // Discovery may parse a temporary root copy. Bind its actual main buffer,
+  // separately from the original source identity used by contextual reparses.
+  std::string parsedRootSourcePath;
+  std::string parsedRootSha256;
   std::map<std::string, std::string> fileSha256;
   // Unparsed original SDK providers are data witnesses, never AST/macro owners.
   std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> providerIdentities;
@@ -58,6 +72,8 @@ struct LocalHeaderInputEvidence {
   std::string changedPathBinding;
   std::map<std::string, unsigned> fileEntries;
   std::set<std::string> pragmaFiles;
+  std::set<std::string> literalContextPragmaFiles;
+  std::map<std::string, std::vector<unsigned>> contextOnceLineOffsets;
   std::set<std::string> quotedIncludeParents;
   std::vector<LocalHeaderEdge> originalEdges;
 };
@@ -197,6 +213,10 @@ struct LocalHeaderRewriteContext {
   // after the original root, include boundaries and leaf bytes are verified.
   // It grants no publication before the outer token/macro/path/input checks.
   bool sourceOnlyJointInput = false;
+  // Internal recursive discovery only. A deferred parse supplies evidence,
+  // never an artifact; the strict joint parse must commit the helper proof.
+  bool allowInheritedHelperDiscovery = false;
+  bool deferredInheritedHelperDiscovery = false;
   bool requireHelperTransaction = false;
   bool helperTransactionCommitted = false;
 

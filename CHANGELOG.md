@@ -6,6 +6,11 @@ for supported domains and experimental paths.
 
 ## Unreleased
 
+- Preserve once-protected contextual providers across independent selected root
+  siblings, with the same two-parse skipped-edge and strict joint proof.
+- Bind temporary discovery-root and original proof-root include edges through
+  the identical parsed source bytes, retaining all nested-edge checks.
+
 ### Added
 
 - Per-inclusion provenance for the admitted product CG qualifier macro chain
@@ -26,6 +31,25 @@ for supported domains and experimental paths.
   counter initialized to zero, with a committed same-module symbol resolver.
   Other object/address forms keep their existing behavior; target validation
   and cross-block publication/reset checks remain pending.
+- Recursive inherited-helper discovery can collect original context before
+  checking helper-wrapped texture calls. Discovery emits no artifact; the
+  contextual joint conversion retains all macro, texture, layout and atomic
+  publication checks.
+
+- Experimental preservation of literal packed fixed-integer record regions,
+  with configuration guards, target layout witnesses and final edit protection.
+  Packed pointers, arrays, templates and arbitrary packing state remain outside
+  this proof; target compilation and complete sample validation are required.
+  Inactive push-prefix recognition preserves intervening blank lines. Plain-char
+  signedness must match the source toolchain and is checked by target witnesses.
+  Selected child headers are proved during discovery; their guards and witnesses
+  are emitted by the translation that owns their source, avoiding cross-file
+  replacement conflicts while retaining complete-closure publication checks.
+
+- Contextual local headers can retain literal unroll pragmas and normalize a
+  single pragma once after physical include-entry proof. Ordered payload and
+  position replay, unchanged inputs and atomic helper checks remain required.
+
 
 - Experimental lowering of one literal unsigned packed-byte SAD accumulate
   instruction, with private uint32 operands and modulo-32-bit arithmetic.
@@ -59,6 +83,14 @@ for supported domains and experimental paths.
   product cooperative-groups profile after physical-input, CUDA-control and
   device-attribute macro proofs. Concrete instances, caller templates and SDK
   layout observations retain their existing checks.
+
+- Contextual helper providers and repeated local includes proven physically
+  skipped in both original parses, preserving token/macro and atomic helper
+  proofs. Real nested entries, re-entry and opaque pragmas remain rejected.
+- Explicit host C++ input mode and compiler `-x c++` selection, retaining AST
+  translation and local-header proofs without implicit CUDA headers or CUDA
+  language predefines. The default without a language remains CUDA; conflicting
+  device options fail. See [the input contract](docs/host-cxx-input.md).
 - Direct physical CUDA Runtime includes inside proved whole-file guards of
   selected local headers. Nested conditions, guard macro-stack operations and
   conditional root-source includes remain outside this admission rule.
