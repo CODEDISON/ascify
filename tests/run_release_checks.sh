@@ -347,6 +347,11 @@ run_check "unmodified host packed main/header identity" \
     --binary "$ASCIFY_BINARY" --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
     --clang "${CLANG:-clang++}" --evidence-dir "$work_dir/host_packed_records"
+run_check "complete helper status collection after residual declarations" \
+  "$python" -B "$rewrite_dir/check_helper_status_walk.py" \
+    --binary "$ASCIFY_BINARY" --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang++}" --evidence-dir "$work_dir/helper_status_walk"
 run_check "quoted frozen sample-helper transaction ownership" \
   "$python" -B "$rewrite_dir/check_quoted_sample_helper.py"
 run_check "resolved device float frexp overload boundary" \

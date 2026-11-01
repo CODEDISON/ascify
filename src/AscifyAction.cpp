@@ -4616,8 +4616,12 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
 
     bool inspect(clang::SourceLocation useLocation,
                  const clang::NamedDecl *referenced) {
+      // This visitor also collects status-domain proofs. A residual helper
+      // prevents the complete helper transaction, but must not stop traversal
+      // before later, independent Runtime checks can be classified. Preserve
+      // the first residual for its diagnostic and keep walking the AST.
       if (conflict || referenced == nullptr)
-        return !conflict;
+        return true;
       const clang::SourceLocation expansion =
           sourceManager.getExpansionLoc(useLocation);
       if (expansion.isInvalid() ||
@@ -4630,7 +4634,7 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
         return true;
       conflict = true;
       name = referenced->getQualifiedNameAsString();
-      return false;
+      return true;
     }
 
     clang::SourceManager &sourceManager;

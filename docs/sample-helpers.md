@@ -250,6 +250,25 @@ and bundle and leave fresh output paths absent. It executes no NPU work.
 
 ## Maintenance and verification
 
+The declaration scan keeps collecting independent Runtime status proofs after
+finding a residual helper use. It retains the first residual diagnostic and
+refuses the complete helper replacement transaction: the original include and
+all helper calls stay together, with zero helper rewrite counters. A retained
+conversion may return zero under the existing source-preservation contract;
+it is not ready for a target runtime and must not be counted as a running
+sample. Genuine foreign integer or Driver status domains still fail the whole
+conversion and preserve previous output. The
+[order matrix](../tests/rewrite/check_helper_status_walk.py) checks both source
+orders, template collection and these failure boundaries.
+
+For build and device admission, check the bound conversion logs and generated
+source as well as the process result: a residual declaration, an
+`unsupported_declaration=1` / `include kept` record or a retained original
+`helper_cuda.h` dependency requires separate source support and review. It does
+not become supported because the converter returned zero. In particular,
+`_ConvertSMVer2Cores` can affect workload sizing and cannot be removed as a pure
+display operation or mapped to an invented NVIDIA SM core count.
+
 The runtime helpers are in [ascify_cuda_compat.hpp](../include/ascify/ascify_cuda_compat.hpp); context
 handling is in [LocalHeader.cpp](../src/LocalHeader.cpp). Updating a frozen provider requires reviewing
 the upstream diff and updating identity checks plus positive and mutation-negative fixtures together.
