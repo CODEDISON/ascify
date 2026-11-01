@@ -4250,6 +4250,86 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
           needsGuard |= !pattern.first->statusDomainProven;
         if (!needsGuard)
           continue;
+        // Template-independent status domain: every recorded pattern's check
+        // argument is a call whose callee is directly resolved and admitted
+        // by the runtime return-domain allowlist. The domain then does not
+        // depend on the template parameter, so the int/float/double type
+        // guard is unnecessary; each instantiated copy is still verified
+        // below, mirroring the guarded path's InstantiationVisitor.
+        bool independent = true;
+        for (const auto &pattern : entry.second) {
+          const clang::Expr *argument =
+              pattern.second->getArg(0)->IgnoreParenImpCasts();
+          const auto *call = llvm::dyn_cast<clang::CallExpr>(argument);
+          if (call == nullptr || call->getDirectCallee() == nullptr ||
+              !isAdmittedCudaRuntimeStatusCall(
+                  sourceManager, argument, trustedSystemFileIds)) {
+            independent = false;
+            break;
+          }
+        }
+        if (independent) {
+          class IndependentInstantiationVisitor
+              : public clang::RecursiveASTVisitor<
+                    IndependentInstantiationVisitor> {
+          public:
+            IndependentInstantiationVisitor(
+                const Visitor &owner, const TemplatePatterns &patterns)
+                : owner(owner), patterns(patterns) {}
+            bool VisitCallExpr(clang::CallExpr *call) {
+              for (const auto &pattern : patterns) {
+                if (call->getExprLoc() != pattern.second->getExprLoc())
+                  continue;
+                ++counts[pattern.first];
+                if (!owner.isFrozenCheckCallee(call) ||
+                    call->getNumArgs() == 0 ||
+                    !isAdmittedCudaRuntimeStatusCall(
+                        owner.sourceManager, call->getArg(0),
+                        owner.trustedSystemFileIds))
+                  failed = true;
+              }
+              return true;
+            }
+            bool proved() const {
+              if (failed)
+                return false;
+              for (const auto &pattern : patterns) {
+                const auto count = counts.find(pattern.first);
+                if (count == counts.end() || count->second == 0)
+                  return false;
+              }
+              return true;
+            }
+          private:
+            const Visitor &owner;
+            const TemplatePatterns &patterns;
+            std::map<NvidiaSampleHelperMacroCandidate *, unsigned> counts;
+            bool failed = false;
+          } verifier(*this, entry.second);
+          for (const clang::FunctionDecl *specialization :
+               entry.first->specializations()) {
+            const clang::TemplateSpecializationKind kind =
+                specialization->getTemplateSpecializationKind();
+            if ((kind != clang::TSK_ImplicitInstantiation &&
+                 kind != clang::TSK_ExplicitInstantiationDefinition) ||
+                !specialization->hasBody())
+              continue;
+            verifier.TraverseStmt(
+                const_cast<clang::Stmt *>(specialization->getBody()));
+            if (verifier.proved())
+              break;
+          }
+          if (verifier.proved()) {
+            for (const auto &pattern : entry.second)
+              pattern.first->statusDomainProven = true;
+            llvm::errs()
+                << "Ascify NVIDIA sample-helper closure: proved template-"
+                   "independent status domain for '"
+                << entry.first->getQualifiedNameAsString()
+                << "' via admitted runtime callees\n";
+            continue;
+          }
+        }
         NvidiaSampleTemplateGuard guard;
         if (!proveTemplate(entry.first, entry.second, guard)) {
           llvm::errs() << "Ascify NVIDIA sample-helper closure: dependent "
