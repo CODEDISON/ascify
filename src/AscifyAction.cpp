@@ -896,6 +896,7 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaEventSynchronize", "cudaEventElapsedTime", "cudaEventQuery",
       "cudaGetLastError", "cudaPeekAtLastError",
       "cudaOccupancyMaxActiveBlocksPerMultiprocessor",
+      "cudaOccupancyMaxPotentialBlockSize",
   };
   if (std::find_if(std::begin(admittedNames), std::end(admittedNames),
                    [&](const char *admitted) { return name == admitted; }) ==
@@ -2241,6 +2242,7 @@ static bool requiresCudaCompatHeader(llvm::StringRef name) {
          name == "cudaDevAttrMaxSharedMemoryPerBlockOptin" ||
          name == "cudaPeekAtLastError" ||
          name == "cudaOccupancyMaxActiveBlocksPerMultiprocessor" ||
+         name == "cudaOccupancyMaxPotentialBlockSize" ||
          name == "cudaErrorAssert" ||
          name == "__shfl_sync" ||
          name == "__shfl_up_sync" ||

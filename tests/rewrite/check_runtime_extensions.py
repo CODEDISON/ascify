@@ -74,8 +74,10 @@ for name, code, expected, absent in [
 for name, code, expected, absent in [
   ('occupancy_checked','int main(){int n=0;checkCudaErrors(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n,main,0,0));}', ['ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n,main,0,0))'], ['#include <helper_cuda.h>']),
   ('assert_error_enum','int main(){cudaError_t e=cudaGetLastError();return e==cudaErrorAssert;}', ['ascify::cudaErrorAssert'], []),
+  ('potential_plain','int main(){int g,b;return cudaOccupancyMaxPotentialBlockSize(&g,&b,main,0,0);}', ['ascify::cudaOccupancyMaxPotentialBlockSize(&g,&b,main,0,0)'], []),
+  ('potential_checked','int main(){int g,b;checkCudaErrors(cudaOccupancyMaxPotentialBlockSize(&g,&b,main,0,0));}', ['ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaOccupancyMaxPotentialBlockSize(&g,&b,main,0,0))'], ['#include <helper_cuda.h>']),
 ]:
- cases.append((name,'#include <cuda_runtime.h>\n'+('#include <helper_cuda.h>\n' if name=='occupancy_checked' else '')+code+'\n',expected,absent,False))
+ cases.append((name,'#include <cuda_runtime.h>\n'+('#include <helper_cuda.h>\n' if name in ('occupancy_checked','potential_checked') else '')+code+'\n',expected,absent,False))
 for name, code, expected, absent in [
  ('sm_major_selector','int main(){int n=1;return cudaDeviceGetAttribute(&n,'+cap+',0);}', ['::ascify::'+cap], []),
  ('sm_minor_selector','int main(){int n=1;return cudaDeviceGetAttribute(&n,cudaDevAttrComputeCapabilityMinor,0);}', ['::ascify::cudaDevAttrComputeCapabilityMinor'], []),

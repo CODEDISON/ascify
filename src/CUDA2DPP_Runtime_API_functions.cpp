@@ -106,5 +106,6 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   // There is no direct CANN counterpart. The shim preserves the CUDA template
   // signature and estimates per-vector-core occupancy from thread and UB limits.
   m["cudaOccupancyMaxActiveBlocksPerMultiprocessor"]            = {"ascify::cudaOccupancyMaxActiveBlocksPerMultiprocessor", CONV_OCCUPANCY, API_RUNTIME, SEC::OCCUPANCY, FULL};
+  m["cudaOccupancyMaxPotentialBlockSize"]                       = {"ascify::cudaOccupancyMaxPotentialBlockSize", CONV_OCCUPANCY, API_RUNTIME, SEC::OCCUPANCY, FULL};
   return m;
 }();

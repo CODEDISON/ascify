@@ -1624,6 +1624,111 @@ inline aclError cudaOccupancyMaxActiveBlocksPerMultiprocessor(
   return ACL_SUCCESS;
 }
 
+// CANN has no direct CUDA occupancy counterpart. Like the reviewed estimate
+// above, cudaOccupancyMaxPotentialBlockSize is a documented approximation:
+// the block size is the largest warp multiple that fits the vector-core
+// thread limit (and the unified-buffer limit under the caller's dynamic-UB
+// model); minGridSize is the block count that saturates concurrent
+// vector-core threads, capped by the runtime's block-per-grid limit.
+// Register pressure, static UB, and per-kernel occupancy metadata are not
+// exposed by the beta3 runtime and are not represented. The kernel parameter
+// is intentionally retained so original CUDA call sites stay source
+// compatible; it does not influence the estimate.
+inline aclError cudaOccupancyMaxPotentialBlockSizeEstimate(
+    int* min_grid_size, int* block_size, int block_size_limit,
+    size_t dynamic_ub_bytes, bool (*ub_model)(void*, int, size_t*), void* ub_state) {
+  if (min_grid_size == nullptr || block_size == nullptr || block_size_limit < 0) {
+    return ACL_ERROR_RT_PARAM_INVALID;
+  }
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  int32_t device = 0;
+  aclError status = aclrtGetDevice(&device);
+  if (status != ACL_SUCCESS) { return status; }
+  const auto query = [&](aclrtDevAttr attr) -> int64_t {
+    int64_t value = 0;
+    status = aclrtGetDeviceInfo(static_cast<uint32_t>(device), attr, &value);
+    return value;
+  };
+  const int64_t warp = query(cudaDevAttrWarpSize);
+  if (status != ACL_SUCCESS) { return status; }
+  const int64_t threads_per_core = query(cudaDevAttrMaxThreadsPerVectorCore);
+  if (status != ACL_SUCCESS) { return status; }
+  const int64_t ub_bytes = query(cudaDevAttrLocalMemoryPerVectorCore);
+  if (status != ACL_SUCCESS) { return status; }
+  const int64_t threads_per_block_limit = query(cudaDevAttrMaxThreadsPerBlock);
+  if (status != ACL_SUCCESS) { return status; }
+  const int64_t vector_cores = query(static_cast<aclrtDevAttr>(201U));
+  if (status != ACL_SUCCESS) { return status; }
+  const int64_t blocks_per_grid = query(static_cast<aclrtDevAttr>(208U));
+  if (status != ACL_SUCCESS) { return status; }
+  if (warp <= 0 || threads_per_core <= 0 || threads_per_block_limit <= 0) {
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  }
+  int64_t cap = block_size_limit > 0
+      ? (block_size_limit < threads_per_block_limit ? block_size_limit
+                                                     : threads_per_block_limit)
+      : threads_per_block_limit;
+  if (cap > threads_per_core) { cap = threads_per_core; }
+  int64_t candidate = (cap / warp) * warp;
+  if (candidate <= 0) { candidate = warp; }
+  bool found = false;
+  // Bounded descent: at most threads_per_core/warp candidates, itself capped.
+  for (int steps = 0; candidate >= warp && steps < 1024; ++steps) {
+    size_t ub = dynamic_ub_bytes;
+    if (ub_model != nullptr && !ub_model(ub_state, static_cast<int>(candidate), &ub)) {
+      return ACL_ERROR_RT_PARAM_INVALID;
+    }
+    if (ub == 0 || (ub_bytes > 0 && ub <= static_cast<size_t>(ub_bytes))) {
+      found = true;
+      break;
+    }
+    candidate -= warp;
+  }
+  if (!found) {
+    // No candidate fits the caller's dynamic-UB model within the vector-core
+    // buffer. Fail closed instead of inventing an unsatisfiable launch.
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  }
+  int64_t grid = (threads_per_core + candidate - 1) / candidate;
+  if (vector_cores > 0) { grid *= vector_cores; }
+  if (blocks_per_grid > 0 && grid > blocks_per_grid) { grid = blocks_per_grid; }
+  if (grid < 1) { grid = 1; }
+  *block_size = static_cast<int>(candidate);
+  *min_grid_size = static_cast<int>(grid);
+  return ACL_SUCCESS;
+}
+
+template<typename Kernel>
+inline aclError cudaOccupancyMaxPotentialBlockSize(
+    int* min_grid_size, int* block_size, Kernel, size_t dynamic_ub_bytes = 0,
+    int block_size_limit = 0) {
+  return cudaOccupancyMaxPotentialBlockSizeEstimate(
+      min_grid_size, block_size, block_size_limit, dynamic_ub_bytes, nullptr, nullptr);
+}
+
+namespace detail {
+template<typename UnaryFunction>
+struct PotentialBlockSizeUbModel {
+  static bool apply(void* state, int candidate, size_t* out) {
+    auto* fn = static_cast<UnaryFunction*>(state);
+    // One host evaluation per bounded candidate, mirroring CUDA's host-side
+    // occupancy model; the functor is never launched on the device.
+    *out = static_cast<size_t>((*fn)(candidate));
+    return true;
+  }
+};
+}  // namespace detail
+
+template<typename Kernel, typename UnaryFunction>
+inline aclError cudaOccupancyMaxPotentialBlockSize(
+    int* min_grid_size, int* block_size, Kernel, UnaryFunction ub_per_block,
+    int block_size_limit = 0) {
+  return cudaOccupancyMaxPotentialBlockSizeEstimate(
+      min_grid_size, block_size, block_size_limit, 0,
+      &detail::PotentialBlockSizeUbModel<UnaryFunction>::apply, &ub_per_block);
+}
+
 // beta3 does not expose CUDA-style per-kernel static/dynamic UB metadata.
 // Static shared usage is conservatively reported as zero; setting the dynamic
 // limit is a successful no-op because launch-time UB size remains authoritative.

@@ -127,14 +127,14 @@ require_fixed '#expression, __FILE__, __LINE__' "$compat_header"
 forbid_fixed 'gpuGetMaxGflopsDeviceId' "$compat_header"
 
 # v4 occupancy/assert review 2026-10-31: ascify::cudaErrorAssert constant added
-[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 76331 ]
+[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 81183 ]
 if command -v sha256sum >/dev/null 2>&1; then
   compat_header_sha=$(sha256sum "$compat_header" | awk '{print $1}')
 else
   compat_header_sha=$(shasum -a 256 "$compat_header" | awk '{print $1}')
 fi
 [ "$compat_header_sha" = \
-  00e0f0e6f15219242cf843681fce89b5c909aa134bb570daf87acf454fee621d ]
+  06edcaf4621c7b1cafb2c3cf9a144ec2b6d1de497f7c45a9b9fd315ac5a99ae3 ]
 
 official_helper_functions="$fixtures/nvidia_samples/Common/helper_functions.h"
 [ "$(wc -c <"$official_helper_functions" | tr -d ' ')" -eq 2358 ]
