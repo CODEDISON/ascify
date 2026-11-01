@@ -74,6 +74,44 @@ __global__ void step(short*out){__shared__ short a[16];transport((unsigned int*)
     for name, body in negatives:
         yield row(name, body, accepted=False)
 
+    # Preserve the original 40 fixtures above. These eight distinguish a
+    # discarded unbraced for-body store from consumed or escaping expressions.
+    yield row('unbraced_for_word_store', '''
+__global__ void step(int*input,short*out){
+ __shared__ short a[32*34]; short*p=a;
+ for(int i=0;i<8;++i) ((int*)p)[i*17]=input[i];
+ out[0]=a[0];
+}
+''', retained=('for(int i=0;i<8;++i)', '((int*)p)[i*17]=input[i]'))
+    yield row('braced_for_word_store', '''
+__global__ void step(int*input,short*out){
+ __shared__ short a[32*34]; short*p=a;
+ for(int i=0;i<8;++i){ ((int*)p)[i*17]=input[i]; }
+ out[0]=a[0];
+}
+''', retained=('for(int i=0;i<8;++i)', '((int*)p)[i*17]=input[i]'))
+    yield row('unbraced_for_unsigned_helper_store', '''
+__device__ void words(unsigned int*q){for(int i=0;i<4;++i)q[i]=i;}
+__global__ void step(short*out){
+ __shared__ short a[16]; words((unsigned int*)a); out[0]=a[0];
+}
+''', retained=('for(int i=0;i<4;++i)q[i]=i', 'words((unsigned int*)a)'))
+    yield row('for_init_element_store_outside_body',
+              '__global__ void step(short*out){__shared__ short a[16];for(a[0]=1;false;){}out[0]=a[0];}\n',
+              accepted=False)
+    yield row('for_condition_element_store_outside_body',
+              '__global__ void step(short*out){__shared__ short a[16];for(;(a[0]=1);){}out[0]=a[0];}\n',
+              accepted=False)
+    yield row('for_increment_element_store_outside_body',
+              '__global__ void step(short*out){__shared__ short a[16];for(int i=0;i<8;a[0]=1){++i;}out[0]=a[0];}\n',
+              accepted=False)
+    yield row('for_body_scalar_assignment_address_escape',
+              '__device__ short* leaked;__global__ void step(){__shared__ short a[16];for(int i=0;i<8;++i)leaked=&(a[0]=1);}\n',
+              accepted=False)
+    yield row('for_body_GNU_statement_expression_escape',
+              '__device__ short* leaked;__global__ void step(){__shared__ short a[16];short*p=a;for(int i=0;i<8;++i)leaked=({p;});}\n',
+              accepted=False)
+
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -186,7 +224,7 @@ def main():
         case=out/'original_dct';case.mkdir()
         source=a.dct_source.resolve();common=a.dct_common.resolve()
         original_files={str(p):sha(p) for root in (source.parent,common) for p in root.rglob('*') if p.is_file()}
-        flags=['-x','cuda','-std=c++17','-I'+str(source.parent),'-I'+str(common),'-fgpu-rdc']
+        flags=['-x','cuda','-std=c++17','-I'+str(source.parent),'-I'+str(common),'-I'+str(a.cuda_path/'include/cccl'),'-fgpu-rdc']
         syntax=run([a.clang,'--cuda-host-only','-nocudalib','--cuda-path='+str(a.cuda_path),
             '-resource-dir='+str(a.resource_dir),'-Wno-unknown-cuda-version',*flags,'-fsyntax-only',source],case/'syntax')
         assert syntax.returncode==0,syntax.stderr.decode()

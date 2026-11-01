@@ -10,6 +10,7 @@
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/ParentMapContext.h"
 #include "clang/AST/RecursiveASTVisitor.h"
+#include "clang/AST/Stmt.h"
 #include "clang/AST/TypeLoc.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Lex/Lexer.h"
@@ -341,6 +342,16 @@ class Proof {
             return fail(call->getExprLoc(), "shared call argument was not transported to its audited formal");
           }
         return fail(call->getExprLoc(), "shared call use is outside an audited concrete argument");
+      } else if (const auto *loop = dyn_cast<ForStmt>(parent)) {
+        const auto *store = dyn_cast_or_null<BinaryOperator>(plain(dyn_cast<Expr>(at)));
+        // An unbraced loop body discards this complete element assignment.
+        // Keep walking through the assignment first: &(a[0]=x) and pointer
+        // escapes must still be rejected before reaching a statement boundary.
+        // Init, condition and increment clauses gain no new admitted use.
+        if (loop->getBody() == at && store && store->isAssignmentOp() &&
+            !store->getLHS()->getType()->isPointerType() && located(store->getLHS()))
+          return true;
+        return fail(reference->getExprLoc(), "shared use is not a discarded for-body element assignment");
       } else if (isa<CompoundStmt>(parent)) {
         for (const auto &owner : context.getParents(*parent))
           if (owner.get<StmtExpr>())
