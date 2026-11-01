@@ -1507,6 +1507,8 @@ inline aclError cudaDeviceGetAttribute(int* value, aclrtDevAttr attribute, int d
 struct cudaDeviceProp {
   char name[256];
   int multiProcessorCount;
+  int warpSize;
+  int maxThreadsPerMultiProcessor;
   size_t totalGlobalMem;
   int maxThreadsPerBlock;
   int maxGridSize[3];
@@ -1550,9 +1552,9 @@ inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) 
   // capability number. Keep the frozen RTS ABI values usable with headers
   // that predate the enum names. A missing/invalid query is an explicit
   // failure, and no part of the caller's object is written on failure.
-  const unsigned attributes[] = {209U, 205U, 206U, 207U};
-  int limits[4] = {};
-  for (unsigned i = 0; i != 4; ++i) {
+  const unsigned attributes[] = {209U, 205U, 206U, 207U, 202U, 203U};
+  int limits[6] = {};
+  for (unsigned i = 0; i != 6; ++i) {
     int64_t raw = 0;
     status = aclrtGetDeviceInfo(static_cast<uint32_t>(device),
                                static_cast<aclrtDevAttr>(attributes[i]), &raw);
@@ -1562,6 +1564,13 @@ inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) 
   }
   result.maxThreadsPerBlock = limits[0];
   for (unsigned i = 0; i != 3; ++i) { result.maxGridSize[i] = limits[i + 1]; }
+  // warpSize is the runtime's SIMT warp width (attr 202). maxThreadsPerMulti-
+  // Processor keeps the reviewed occupancy model's equivalence of a vector
+  // core to a CUDA multiprocessor: it reports attr 203, the maximum concurrent
+  // threads per vector core. These are device-wide SIMT limits, not an SM
+  // capability number; major/minor stay unexposed by design.
+  result.warpSize = limits[4];
+  result.maxThreadsPerMultiProcessor = limits[5];
   size_t index = 0;
   while (index + 1 < sizeof(result.name) && soc_name[index] != '\0') {
     result.name[index] = soc_name[index];
