@@ -44,29 +44,32 @@ class ReplacementsFrontendActionFactory : public ct::FrontendActionFactory {
   LocalHeaderRewriteContext *localHeaderContext = nullptr;
   ascify::FrontendCompatibilityConfig frontendCompatibility;
   const ascify::HostCxxRootInputWitness *hostRootInput = nullptr;
+  const ascify::HostCxxRootInputWitness *unmodifiedHostInput = nullptr;
 
 public:
   explicit ReplacementsFrontendActionFactory(
       ct::Replacements *r,
       LocalHeaderRewriteContext *context,
       const ascify::FrontendCompatibilityConfig& compatibility,
-      const ascify::HostCxxRootInputWitness *hostInput = nullptr):
+      const ascify::HostCxxRootInputWitness *hostInput = nullptr,
+      const ascify::HostCxxRootInputWitness *unmodifiedInput = nullptr):
     ct::FrontendActionFactory(),
     replacements(r),
     localHeaderContext(context),
     frontendCompatibility(compatibility),
-    hostRootInput(hostInput) {}
+    hostRootInput(hostInput),
+    unmodifiedHostInput(unmodifiedInput) {}
 
 #if LLVM_VERSION_MAJOR < 10
   clang::FrontendAction *create() override {
     return new T(replacements, localHeaderContext, frontendCompatibility,
-                 hostRootInput);
+                 hostRootInput, unmodifiedHostInput);
   }
 #else
   std::unique_ptr <clang::FrontendAction> create() override {
     return std::unique_ptr<clang::FrontendAction>(
         new T(replacements, localHeaderContext, frontendCompatibility,
-              hostRootInput));
+              hostRootInput, unmodifiedHostInput));
   }
 #endif
 };

@@ -342,6 +342,11 @@ run_check "preserved packed integer record boundary" \
     --binary "$ASCIFY_BINARY" --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
     --clang "${CLANG:-clang++}" --evidence-dir "$work_dir/packed_records"
+run_check "unmodified host packed main/header identity" \
+  "$python" -B "$rewrite_dir/check_host_packed_records.py" \
+    --binary "$ASCIFY_BINARY" --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang++}" --evidence-dir "$work_dir/host_packed_records"
 run_check "quoted frozen sample-helper transaction ownership" \
   "$python" -B "$rewrite_dir/check_quoted_sample_helper.py"
 run_check "resolved device float frexp overload boundary" \

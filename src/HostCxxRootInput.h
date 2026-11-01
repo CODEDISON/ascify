@@ -7,8 +7,11 @@
 
 namespace ascify {
 
-// Evidence for main.cpp's own, unmodified Host C++ main-file mapping. This
-// does not authenticate caller remaps, contextual inputs or any SDK header.
+// Identity evidence for main.cpp's own unmodified Host C++ main-file mapping,
+// including a selected physical header parsed as a standalone host main.
+// Identity alone grants no SDK/profiler permission and does not authenticate
+// caller remaps, contextual inputs or any SDK header. Those users retain their
+// own narrower root-only admission contract.
 class HostCxxRootInputWitness final {
  public:
   static std::unique_ptr<const HostCxxRootInputWitness>

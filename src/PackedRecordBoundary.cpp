@@ -1,4 +1,5 @@
 #include "PackedRecordBoundary.h"
+#include "HostCxxRootInput.h"
 
 #include <algorithm>
 #include <map>
@@ -12,9 +13,11 @@
 #include "clang/Basic/SourceManager.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Lexer.h"
+#include "clang/Lex/HeaderSearchOptions.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Lex/PreprocessorOptions.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/Support/MemoryBuffer.h"
 
 namespace ascify {
@@ -84,6 +87,28 @@ bool undefined(clang::CompilerInstance &ci, const std::vector<std::string> &name
     if (pp.getMacroDefinition(pp.getIdentifierInfo(name)).getMacroInfo()) return false;
   return true;
 }
+bool witnessedHostMain(clang::CompilerInstance &ci, clang::FileID file,
+    llvm::StringRef bytes, const HostCxxRootInputWitness *witness) {
+  auto &sm = ci.getSourceManager();
+  const auto &pp = ci.getPreprocessorOpts();
+  if (witness == nullptr || ci.getLangOpts().CUDA ||
+      file != sm.getMainFileID() ||
+      !ci.getHeaderSearchOpts().VFSOverlayFiles.empty() ||
+      !pp.RemappedFiles.empty() || !pp.RemappedFileBuffers.empty()) return false;
+  const auto *entry = sm.getFileEntryForID(file);
+  if (entry == nullptr || sm.isFileOverridden(entry)) return false;
+#if LLVM_VERSION_MAJOR >= 15
+  const auto entryRef = sm.getFileEntryRefForID(file);
+  if (!entryRef || &entryRef->getFileEntry() != entry ||
+      entryRef->getName() != witness->path()) return false;
+#else
+  if (entry->getName() != witness->path()) return false;
+#endif
+  // mapVirtualFile has its own FileEntry UID. The explicit witness still
+  // binds the real path/inode/size/content before and after Tool.run.
+  return witness->matchesParsed(
+      sm.getFilename(sm.getLocForStartOfFile(file)), bytes, entry->getSize());
+}
 }
 
 bool PackedRecordBoundary::fail(const std::string &reason) {
@@ -93,7 +118,7 @@ bool PackedRecordBoundary::fail(const std::string &reason) {
 
 bool PackedRecordBoundary::pragma(clang::CompilerInstance &ci,
     clang::SourceLocation loc, bool open, bool reset, bool selected,
-    bool governedVirtualMain) {
+    bool governedVirtualMain, const HostCxxRootInputWitness *unmodifiedHostInput) {
   if (!open && !reset) return false;
   auto &sm = ci.getSourceManager();
   if (!loc.isFileID() || !selected || !ordinary(ci))
@@ -115,7 +140,8 @@ bool PackedRecordBoundary::pragma(clang::CompilerInstance &ci,
   const auto *entry = sm.getFileEntryForID(file);
   if (!entry || (sm.isFileOverridden(entry) && !governedVirtualMain))
     return fail("packed input is not an authenticated physical or governed virtual source");
-  if (!governedVirtualMain) {
+  if (!governedVirtualMain &&
+      !witnessedHostMain(ci, file, bytes, unmodifiedHostInput)) {
     const auto disk = llvm::MemoryBuffer::getFile(sm.getFilename(loc));
     llvm::sys::fs::UniqueID physical;
     if (!disk || (*disk)->getBuffer() != bytes ||

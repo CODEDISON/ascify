@@ -106,6 +106,9 @@ private:
   ct::Replacements *replacements = nullptr;
   LocalHeaderRewriteContext *localHeaderContext = nullptr;
   const ascify::HostCxxRootInputWitness *hostRootInput = nullptr;
+  // Identity only for main.cpp's unmodified host mapping, including selected
+  // standalone headers. Never consult this for SDK or profiler admission.
+  const ascify::HostCxxRootInputWitness *unmodifiedHostInput = nullptr;
   bool isWitnessedProfilerHostRoot(clang::FileID file);
   std::string contextualPragmaEvents;
   ascify::PackedRecordBoundary packedRecords;
@@ -453,11 +456,13 @@ public:
       ct::Replacements *replacements,
       LocalHeaderRewriteContext *context,
       const ascify::FrontendCompatibilityConfig& compatibility,
-      const ascify::HostCxxRootInputWitness *hostInput = nullptr):
+      const ascify::HostCxxRootInputWitness *hostInput = nullptr,
+      const ascify::HostCxxRootInputWitness *unmodifiedInput = nullptr):
     clang::ASTFrontendAction(),
     replacements(replacements),
     localHeaderContext(context),
     hostRootInput(hostInput),
+    unmodifiedHostInput(unmodifiedInput),
     frontendCompatibility(compatibility) {}
   // MatchCallback listeners
   bool lowerCudaGlobalScalarDoubleParam(const mat::MatchFinder::MatchResult &Result);

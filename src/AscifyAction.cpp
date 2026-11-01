@@ -6503,7 +6503,7 @@ void AscifyAction::PragmaDirective(
         localHeaderContext->virtualInput != nullptr && sourceManager.isWrittenInMainFile(fileLocation) &&
         buffer == *localHeaderContext->virtualInput;
     if (packedRecords.pragma(getCompilerInstance(), fileLocation, packOpen, packReset,
-                             selected, governedVirtual)) return;
+                             selected, governedVirtual, unmodifiedHostInput)) return;
   }
   if (!isDirectlyAllowedHashPragma(
           line, pragmaOperation,

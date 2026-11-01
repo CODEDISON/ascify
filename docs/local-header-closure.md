@@ -258,3 +258,14 @@ verified AArch64 CUDA compiler configurations whose plain `char` is unsigned,
 CCEC requires explicit `-funsigned-char`; a mismatched target mode fails the
 generated signedness witness. This is a configuration-specific build option,
 not a global reinterpretation of `char` or removal of source assertions.
+
+An ordinary host C++ root, or a selected physical header parsed as its own
+host main, uses an internal in-memory mapping of the unchanged source bytes.
+Its mapped FileEntry UID need not equal the physical inode. Packed-record
+admission can instead use a separate identity witness captured by the caller
+that owns that mapping: canonical path, size, exact bytes and SHA must match
+the parsed main buffer, and the real file's inode and contents are rechecked
+before and after parsing. Caller VFS overlays, remaps and contextual virtual
+inputs do not acquire this witness. Non-main inputs retain the ordinary
+physical FileEntry identity check. This identity evidence grants no SDK or
+profiler admission; those rules keep their separate root-only witness.

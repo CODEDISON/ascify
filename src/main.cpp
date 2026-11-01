@@ -302,6 +302,7 @@ bool ascifySingleSource(const std::string &srcPath,
     const std::string parsePath = mainContextPath;
     std::string hostInput;
     std::unique_ptr<const ascify::HostCxxRootInputWitness> hostRootInput;
+    std::unique_ptr<const ascify::HostCxxRootInputWitness> unmodifiedHostInput;
     if (!contextualInput) {
 #if LLVM_VERSION_MAJOR >= 13
       const bool unmodifiedHostRoot = languageDatabase.hostCxx() &&
@@ -315,8 +316,29 @@ bool ascifySingleSource(const std::string &srcPath,
         // not receive this witness.
         hostRootInput = ascify::HostCxxRootInputWitness::capture(parsePath);
       }
+      // This separate identity witness also covers a selected physical header
+      // being parsed as its own host main. It grants only packed-buffer
+      // identity, never the root-only SDK/profiler permissions above.
+      bool controlledHostInput = languageDatabase.hostCxx() &&
+          localHeaderContext == nullptr;
+      if (languageDatabase.hostCxx() && localHeaderContext != nullptr &&
+          localHeaderContext->plan != nullptr &&
+          !localHeaderContext->plan->failed() &&
+          localHeaderContext->sourcePath == parsePath) {
+        controlledHostInput = localHeaderContext->depth == 0 &&
+            parsePath == localHeaderContext->plan->rootSourcePath();
+        for (const auto &node : localHeaderContext->plan->nodes())
+          controlledHostInput |= node.state == LocalHeaderNodeState::Translating &&
+              node.sourcePath == parsePath &&
+              node.artifactPath == localHeaderContext->artifactPath &&
+              node.depth == localHeaderContext->depth;
+      }
+      if (controlledHostInput)
+        unmodifiedHostInput = ascify::HostCxxRootInputWitness::capture(parsePath);
       if (hostRootInput) {
         hostInput = hostRootInput->bytes();
+      } else if (unmodifiedHostInput) {
+        hostInput = unmodifiedHostInput->bytes();
       } else
 #endif
       {
@@ -333,17 +355,21 @@ bool ascifySingleSource(const std::string &srcPath,
         ? *localHeaderContext->virtualInput : hostInput;
     ct::RefactoringTool Tool(languageDatabase, parsePath);
     if (hostRootInput && !hostRootInput->matchesPhysical()) return false;
+    if (unmodifiedHostInput && !unmodifiedHostInput->matchesPhysical()) return false;
     Tool.mapVirtualFile(parsePath, input);
     if (hostRootInput && !hostRootInput->matchesPhysical()) return false;
+    if (unmodifiedHostInput && !unmodifiedHostInput->matchesPhysical()) return false;
     ct::Replacements &edits = llcompat::getReplacements(Tool, parsePath);
     ascify::FrontendCompatibilityConfig frontendCompatibility;
     if (!appendArgumentsAdjusters(Tool, mainContextPath, ascify_exe_path,
                                   frontendCompatibility, languageDatabase.hostCxx()))
       return false;
     ReplacementsFrontendActionFactory<AscifyAction> factory(
-        &edits, localHeaderContext, frontendCompatibility, hostRootInput.get());
+        &edits, localHeaderContext, frontendCompatibility, hostRootInput.get(),
+        unmodifiedHostInput.get());
     if (Tool.run(&factory) ||
-        (hostRootInput && !hostRootInput->matchesPhysical()))
+        (hostRootInput && !hostRootInput->matchesPhysical()) ||
+        (unmodifiedHostInput && !unmodifiedHostInput->matchesPhysical()))
       return false;
     if (localHeaderContext != nullptr &&
         localHeaderContext->deferredInheritedHelperDiscovery)

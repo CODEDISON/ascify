@@ -7,12 +7,14 @@
 
 namespace clang { class CompilerInstance; }
 namespace ascify {
+class HostCxxRootInputWitness;
 // This proof preserves literal source; it does not synthesize packed layouts.
 // All events and final replacements must be checked before publication.
 class PackedRecordBoundary {
  public:
   bool pragma(clang::CompilerInstance &, clang::SourceLocation,
-              bool open, bool reset, bool selected, bool governedVirtualMain);
+              bool open, bool reset, bool selected, bool governedVirtualMain,
+              const HostCxxRootInputWitness *unmodifiedHostInput = nullptr);
   void includeOrFileTransition();
   bool prove(clang::CompilerInstance &, bool unrelatedPragmaFailure,
              std::vector<clang::tooling::Replacement> &ownedEdits);

@@ -67,5 +67,23 @@ int main() {
   require(bool(sizeWitness), "replacement source was not captured");
   write(source, "int original=2222;\n");
   require(!sizeWitness->matchesPhysical(), "changed physical size acquired witness");
+  // A header parsed as its own host main has the identical physical identity
+  // contract; its extension confers no permission and cannot hide replacement.
+  const fs::path header = directory / "selected.h";
+  const std::string record = "#pragma pack(1)\nstruct P { unsigned short x; };\n#pragma pack()\n";
+  write(header, record);
+  auto headerWitness = ascify::HostCxxRootInputWitness::capture(header.string());
+  require(bool(headerWitness) && headerWitness->matchesParsed(
+      header.string(), record, record.size()), "standalone header identity refused");
+  require(!headerWitness->matchesParsed(source.string(), record, record.size()),
+          "different parsed path acquired header identity");
+  require(!headerWitness->matchesParsed(header.string(), record + "\n", record.size()),
+          "forged parsed header buffer acquired identity");
+  const fs::path headerReplacement = directory / "replacement.h";
+  write(headerReplacement, record);
+  fs::rename(headerReplacement, header);
+  require(!headerWitness->matchesPhysical() &&
+          !headerWitness->matchesParsed(header.string(), record, record.size()),
+          "same-content header inode replacement acquired identity");
   std::cout << "Host C++ root witness: exact input, path/size/content/UID/alias rejection PASS\n";
 }
