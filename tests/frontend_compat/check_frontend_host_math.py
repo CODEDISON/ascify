@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Check opt-in host math value domains and the real converter if supplied."""
+"""Check host math values and 62 converter identity/domain cases."""
 import os
+import hashlib
 from pathlib import Path
 import shlex
 import shutil
@@ -312,24 +313,56 @@ int main(){
         assert "min(a,b)+min(b,a)" in generated and "__builtin_elementwise_min" not in generated
         assert foreign_header.read_text() == foreign_text
         print("real converter: nonfrozen SDK-shaped declarations kept their own identities")
-        # Exercise the existing frozen-byte authentication contract from an
-        # installed-style include tree, without changing any real installation.
-        installed = work / "installed" / "include"
-        shutil.copytree(ROOT / "include/ascify", installed / "ascify")
-        compat = installed / "ascify/ascify_cuda_compat.hpp"
+        # CPU parser/byte-identity unit environment only: this is not a real
+        # SDK, target runtime, or complete native dependency acceptance test.
+        # Authenticate the exact topheader while isolating its dependencies.
+        native = work / "native-input" / "include"
+        isolated = work / "identity-unit" / "include"
+        shutil.copytree(ROOT / "include/ascify", native / "ascify")
+        shutil.copytree(ROOT / "include/ascify", isolated / "ascify")
+        native_compat = native / "ascify/ascify_cuda_compat.hpp"
+        compat = isolated / "ascify/ascify_cuda_compat.hpp"
         frozen = compat.read_bytes()
+        assert len(frozen) == 82819
+        assert hashlib.sha256(frozen).hexdigest() == (
+            "02db2e36d6a37dc7d01ce0a6a509ed04ab5a69b8a618aa4626225d114d43bcee")
+        # The symbol-registration macro is itself a protected output spelling.
+        # Do not change the product trust boundary to admit that transitive
+        # macro as caller input. Only this parser fixture replaces that leaf.
+        symbol_stub = isolated / "ascify/symbol_compat.hpp"
+        symbol_stub.write_text("#pragma once\n// CPU identity-only symbol dependency stub.\n")
+        platform = work / "identity-platform-system-stub"
+        platform.mkdir()
+        (platform / "ascify_test_platform.hpp").write_text(
+            "#pragma once\n// CPU parser platform qualifier stub, not a CANN header.\n"
+            "#define __aicore__\n")
+        # Mark parser stubs as system dependencies from first entry. This is
+        # explicit fixture setup, not a product or installation trust change.
+        # The caller negative below retains the original ordinary -I tree.
+        immutable = {p: p.read_bytes() for directory in (native, isolated, platform)
+                     for p in directory.rglob("*") if p.is_file() and p != compat}
         providers = {
             "frozen": (frozen, True),
             "same_name_caller": (b"#pragma once\nnamespace ascify { int caller_owned; }\n", False),
             "one_byte_changed": (frozen.replace(b"Internal host target", b"internal host target", 1), False),
+            # Preserve the old complete native dependency + caller qualifier
+            # input verbatim, with its correct expected result: refusal.
+            "caller_aicore_native_tree": (frozen, False),
         }
         assert len(providers["one_byte_changed"][0]) == len(frozen)
         assert providers["one_byte_changed"][0] != frozen
         for provider, (content, accepted) in providers.items():
             compat.write_bytes(content)
+            caller = provider == "caller_aicore_native_tree"
+            prefix = ('#define __aicore__\n' if caller else
+                      '#include <ascify_test_platform.hpp>\n')
             source_path = work / ("provider-" + provider + ".cpp")
-            source_path.write_text('#define __aicore__\n#include <ascify/ascify_cuda_compat.hpp>\n'
+            source_path.write_text(prefix + '#include <ascify/ascify_cuda_compat.hpp>\n'
                                    'unsigned choose(int a,unsigned b){return min(a,b);}\n')
+            include_args = (["-I" + str(native), "-I" + str(ROOT / "tests/rewrite/stubs")]
+                            if caller else
+                            ["-isystem", str(platform), "-isystem", str(isolated),
+                             "-isystem", str(ROOT / "tests/rewrite/stubs")])
             for mode in (["fresh"] if accepted else ["fresh", "existing"]):
                 output = work / ("provider-" + provider + "-" + mode + ".cpp")
                 sentinel = "EXISTING_UNCHANGED_" + provider + "\n"
@@ -338,14 +371,24 @@ int main(){
                 result = run([binary, str(source_path), "--frontend-compat=ascify-admitted-v1",
                               f"--cuda-path={cuda}", f"--clang-resource-directory={resource}",
                               "-o", str(output), "--", "-x", "c++", "-std=c++17",
-                              "-I" + str(installed), "-I" + str(ROOT / "tests/rewrite/stubs")],
-                             accepted=accepted)
+                              *include_args], accepted=accepted)
                 if accepted:
-                    assert "::ascify::cuda_host_min_unsigned(a,b)" in output.read_text()
+                    generated = output.read_text()
+                    assert "::ascify::cuda_host_min_unsigned(a,b)" in generated, generated
+                    assert generated.count("#include <ascify/ascify_cuda_compat.hpp>") == 1, generated
+                    assert "unrecognized header" not in result.stderr, result.stderr
+                    assert "untrusted input macro" not in result.stderr, result.stderr
                 else:
                     assert "Ascify cannot publish CUDA compatibility output" in result.stderr, result.stderr
+                    if caller:
+                        assert "untrusted input macro '__aicore__'" in result.stderr, result.stderr
+                        assert "reserved output macro 'ASCIFY_REGISTER_DEVICE_SYMBOL'" in result.stderr, result.stderr
+                    else:
+                        assert "include spelling resolves to an unrecognized header" in result.stderr, result.stderr
                     assert (not output.exists()) if mode == "fresh" else output.read_text() == sentinel
                 assert compat.read_bytes() == content
+                assert native_compat.read_bytes() == frozen
+                assert all(path.read_bytes() == data for path, data in immutable.items())
             print(f"real converter: frozen compat provider {provider} passed")
         compat.write_bytes(frozen)
         # The default profile must not silently acquire the new host overload.

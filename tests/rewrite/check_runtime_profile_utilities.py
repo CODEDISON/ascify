@@ -175,12 +175,12 @@ def main():
             source = directory / 'input.cu'; source.write_text(case['code'])
             frozen = {str(path): sha(path) for path in directory.rglob('*') if path.is_file()}
             extra = [value.replace('{case}', str(directory)) for value in case['extra']]
-            common = ['-x', 'cuda', '-std=c++17', '-I' + str(profile), '-iquote' + str(directory), *extra]
+            common = ['-x', 'cuda', '-std=c++17', '-iquote' + str(directory), *extra]
             row = dict(name=case['name'], passed=False, fragments=case['fragments'], input_identity=frozen)
             summary['cases'].append(row); save()
             # Explicitly include the exact selected profile for the syntax
             # oracle. The converter independently chooses its own forced file.
-            syntax = run(directory, 'syntax', [args.clang, source, *common, '--cuda-host-only',
+            syntax = run(directory, 'syntax', [args.clang, source, '-I' + str(profile), *common, '--cuda-host-only',
                          '-fsyntax-only', '-nocudalib', '--cuda-path=' + str(args.cuda_path),
                          '-resource-dir=' + str(args.resource_dir), '-Wno-unknown-cuda-version',
                          '-include', profile / 'host_math.h'])
