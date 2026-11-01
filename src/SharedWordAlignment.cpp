@@ -5,6 +5,7 @@
 #include <set>
 #include <vector>
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/ASTTypeTraits.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/ExprCXX.h"
@@ -280,6 +281,33 @@ class Proof {
     }
     return fail(SourceLocation(), "shared pointer closure did not converge");
   }
+  bool scalarReadHasClosedForContext(const CastExpr *read) {
+    const auto *value = plain(read->getSubExpr());
+    const auto *assignment = dyn_cast_or_null<BinaryOperator>(value);
+    const auto *increment = dyn_cast_or_null<UnaryOperator>(value);
+    const bool mutation =
+        (assignment && assignment->isAssignmentOp() &&
+         !assignment->getLHS()->getType()->isPointerType() && located(assignment->getLHS())) ||
+        (increment && increment->isIncrementDecrementOp() &&
+         !increment->getType()->isPointerType() && located(increment->getSubExpr()));
+    // An ordinary shared scalar load is already closed data, not an address.
+    if (!mutation) return true;
+    // A scalar conversion of (a[i]=x), a[i]+=x or ++a[i] must not hide a
+    // mutation in a for init/condition/increment. Follow its enclosing AST
+    // edges, including a VarDecl/DeclStmt initializer, before ending the use.
+    auto node = DynTypedNode::create(*read);
+    for (unsigned depth = 0; depth < 128; ++depth) {
+      const auto parents = context.getParents(node);
+      if (parents.size() != 1)
+        return fail(read->getExprLoc(), "shared scalar mutation has no unique closed parent");
+      if (const auto *loop = parents[0].get<ForStmt>())
+        if (loop->getBody() != node.get<Stmt>())
+          return fail(read->getExprLoc(), "shared use is not a discarded for-body element assignment");
+      if (parents[0].get<FunctionDecl>()) return true;
+      node = parents[0];
+    }
+    return fail(read->getExprLoc(), "shared scalar mutation exceeds bounded expression depth");
+  }
   bool use(const DeclRefExpr *reference) {
     const Stmt *at = reference;
     for (unsigned depth = 0; depth < 128; ++depth) {
@@ -295,7 +323,8 @@ class Proof {
         return fail(inquiry->getExprLoc(), "shared object alignment reflection cannot change");
       }
       if (const auto *cast = dyn_cast<CastExpr>(parent)) {
-        if (cast->getCastKind() == CK_LValueToRValue && !cast->getType()->isPointerType()) return true;
+        if (cast->getCastKind() == CK_LValueToRValue && !cast->getType()->isPointerType())
+          return scalarReadHasClosedForContext(cast);
         if (cast->getCastKind() != CK_ArrayToPointerDecay &&
             (!pointerType(cast->getType()) || !cast->getSubExpr()->getType()->isPointerType()))
           return fail(cast->getExprLoc(), "shared object numeric address or unsupported pointer cast");

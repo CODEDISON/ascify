@@ -112,6 +112,21 @@ __global__ void step(short*out){
               '__device__ short* leaked;__global__ void step(){__shared__ short a[16];short*p=a;for(int i=0;i<8;++i)leaked=({p;});}\n',
               accepted=False)
 
+    # Preserve all previous fixtures. Scalar conversion must not hide a
+    # shared mutation in a control clause; an ordinary scalar read stays data.
+    yield row('for_consumed_vardecl_init_store',
+              '__global__ void step(short*out){__shared__ short a[16];for(short v=(a[0]=1);false;){}out[0]=a[0];}\n',
+              accepted=False)
+    yield row('for_compound_assignment_condition_store',
+              '__global__ void step(short*out){__shared__ short a[16];a[0]=0;for(;(a[0]+=1);){}out[0]=a[0];}\n',
+              accepted=False)
+    yield row('for_prefix_increment_condition_store',
+              '__global__ void step(short*out){__shared__ short a[16];a[0]=0;for(;++a[0];){}out[0]=a[0];}\n',
+              accepted=False)
+    yield row('for_ordinary_shared_scalar_condition_read',
+              '__global__ void step(short*out){__shared__ short a[16];a[0]=0;for(;a[0];){}out[0]=a[0];}\n',
+              retained=('for(;a[0];)',))
+
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
