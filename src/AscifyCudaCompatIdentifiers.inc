@@ -480,6 +480,7 @@
     "cudaTextureObject_t",
     "cudaTextureReadMode",
     "cuda_frexp_float",
+    "cuda_host_min_unsigned",
     "cuda_lane_id",
     "current",
     "data",

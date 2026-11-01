@@ -773,12 +773,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 75839)
+  if (contents.size() != 82819)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "3a700fed26e8f695ac02f23f0cfb4ee3022d993e6f668c5c27a7e97d336e283d");
+      "02db2e36d6a37dc7d01ce0a6a509ed04ab5a69b8a618aa4626225d114d43bcee");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -805,12 +805,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 75839)
+  if (invalidBuffer || contents.size() != 82819)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "3a700fed26e8f695ac02f23f0cfb4ee3022d993e6f668c5c27a7e97d336e283d");
+      "02db2e36d6a37dc7d01ce0a6a509ed04ab5a69b8a618aa4626225d114d43bcee");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -6619,9 +6619,20 @@ bool AscifyAction::rewriteFrontendHostMath(
   const llvm::StringRef sourceName = isMaximum ? "max" : "min";
   const bool isFloatMaximum = isMaximum &&
       callee->getReturnType()->isSpecificBuiltinType(clang::BuiltinType::Float);
+  const auto hasParameterType = [&](unsigned index, clang::BuiltinType::Kind type) {
+    return callee->getParamDecl(index)->getType()->isSpecificBuiltinType(type);
+  };
+  const bool isMixedUnsignedMinimum = !isMaximum &&
+      callee->getNumParams() == 2 &&
+      callee->getReturnType()->isSpecificBuiltinType(clang::BuiltinType::UInt) &&
+      ((hasParameterType(0, clang::BuiltinType::Int) &&
+        hasParameterType(1, clang::BuiltinType::UInt)) ||
+       (hasParameterType(0, clang::BuiltinType::UInt) &&
+        hasParameterType(1, clang::BuiltinType::Int)));
   const auto argumentType = isFloatMaximum ? clang::BuiltinType::Float
                                            : clang::BuiltinType::Int;
-  const llvm::StringRef targetName = isFloatMaximum ? "__builtin_fmaxf"
+  const llvm::StringRef targetName = isMixedUnsignedMinimum
+      ? "ascify::cuda_host_min_unsigned" : isFloatMaximum ? "__builtin_fmaxf"
       : isMaximum ? "__builtin_elementwise_max" : "__builtin_elementwise_min";
   auto &sourceManager = *Result.SourceManager;
   const std::string expectedHeader =
@@ -6636,8 +6647,9 @@ bool AscifyAction::rewriteFrontendHostMath(
         "Ascify frontend host %0 requires a direct, non-macro %1 "
         "call with no qualifier or global :: in a non-template host function; "
         "this use is not admitted");
-    diagnostics.Report(reference->getLocation(), id)
-        << sourceName << (isFloatMaximum ? "float/float" : "int/int");
+    const llvm::StringRef domain = isFloatMaximum ? "float/float" :
+        isMixedUnsignedMinimum ? "int/unsigned-int or unsigned-int/int" : "int/int";
+    diagnostics.Report(reference->getLocation(), id) << sourceName << domain;
     return false;
   };
   // A using-declaration can expose the same product function as ns::max.
@@ -6683,10 +6695,12 @@ bool AscifyAction::rewriteFrontendHostMath(
       function->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
       reference->hasExplicitTemplateArgs() ||
       callee->getNumParams() != 2 ||
-      !callee->getReturnType()->isSpecificBuiltinType(argumentType))
+      (!isMixedUnsignedMinimum &&
+       !callee->getReturnType()->isSpecificBuiltinType(argumentType)))
     return reject();
   for (const auto *parameter : callee->parameters()) {
-    if (!parameter->getType()->isSpecificBuiltinType(argumentType))
+    if (!isMixedUnsignedMinimum &&
+        !parameter->getType()->isSpecificBuiltinType(argumentType))
       return reject();
   }
 
@@ -6725,12 +6739,18 @@ bool AscifyAction::rewriteFrontendHostMath(
       location, 0, sourceManager, languageOptions);
   // Builtins preserve CUDA value semantics without binding to user overloads.
   // Both substitutions leave the argument expressions evaluated exactly once.
+  // The mixed minimum's finite unsigned/unsigned target converts the signed
+  // value before comparison, matching CUDA's unsigned-returning overloads.
   const std::string replacementName = reference->hasQualifier()
       ? targetName.str() : "::" + targetName.str();
   const ct::Replacement replacement(sourceManager, location, 3,
                                      replacementName);
-  return insertSemanticReplacement(replacement,
-      clang::FullSourceLoc(location, sourceManager), location, end);
+  if (!insertSemanticReplacement(replacement,
+          clang::FullSourceLoc(location, sourceManager), location, end))
+    return false;
+  if (isMixedUnsignedMinimum)
+    needsCudaCompatHeader = true;
+  return true;
 }
 
 bool AscifyAction::rewriteCudaHalf2Operator(

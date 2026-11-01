@@ -5,7 +5,7 @@ the origin of its exact CUDA device-qualifier macro chain and fixed CUDA control
 condition when a Runtime header is removed. Each include instance must retain
 the product bytes and authenticated macro context. Independent caller uses of
 the same SDK macro names remain rejected. With ordinary CUDA preprocessing,
-the exact forced product `host_math.h` can also establish its three literal CUDA
+the exact forced product `host_math.h` can also establish its four literal CUDA
 control conditions. The include must come from the compiler predefines, with
 unchanged physical bytes, macro expansion history and include-guard ownership.
 Caller guard manipulation, macro-stack operations, conditional-retention mode,
@@ -112,9 +112,18 @@ ownership, rebinding, callback ordering, rollback, and normal process exit.
 | Profiling | An explicit `ASCIFY_PROFILE_DIR` opts into owned CANN collection; link `msprofiler`; unsupported configurations return an error, as described in the [runtime contract](runtime-profiling-and-host-functions.md) |
 | Stream flags | Default creation uses the runtime adapter; nonblocking creation is admitted on the reviewed legacy SIMT / ACL 1.17.0 surface and remains unsupported elsewhere; unknown bits return invalid-parameter status |
 | Device properties | Report the actual SoC name and vector-core count without changing the current binding; publish output only after successful queries; do not invent CUDA compute capability or SM counts |
-| Host math profile | Admit exact `max(float, float)` with `fmaxf` semantics and `min(int, int)` / `max(int, int)`; mixed-type and double max are outside this admission |
+| Host math profile | Admit exact `max(float, float)` with `fmaxf` semantics, `min(int, int)` / `max(int, int)`, and `min(int, unsigned int)` / `min(unsigned int, int)` returning unsigned int; other mixed types and double max remain outside this admission |
 | Half2 | Proven device-local construction and arithmetic use target constructors/intrinsics, preserving separate half multiplication and addition rounding; unsupported macros, effects, and template contexts do not receive a broad rewrite |
 | Packed-byte SAD | Experimental lowering of one proved literal `vabsdiff4.u32.u32.u32.add` instruction to unsigned integer arithmetic; target compilation and device validation are separate requirements |
+
+The two mixed integer `min` orders follow CUDA's unsigned comparison domain:
+convert the signed operand to `unsigned int`, then select the unsigned minimum.
+Thus `min(-1, 1u)` returns `1u`, while `min(-1, UINT_MAX)` returns `UINT_MAX`.
+Only the callee of an authenticated direct host call is rewritten to
+`ascify::cuda_host_min_unsigned`, whose two value parameters have unsigned int
+type; the argument expressions remain intact and are
+evaluated once. The exact product header, physical owner, macro and host-context
+checks apply to these overloads as they do to the existing host math calls.
 
 The packed-byte SAD rule accepts the exact decoded instruction string
 `vabsdiff4.u32.u32.u32.add %0, %1, %2, %3;`, one unnamed `=r` output and three

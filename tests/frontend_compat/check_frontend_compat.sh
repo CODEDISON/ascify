@@ -70,7 +70,7 @@ require_fixed \
   'file=cooperative_groups/reduce.h;bytes=1612;sha256=bc6f9130deaa55a786df70d127a118ecf57b1014dddbb0700a45ef05f597c928' \
   "$manifest"
 require_fixed \
-  'file=host_math.h;bytes=1872;sha256=c73958a48fb55cd8f05a45e9455ce45f8660273863b17c070f5d1081a396106f' \
+  'file=host_math.h;bytes=2594;sha256=3b87b69a619cff6333d8fb2728d6af31a90a28fd2073077084b81ba602d70e2f' \
   "$manifest"
 if [ "$(sha256_file "$header")" != \
     '45bcf927b3f5717b20468bc244a84f791a59e3780f1cdd9d7b56df42fd58f1a3' ]; then
@@ -83,7 +83,7 @@ if [ "$(sha256_file "$reduction")" != \
   exit 1
 fi
 if [ "$(sha256_file "$host_math")" != \
-    'c73958a48fb55cd8f05a45e9455ce45f8660273863b17c070f5d1081a396106f' ]; then
+    '3b87b69a619cff6333d8fb2728d6af31a90a28fd2073077084b81ba602d70e2f' ]; then
   echo "frontend host math header SHA-256 mismatch" >&2
   exit 1
 fi

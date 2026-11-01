@@ -91,6 +91,13 @@ extern int ascify_test_register_exit_cleanup(void (*callback)());
 
 namespace ascify {
 
+// Internal host target for the two exact CUDA int/unsigned-int min orders.
+// Value parameters perform CUDA's unsigned conversion before the comparison
+// and evaluate each original argument once, independently of builtin versions.
+inline unsigned int cuda_host_min_unsigned(unsigned int a, unsigned int b) {
+  return a < b ? a : b;
+}
+
 // Internal target for one proven nonvolatile CUDA lane-ID instruction.
 // CUDA numbers threads with x varying fastest, including 2D and 3D blocks;
 // each block starts its own 32-thread warps. Keep lookup in this protected

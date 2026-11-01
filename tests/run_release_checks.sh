@@ -47,7 +47,7 @@ run_check "CUDA vec3 explicit record host layout" \
   sh "$rewrite_dir/check_cuda_vec3_layout_host.sh"
 run_check "half2 parser ADL and dependent builtin lookup" \
   "$python" -B tests/rewrite/check_half2_parse_lookup.py
-run_check "host float max semantic admission" \
+run_check "host math exact-domain semantic admission" \
   "$python" -B tests/frontend_compat/check_frontend_host_math.py
 run_check "target ABI compatibility static contract" \
   sh "$rewrite_dir/check_target_abi_compat.sh"

@@ -29,6 +29,8 @@ def cases(profile):
                ['ascify_cg::this_thread_block().sync()'])
     yield item('host_float_max', 'float f(){return max(1.0f,2.0f);}\n', ['__builtin_fmaxf(1.0f,2.0f)'])
     yield item('host_int_min', 'int f(){return min(1,2);}\n', ['__builtin_elementwise_min(1,2)'])
+    yield item('host_mixed_min', 'unsigned f(){return min(-1,1u);}\n', ['::ascify::cuda_host_min_unsigned(-1,1u)'])
+    yield item('host_mixed_min_reverse', 'unsigned f(){return ::min(1u,-1);}\n', ['::ascify::cuda_host_min_unsigned(1u,-1)'])
     yield item('late_unrelated_macro', '#define UnusedCallerMarker 1\n#undef UnusedCallerMarker\nint retained;\n', ['int retained;'])
     child = '#ifndef PROJECT_KERNEL_CUH\n#define PROJECT_KERNEL_CUH\n' + PREFIX + CG + 'int retained;\n#endif\n'
     yield item('selected_local_header', '#include "kernel.cuh"\n', ['int retained;'],
@@ -57,12 +59,17 @@ def cases(profile):
     yield item('parameter_macro_at_entry', extra=['-DA=CallerType'])
     yield item('inline_macro_at_entry', extra=['-Dinline='])
     yield item('owner_macro_at_entry', extra=['-Dhost_float_max_enabled=CallerEnabled'])
+    yield item('mixed_owner_macro_at_entry', 'unsigned f(){return min(-1,1u);}\n',
+               extra=['-Dhost_mixed_uint_min_enabled=CallerEnabled'])
     yield item('preinclude_macro_at_entry', '#undef A\nint retained;\n', extra=['-include', '{case}/control.cuh'],
                headers={'control.cuh': '#define A CallerType\n'})
     yield item('hostmath_reentry_namespace', '#undef ' + GUARD + '\nnamespace caller{\n#include <host_math.h>\n}\nint retained;\n')
     copied = (profile / 'host_math.h').read_text().replace(GUARD, 'CALLER_HOST_MATH_H_')
     yield item('copied_hostmath_namespace', 'namespace caller{\n#include "copied.h"\n}\nint retained;\n',
                headers={'copied.h': copied})
+    yield item('copied_mixed_hostmath_namespace',
+               'namespace caller{\n#include "copied.h"\n}\n'
+               'unsigned f(){return caller::min(-1,1u);}\n', headers={'copied.h': copied})
     yield item('copied_cg', '#include "cooperative_groups.h"\nint retained;\n',
                headers={'cooperative_groups.h': (profile / 'cooperative_groups.h').read_text()})
     yield item('nested_cg', '#include <type_traits>\nnamespace caller{\n' + CG + '}\nint retained;\n')

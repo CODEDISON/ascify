@@ -2,4 +2,4 @@ schema=ascify.frontend-compat-profile.v1
 profile=ascify-admitted-v1
 file=cooperative_groups.h;bytes=5801;sha256=45bcf927b3f5717b20468bc244a84f791a59e3780f1cdd9d7b56df42fd58f1a3
 file=cooperative_groups/reduce.h;bytes=1612;sha256=bc6f9130deaa55a786df70d127a118ecf57b1014dddbb0700a45ef05f597c928
-file=host_math.h;bytes=1872;sha256=c73958a48fb55cd8f05a45e9455ce45f8660273863b17c070f5d1081a396106f
+file=host_math.h;bytes=2594;sha256=3b87b69a619cff6333d8fb2728d6af31a90a28fd2073077084b81ba602d70e2f

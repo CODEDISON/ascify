@@ -175,14 +175,17 @@ constexpr char kHostMathHeader[] = R"ASCIFY(#ifndef ASCIFY_FRONTEND_COMPAT_ADMIT
 #define ASCIFY_FRONTEND_COMPAT_ADMITTED_V1_HOST_MATH_H_
 
 // CUDA's float max(a, b) returns fmaxf(a, b), including its NaN behavior.
-// Clang's CUDA wrapper exposes only the device overload. This opt-in parser
-// templates admit float/float max and int/int min/max; no argument is narrowed.
-// Ascify rewrites references proven to use this declaration to the builtin.
+// Clang's CUDA wrapper exposes only the device overload. These opt-in parser
+// templates admit float/float max, int/int min/max, and the two exact
+// int/unsigned-int min orders; no argument is narrowed.
+// Ascify rewrites proven references to target builtins or a finite helper.
 namespace ascify_frontend_compat_detail {
 template <bool> struct host_float_max_enabled {};
 template <> struct host_float_max_enabled<true> { using type = int; };
 template <bool> struct host_int_min_enabled {};
 template <> struct host_int_min_enabled<true> { using type = int; };
+template <bool> struct host_mixed_uint_min_enabled {};
+template <> struct host_mixed_uint_min_enabled<true> { using type = int; };
 template <bool> struct host_int_max_enabled {};
 template <> struct host_int_max_enabled<true> { using type = int; };
 }
@@ -209,6 +212,19 @@ inline int min(A a, B b) {
   return a < b ? a : b;
 }
 
+// CUDA converts the signed operand to unsigned int before taking the minimum.
+// The conditional's usual arithmetic conversion preserves that value domain.
+template <class A, class B,
+          typename ascify_frontend_compat_detail::host_mixed_uint_min_enabled<
+              (__is_same(A, int) && __is_same(B, unsigned int)) ||
+              (__is_same(A, unsigned int) && __is_same(B, int))>::type = 0>
+#if defined(__CUDACC__) || defined(__CUDA__)
+__attribute__((host))
+#endif
+inline unsigned int min(A a, B b) {
+  return a < b ? a : b;
+}
+
 template <class A, class B,
           typename ascify_frontend_compat_detail::host_int_max_enabled<
               __is_same(A, int) && __is_same(B, int)>::type = 0>
@@ -227,13 +243,13 @@ constexpr char kProfileManifest[] =
     "profile=ascify-admitted-v1\n"
     "file=cooperative_groups.h;bytes=5801;sha256=45bcf927b3f5717b20468bc244a84f791a59e3780f1cdd9d7b56df42fd58f1a3\n"
     "file=cooperative_groups/reduce.h;bytes=1612;sha256=bc6f9130deaa55a786df70d127a118ecf57b1014dddbb0700a45ef05f597c928\n"
-    "file=host_math.h;bytes=1872;sha256=c73958a48fb55cd8f05a45e9455ce45f8660273863b17c070f5d1081a396106f\n";
+    "file=host_math.h;bytes=2594;sha256=3b87b69a619cff6333d8fb2728d6af31a90a28fd2073077084b81ba602d70e2f\n";
 
 static_assert(sizeof(kAdmissionHeader) - 1 == 5801,
               "admission header identity drifted");
 static_assert(sizeof(kReductionHeader) - 1 == 1612,
               "reduction header identity drifted");
-static_assert(sizeof(kHostMathHeader) - 1 == 1872,
+static_assert(sizeof(kHostMathHeader) - 1 == 2594,
               "host math header identity drifted");
 static_assert(sizeof(kProfileManifest) - 1 == 393,
               "frontend profile manifest identity drifted");
@@ -248,7 +264,7 @@ constexpr RequiredProfileFile kRequiredProfileFiles[] = {
     {"profile.manifest", 393, kProfileManifest},
     {"cooperative_groups.h", 5801, kAdmissionHeader},
     {"cooperative_groups/reduce.h", 1612, kReductionHeader},
-    {"host_math.h", 1872, kHostMathHeader},
+    {"host_math.h", 2594, kHostMathHeader},
 };
 
 std::string pathString(const fs::path& path) {
@@ -516,7 +532,7 @@ bool ConfigureFrontendCompatibility(
       clang::tooling::ArgumentInsertPosition::BEGIN));
   // This verified, explicitly selected parser surface must also apply to
   // host code that never includes cooperative_groups.h. It is not emitted
-  // into translated output; proven float calls are rewritten semantically.
+  // into translated output; proven host math calls are rewritten semantically.
   const clang::tooling::CommandLineArguments hostMathArguments{
       "-include", root + "/host_math.h"};
   tool.appendArgumentsAdjuster(clang::tooling::getInsertArgumentAdjuster(
