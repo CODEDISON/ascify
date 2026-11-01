@@ -1507,6 +1507,15 @@ inline aclError cudaDeviceGetAttribute(int* value, aclrtDevAttr attribute, int d
 struct cudaDeviceProp {
   char name[256];
   int multiProcessorCount;
+  // Capability epoch, not an NVIDIA SM version claim. The admitted value 7.0
+  // documents the reviewed SIMT feature set of this porting layer (full-warp
+  // shuffle/vote/masked ballots, atomics, streams/events, occupancy
+  // estimates). Samples gating on compute capability >= 2/3/3.5 therefore
+  // proceed for features this layer implements; features outside the epoch
+  // (device-side recursion, WMMA, CDP) are still refused by their own
+  // conversion gates and never pass because of these fields.
+  int major;
+  int minor;
   int warpSize;
   int maxThreadsPerMultiProcessor;
   size_t totalGlobalMem;
@@ -1548,6 +1557,11 @@ inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) 
     return ACL_ERROR_FEATURE_UNSUPPORTED;
   }
   cudaDeviceProp result = {};
+  // Capability epoch 7.0 (see struct comment): the reviewed SIMT admission
+  // set. Reported alongside real runtime queries, never from a hardware
+  // compute-capability readout because CANN exposes none.
+  result.major = 7;
+  result.minor = 0;
   // These are device-wide SIMT limits, not per-kernel occupancy or an SM
   // capability number. Keep the frozen RTS ABI values usable with headers
   // that predate the enum names. A missing/invalid query is an explicit

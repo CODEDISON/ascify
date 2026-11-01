@@ -4221,9 +4221,15 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
                       NvidiaSampleHelperMacroKind::CheckCudaErrors);
       if (candidate == nullptr || expression->getNumArgs() == 0)
         return true;
-      candidate->statusDomainProven = isAdmittedCudaRuntimeStatusCall(
-          sourceManager, expression->getArg(0), trustedSystemFileIds) ||
-          isAdmittedNvidiaLocalStatusUse(
+      // A type-dependent observation (an uninstantiated template body whose
+      // argument list depends on template parameters) has no direct callee
+      // and cannot decide the domain. Never let it overwrite the proof of a
+      // concrete instantiation of the same candidate range; an uninstantiated
+      // candidate simply keeps its unproven default and is refused.
+      if (!expression->isTypeDependent())
+        candidate->statusDomainProven = isAdmittedCudaRuntimeStatusCall(
+              sourceManager, expression->getArg(0), trustedSystemFileIds) ||
+            isAdmittedNvidiaLocalStatusUse(
               expression, astContext, sourceManager, trustedSystemFileIds, preprocessor, localHeaders);
       // A dependent check/cudaMemcpy/cudaFree lookup cannot be proved by its
       // spelling. Remember the pattern and audit its instantiated ASTs below;

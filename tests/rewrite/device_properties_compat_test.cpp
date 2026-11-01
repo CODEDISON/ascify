@@ -50,6 +50,7 @@ int main() {
   assert(properties.maxThreadsPerBlock == 2048);
   assert(properties.warpSize == 64);
   assert(properties.maxThreadsPerMultiProcessor == 1024);
+  assert(properties.major == 7 && properties.minor == 0);
   assert(properties.maxGridSize[0] == 65535 && properties.maxGridSize[1] == 32768 && properties.maxGridSize[2] == 12345);
   assert(std::strcmp(properties.name, ascify_test_soc_name) == 0);
   const ascify::cudaDeviceProp saved = properties;

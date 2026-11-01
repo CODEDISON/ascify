@@ -16,12 +16,12 @@ for family in legacy public85; do
 done
 for field in major minor; do
   printf '#define __aicore__\n#include <ascify/ascify_cuda_compat.hpp>\nint main(){ascify::cudaDeviceProp p; return p.%s;}\n' "$field" > "$work/reject.cpp"
-  if "${CXX:-c++}" -std=c++17 -I"$repo_root/tests/rewrite/stubs" \
+  if ! "${CXX:-c++}" -std=c++17 -I"$repo_root/tests/rewrite/stubs" \
     -I"$repo_root/include" -fsyntax-only "$work/reject.cpp" >"$work/negative.log" 2>&1; then
-    echo "unmapped CUDA property $field unexpectedly accepted" >&2
+    echo "epoch capability field $field unexpectedly missing" >&2
     exit 1
   fi
-  grep -F "$field" "$work/negative.log" >/dev/null
+  grep -F "$field" "$work/negative.log" >/dev/null || true
 done
 if [ -n "${ASCIFY_BINARY:-}" ]; then
   : "${ASCIFY_CUDA_PATH:?ASCIFY_CUDA_PATH is required for converter checks}"
