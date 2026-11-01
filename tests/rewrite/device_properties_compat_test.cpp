@@ -15,6 +15,8 @@ aclError ascify_test_block_limit_status = ACL_SUCCESS;
 int64_t ascify_test_block_limit = 2048;
 aclError ascify_test_grid_limit_status[3] = {};
 int64_t ascify_test_grid_limit[3] = {65535, 32768, 12345};
+aclError ascify_test_warp_info_status = ACL_SUCCESS;
+int64_t ascify_test_warp_size = 64;
 int32_t ascify_test_device = 2;
 int64_t ascify_test_vector_core_count = 48;
 int64_t ascify_test_max_threads_per_core = 1024;
@@ -46,6 +48,8 @@ int main() {
   assert(properties.multiProcessorCount == 48);
   assert(properties.totalGlobalMem == (uint64_t{1} << 40));
   assert(properties.maxThreadsPerBlock == 2048);
+  assert(properties.warpSize == 64);
+  assert(properties.maxThreadsPerMultiProcessor == 1024);
   assert(properties.maxGridSize[0] == 65535 && properties.maxGridSize[1] == 32768 && properties.maxGridSize[2] == 12345);
   assert(std::strcmp(properties.name, ascify_test_soc_name) == 0);
   const ascify::cudaDeviceProp saved = properties;
