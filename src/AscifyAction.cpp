@@ -4903,8 +4903,22 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
       !nvidiaSampleHelperMacroCandidates.empty() ||
       !nvidiaSampleFindDeviceCandidates.empty() ||
       !nvidiaSampleSMCoresCandidates.empty();
-  if (helperNeedsCompat && ascifyCudaCompatActiveMacroConflict)
+  if (helperNeedsCompat && ascifyCudaCompatActiveMacroConflict) {
     nvidiaSampleHelperUnsupportedMacroUse = true;
+    // A proved SM callee is still conditional on the complete helper
+    // transaction. Do not publish a partially rewritten root when a compat
+    // macro collision prevents that transaction. Unrelated residual helpers
+    // keep their existing retain-only policy when this conflict is absent.
+    if (!nvidiaSampleSMCoresCandidates.empty()) {
+      nvidiaSampleSMCoresUnsupportedUse = true;
+      const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error,
+          "CUDA sample-helper SM table boundary: input macro '%0' prevents the helper transaction");
+      getCompilerInstance().getDiagnostics().Report(diagnostic)
+          << ascifyCudaCompatActiveMacroConflictName;
+      cudaRuntimeApiBoundaryFailed = true;
+    }
+  }
   const bool compatNamespaceConflict =
       helperNeedsCompat && !hasCudaCompatHeaderBeforeNvidiaHelper &&
       ascifyCudaCompatDeclarationConflict;

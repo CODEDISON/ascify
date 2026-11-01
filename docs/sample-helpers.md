@@ -285,7 +285,14 @@ A system-header marker alone proves nothing: definitions, fortify wrappers,
 assembler aliases and other semantic attributes are refused. Runtime symbol and
 provider admission remain separate checks.
 The mapping is published atomically with the existing helper include/status
-transaction. The original signed-shift/addition defined-input domain remains;
+transaction. If an input macro conflicts with the required compat surface,
+a proved SM call makes the entire conversion fail before publication; both
+fresh and existing output destinations remain unchanged. A system header
+undefining that macro later does not clear the existing compat-history gate.
+This refusal does not change unrelated residual-helper retention: an `ftoi`
+residual without that macro conflict still keeps the complete helper transaction.
+Ordinary input with no proved SM call keeps its existing publication policy.
+The original signed-shift/addition defined-input domain remains;
 no new behaviour is promised for inputs for which the original C++ was undefined.
 
 The result is a legacy NVIDIA table value, never a physical NPU CUDA-core count.

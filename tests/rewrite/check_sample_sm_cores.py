@@ -146,6 +146,11 @@ def main():
                     assert 'fatal error:' not in diagnostic, (name, diagnostic)
                     if kind == 'refuse':
                         assert result.returncode != 0, (name, 'unproved use admitted')
+                        if name in ('definition_printf_macro', 'target_macro'):
+                            macro = 'printf' if name == 'definition_printf_macro' else target.rsplit('::', 1)[-1]
+                            assert ("CUDA sample-helper SM table boundary: input macro '" + macro +
+                                    "' prevents the helper transaction") in diagnostic, (name, diagnostic)
+                            assert 'version-preserving legacy SM table call(s)' not in diagnostic, (name, diagnostic)
                         assert (sha(output), inventory(bundle)) == prior, (name, 'previous output changed')
                         if destination != output:
                             assert not destination.exists() and not Path(str(destination)+'.headers').exists(), name
@@ -157,7 +162,9 @@ def main():
                             assert 'version-preserving legacy SM table call(s)' in diagnostic, (name, diagnostic)
                         else:
                             assert target not in text and '#include <helper_cuda.h>' in text, (name, text)
+                            assert 'ftoi(1.5f)+_ConvertSMVer2Cores(7,0)' in text, (name, text)
                             assert "residual helper declaration 'ftoi'" in diagnostic, (name, diagnostic)
+                            assert 'CUDA sample-helper SM table boundary:' not in diagnostic, (name, diagnostic)
                 row['new_frontend_run'] = True
             assert inventory(inputs) == frozen, (name, 'source mutation')
             assert not list(case.glob('.ascify-local-closure*')), (name, 'staging leaked')

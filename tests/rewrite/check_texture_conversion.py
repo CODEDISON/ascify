@@ -251,7 +251,8 @@ def main():
                 save()
                 assert row['syntax_cg_entry_count']==cg_entry_counts[name],(name,z.stderr)
             projection=['--local-headers-recursive'] if row['recursive'] else []
-            z=run(directory,'convert',[a.binary,source,'--target-policy='+a.target_policy,'--simt-math='+a.simt_math,'--target-recipe=none','--default-preprocessor','--frontend-compat='+a.frontend_compat,'--cuda-path='+str(a.cuda_path),'--clang-resource-directory='+str(a.resource_dir),'--migration-receipt='+str(receipt),'-o',output,*projection,'--','-x','cuda','-std=c++17','-I'+str(helpers),*extra])
+            conversion_extra=[value for value in extra if value != '-I'+str(profile_host_math.parent)] if a.frontend_compat=='ascify-admitted-v1' else extra
+            z=run(directory,'convert',[a.binary,source,'--target-policy='+a.target_policy,'--simt-math='+a.simt_math,'--target-recipe=none','--default-preprocessor','--frontend-compat='+a.frontend_compat,'--cuda-path='+str(a.cuda_path),'--clang-resource-directory='+str(a.resource_dir),'--migration-receipt='+str(receipt),'-o',output,*projection,'--','-x','cuda','-std=c++17','-I'+str(helpers),*conversion_extra])
             row['conversion_returncode']=z.returncode;save()
             if expected is None:
                 output_headers=directory/'output.cce.headers'
