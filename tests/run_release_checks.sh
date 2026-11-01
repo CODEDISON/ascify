@@ -171,6 +171,14 @@ run_check "authenticated Runtime profile utility patterns and instantiations" \
     --clang "${CLANG:-clang++}" \
     --evidence-dir "$work_dir/runtime_profile_utilities"
 
+run_check "closed host builtin-pointer swap domains and atomic publication" \
+  "$python" -B "$rewrite_dir/check_host_pointer_swap.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang++}" \
+    --evidence-dir "$work_dir/host_pointer_swap"
+
 run_check "frozen CUDA vec3 ABI rejection and publication boundary" \
   "$python" -B "$rewrite_dir/check_vec3_abi_boundary.py" \
     --binary "$ASCIFY_BINARY" \

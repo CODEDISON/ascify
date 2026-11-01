@@ -10572,11 +10572,12 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
                 const std::set<unsigned> &frozenTextureCgFiles,
                 const std::set<unsigned> &frozenRuntimePatternFiles, bool textureOnly,
                 const ascify::Scalar64Plan& scalar64,
-                const ascify::NttpVoidCallPlan& nttpVoid)
+                const ascify::NttpVoidCallPlan& nttpVoid,
+                const ascify::HostPointerSwapPlan& hostPointerSwap)
         : context(context), source(source), sdk(sdk), audited(audited), native(native), frozenTextureUtilityFiles(frozenTextureUtilityFiles),
           frozenTextureCgFiles(frozenTextureCgFiles),
           frozenRuntimePatternFiles(frozenRuntimePatternFiles),
-          textureOnly(textureOnly), scalar64(scalar64), nttpVoid(nttpVoid) {}
+          textureOnly(textureOnly), scalar64(scalar64), nttpVoid(nttpVoid), hostPointerSwap(hostPointerSwap) {}
     bool shouldVisitTemplateInstantiations() const { return true; }
     bool shouldVisitImplicitCode() const { return true; }
     bool TraverseDecl(clang::Decl *declaration) {
@@ -10724,6 +10725,9 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     }
     bool VisitTypeLoc(clang::TypeLoc type) {
       if (scalar64.scalarSignatureTypeLocs.count(type.getOpaqueData())) return true;
+      // Exact signature/local T occurrences of a three-statement pointer swap.
+      // The emitted guard is mandatory; children/instances still traverse.
+      if (!textureOnly && hostPointerSwap.typeLocs.count(type.getOpaqueData())) return true;
       return inspect(type.getType(), type.getBeginLoc());
     }
     bool VisitArrayTypeLoc(clang::ArrayTypeLoc type) {
@@ -10749,6 +10753,8 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       // Only the exact call/lookup pair proved with every caller instance and
       // a transactional global qualification. Never a void/record/body bypass.
       if (nttpVoid.expressions.count(expression)) return true;
+      // Inquiry visitors never consult this set; body traversal never stops.
+      if (!textureOnly && hostPointerSwap.expressions.count(expression)) return true;
       // A fixed scalar NTTP call can retain a dependent Expr type until
       // overload resolution, even though no SDK record can enter its type.
       // Prove only this expression; normal traversal still visits its body,
@@ -11508,6 +11514,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     const bool textureOnly;
     const ascify::Scalar64Plan& scalar64;
     const ascify::NttpVoidCallPlan& nttpVoid;
+    const ascify::HostPointerSwapPlan& hostPointerSwap;
     unsigned runtimePatternDepth = 0;
     unsigned runtimeInstanceDepth = 0;
     std::vector<const clang::TemplateTypeParmDecl *> runtimePatternParameters;
@@ -11515,7 +11522,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     std::vector<std::pair<unsigned, const clang::TagDecl *>> runtimeIdentityArguments;
     std::set<const clang::RecordDecl *> reflectedRecords;
     std::set<const clang::VarDecl *> inquiryVariables;
-  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, frozenTextureCgFiles, frozenRuntimePatternFiles, textureOnly, scalar64Plan, nttpVoidCallPlan);
+  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, frozenTextureCgFiles, frozenRuntimePatternFiles, textureOnly, scalar64Plan, nttpVoidCallPlan, hostPointerSwapPlan);
   if (!records.TraverseDecl(compiler.getASTContext().getTranslationUnitDecl()))
     {
       const auto diagnostic = compiler.getDiagnostics().getCustomDiagID(
@@ -14348,6 +14355,71 @@ void AscifyAction::ExecuteAction() {
     cudaRuntimeApiBoundaryFailed = true;
     return;
   }
+  std::string hostPointerSwapError;
+  clang::SourceLocation hostPointerSwapLocation;
+  if (cudaRuntimeApiHeaderAdmitted && !ascify::ProveHostPointerSwaps(
+          getCompilerInstance().getASTContext(),
+          [&](clang::SourceLocation location) { return ownedNttpVoidCallLocation(location); },
+          [&](const clang::CallExpr* call) {
+            const auto* function = call == nullptr ? nullptr : call->getDirectCallee();
+            if (!function || function->getQualifiedNameAsString() != "cudaMalloc" ||
+                function->isVariadic() || function->getNumParams() != 2 || call->getNumArgs() != 2 ||
+                !isAdmittedCudaRuntimeStatusCall(SM, call, trustedSystemFileIds)) return false;
+            const auto sdkLocation = [&](clang::SourceLocation location) {
+              location = SM.getSpellingLoc(location);
+              return location.isFileID() && cudaRuntimeApiSdkFileIds.count(SM.getFileID(location).getHashValue());
+            };
+            // Initially-system-marked caller headers cannot become allocators.
+            for (const auto* declaration : function->redecls())
+              if (!sdkLocation(declaration->getLocation())) return false;
+            auto& context = getCompilerInstance().getASTContext();
+            const auto* status = function->getReturnType()->getAs<clang::EnumType>();
+            if (!status || status->getDecl()->getName() != "cudaError" ||
+                !status->getDecl()->getDeclContext()->isTranslationUnit() ||
+                !context.hasSameType(function->getParamDecl(1)->getType(), context.getSizeType())) return false;
+            for (const auto* declaration : status->getDecl()->redecls())
+              if (!sdkLocation(declaration->getLocation())) return false;
+            const auto first = function->getParamDecl(0)->getType().getCanonicalType();
+            const auto* outer = first->getAs<clang::PointerType>();
+            const auto* inner = outer == nullptr ? nullptr : outer->getPointeeType()->getAs<clang::PointerType>();
+            if (!inner || first.hasLocalQualifiers() || outer->getPointeeType().hasLocalQualifiers() ||
+                inner->getPointeeType().hasLocalQualifiers()) return false;
+            const auto leaf = inner->getPointeeType();
+            if (leaf->isVoidType()) return true; // cuda_runtime_api.h C signature
+            // cuda_runtime.h's authenticated typed wrapper is T**,size_t.
+            const auto* primary = function->getPrimaryTemplate();
+            const auto* arguments = function->getTemplateSpecializationArgs();
+            if (!primary || primary->getTemplateParameters()->size() != 1 ||
+                !llvm::isa<clang::TemplateTypeParmDecl>(primary->getTemplateParameters()->getParam(0)) ||
+                !arguments || arguments->size() != 1 || arguments->get(0).getKind() != clang::TemplateArgument::Type ||
+                !leaf->isBuiltinType() || !leaf->isArithmeticType() ||
+                !context.hasSameType(arguments->get(0).getAsType(), leaf)) return false;
+            for (const auto* declaration : primary->redecls())
+              if (!sdkLocation(declaration->getLocation())) return false;
+            return true;
+          },
+          [&](llvm::StringRef name, clang::SourceLocation location) {
+            return !PP.getMacroDefinitionAtLoc(PP.getIdentifierInfo(name), location);
+          }, !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks &&
+              TargetPolicy == "dav-c310-vec" && TargetRecipe == "none",
+          hostPointerSwapPlan, hostPointerSwapLocation, hostPointerSwapError)) {
+    const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error, "host pointer-swap boundary: %0");
+    getCompilerInstance().getDiagnostics().Report(hostPointerSwapLocation, diagnostic) << hostPointerSwapError;
+    cudaRuntimeApiBoundaryFailed = true;
+    return;
+  }
+  if (!hostPointerSwapPlan.contextualHeaders.empty()) {
+    if (localHeaderContext == nullptr || localHeaderContext->plan == nullptr) {
+      const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error, "host pointer-swap boundary: selected header requires its joint source transaction");
+      getCompilerInstance().getDiagnostics().Report(diagnostic);
+      cudaRuntimeApiBoundaryFailed = true;
+      return;
+    }
+    for (const auto& path : hostPointerSwapPlan.contextualHeaders)
+      localHeaderContext->plan->requireInheritedSourceContext(path);
+  }
   if (cudaRuntimeApiHeaderAdmitted && !auditCudaRuntimeApiRecords(false)) {
     cudaRuntimeApiBoundaryFailed = true;
     return;
@@ -14630,6 +14702,40 @@ void AscifyAction::ExecuteAction() {
                  << ", concrete_calls=" << nttpVoidCallPlan.concreteCalls
                  << ", qualifications=" << nttpVoidCallPlan.qualifications.size()
                  << ", contextual_headers=" << nttpVoidCallPlan.contextualHeaders.size() << "\n";
+  }
+  if (hostPointerSwapPlan.used()) {
+    ct::Replacements staged(*replacements);
+    std::vector<SemanticRewriteRange> ranges;
+    for (const auto& guard : hostPointerSwapPlan.guards) {
+      if (!guard.location.isFileID() || !SM.isWrittenInMainFile(guard.location) ||
+          !ownedNttpVoidCallLocation(guard.location) || SM.getFileOffset(guard.location) == 0) {
+        hostPointerSwapError = "guard has no literal joint-root insertion owner";
+        break;
+      }
+      const auto position = SM.getDecomposedLoc(guard.location);
+      const SemanticRewriteRange anchor{position.first, position.second - 1, position.second};
+      for (const auto& range : SemanticRewriteRanges)
+        if (range.file == anchor.file && range.beginOffset < anchor.endOffset &&
+            anchor.beginOffset < range.endOffset)
+          hostPointerSwapError = "guard overlaps another semantic transaction";
+      if (!hostPointerSwapError.empty() || !llcompat::insertReplacement(staged,
+              ct::Replacement(SM, guard.location, 0U, guard.text), &hostPointerSwapError)) break;
+      ranges.push_back(anchor);
+    }
+    if (!hostPointerSwapError.empty()) {
+      const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error, "host pointer-swap boundary: %0");
+      getCompilerInstance().getDiagnostics().Report(diagnostic) << hostPointerSwapError;
+      cudaRuntimeApiBoundaryFailed = true;
+      return;
+    }
+    *replacements = std::move(staged);
+    SemanticRewriteRanges.insert(SemanticRewriteRanges.end(), ranges.begin(), ranges.end());
+    llvm::errs() << "Ascify closed host pointer swaps v2: patterns=" << hostPointerSwapPlan.patterns
+                 << ", calls=" << hostPointerSwapPlan.concreteCalls
+                 << ", empty_domains=" << hostPointerSwapPlan.emptyPatterns
+                 << ", guards=" << hostPointerSwapPlan.guards.size()
+                 << ", contextual_headers=" << hostPointerSwapPlan.contextualHeaders.size() << "\n";
   }
   if (TargetPolicy == "dav-c310-vec" && SimtMathMode == "fast") {
     if (TargetRecipe == ascify::DavC310TargetRecipe::SimdRecipeName) {

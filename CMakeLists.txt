@@ -59,6 +59,7 @@ if(NOT ASCIFY_CLANG_TESTS_ONLY)
     src/FrontendCompatibility.cpp
     src/FrontendLanguage.cpp
     src/HostCxxRootInput.cpp
+    src/HostPointerSwap.cpp
     src/ImplicitCudaHeaders.cpp
     src/LLVMCompat.cpp
     src/LocalHeader.cpp
