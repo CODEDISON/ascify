@@ -53,7 +53,7 @@ def main():
     spec_path = Path(__file__).parent / 'fixtures/direct_image_provider_matrix.json'
     spec = json.loads(spec_path.read_text())
     cases = spec['cases']
-    assert len(cases) == 15 and sum(c['expected_new_graph_or_legacy_acceptance'] for c in cases) == 5
+    assert len(cases) == 16 and sum(c['expected_new_graph_or_legacy_acceptance'] for c in cases) == 5
     tools = [args.binary, args.clang, Path(__file__).resolve(), spec_path,
              args.resource_dir / 'include/__clang_cuda_runtime_wrapper.h',
              args.cuda_path / 'include/cuda_runtime.h', args.cuda_path / 'include/cuda_runtime_api.h']
@@ -221,7 +221,7 @@ def main():
                                        original_syntax_returncode=syntax.returncode, input_sha256=snapshot))
             (out / 'summary.json').write_text(json.dumps(state, indent=2) + '\n')
         assert inventory(seed_inputs) == seed_before, 'managed seed input changed'
-        assert len(state['managed_seed_publications']) == 10, 'all managed refusal gates required'
+        assert len(state['managed_seed_publications']) == 11, 'all managed refusal gates required'
         assert inventory(args.helper_root) == helper_before, 'original helpers changed'
         assert all(sha(Path(p)) == value for p, value in before.items()), 'tools/SDK changed'
         state['passed'] = True

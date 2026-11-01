@@ -247,11 +247,26 @@
       ],
       "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
       "compiled_or_run": false
+    },
+    {
+      "name": "unproven_status_foreign_int",
+      "expected_new_graph_or_legacy_acceptance": false,
+      "source": "#include <cuda.h>\nstatic const char* _cudaGetErrorEnum(CUresult) { return \"driver status\"; }\n\n#include <helper_cuda.h>\n#include <helper_image.h>\n#include <helper_string.h>\n\nstatic int foreign_status_source(void) { return 0; }\n\nvoid reject_foreign_status() {\n  checkCudaErrors(cudaDeviceSynchronize());\n  checkCudaErrors((cudaError_t)foreign_status_source());\n}\n",
+      "compiler_flags": [],
+      "fixture_only_setup": null,
+      "contract_checked": "已准入Runtime调用之外，checkCudaErrors再消费一个非准入的外来int状态源；未证明status域时整个转换必须失败，不发布保留helper的部分成功产物。",
+      "required_checks": [
+        "whole conversion fails on any unproved status source",
+        "no published partial-status output",
+        "no SM sizing change"
+      ],
+      "original_CUDA_syntax": "NOT_RUN_MANDATORY_BEFORE_FUTURE_CONVERSION",
+      "compiled_or_run": false
     }
   ],
-  "total": 15,
+  "total": 16,
   "expected_admit": 5,
-  "expected_refuse": 10,
+  "expected_refuse": 11,
   "all_original_syntax_pending": true,
   "case_strings_only_not_a_test_runner": true,
   "existing_MAX_regressions_remain_required": "/Users/edconeone/Desktop/EverythingEverywhere/WORKSPACE/ascendcify_work/projects/ascify_scope63_20261026/source_cg_compiler_default_v3/tests/rewrite/check_sample_helper_max_preservation.py"

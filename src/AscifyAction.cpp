@@ -4609,6 +4609,19 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
         llvm::errs() << " at " << location.getFilename() << ":"
                      << location.getLine() << ":" << location.getColumn();
       llvm::errs() << "\n";
+      // A root-only publication that keeps an unproved checkCudaErrors
+      // invocation still depends on the original helper status machinery, so
+      // it is a partial status success. Refuse the whole conversion instead
+      // of publishing a retained-helper output; getLastCudaError candidates
+      // are proven by construction at record time.
+      const auto diagnostic =
+          getCompilerInstance().getDiagnostics().getCustomDiagID(
+              clang::DiagnosticsEngine::Error,
+              "CUDA sample-helper boundary: checkCudaErrors status domain "
+              "not proven; conversion refused");
+      getCompilerInstance().getDiagnostics().Report(candidate.nameLocation,
+                                                    diagnostic);
+      cudaRuntimeApiBoundaryFailed = true;
     }
   }
   return visitor.hasConflict() || compatNamespaceConflict;
