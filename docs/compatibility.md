@@ -125,6 +125,25 @@ type; the argument expressions remain intact and are
 evaluated once. The exact product header, physical owner, macro and host-context
 checks apply to these overloads as they do to the existing host math calls.
 
+Ordinary host templates that only exchange two pointer values can receive a
+closed type-domain proof. The rule checks a single type parameter, two
+references and the complete three-statement copy/assignment body by AST; it
+does not depend on the function or file name. Every original use and concrete
+instance must close over directly spelled builtin pointers. The emitted
+`static_assert` restricts later primary-body instantiations to that proved type
+set. An entirely unreferenced template can retain its body with an empty-domain
+guard; signature/address/using/extern observations must still pass the separate
+reference inventory. This contract covers the current translation unit and
+does not infer a type domain from another source file.
+
+Caller aliases, erased or escaped pointer origins, unproved allocators,
+redefinitions and macro-controlled patterns receive no such proof. CUDA
+allocation evidence requires the authenticated physical SDK declarations and
+exact signature. Normal SDK record, interface and reflection checks remain
+active. The guard cannot distinguish typedef spellings of one identical C++
+type; original-source provenance is checked separately. See the
+[host pointer tests](../tests/rewrite/check_host_pointer_swap.py).
+
 The packed-byte SAD rule accepts the exact decoded instruction string
 `vabsdiff4.u32.u32.u32.add %0, %1, %2, %3;`, one unnamed `=r` output and three
 unnamed `r` inputs, without volatility, goto or clobbers. The owner must be a
