@@ -126,14 +126,15 @@ require_fixed 'const aclError status = cudaGetLastError();' "$compat_header"
 require_fixed '#expression, __FILE__, __LINE__' "$compat_header"
 forbid_fixed 'gpuGetMaxGflopsDeviceId' "$compat_header"
 
-[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 75839 ]
+# v4 occupancy/assert review 2026-10-31: ascify::cudaErrorAssert constant added
+[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 76331 ]
 if command -v sha256sum >/dev/null 2>&1; then
   compat_header_sha=$(sha256sum "$compat_header" | awk '{print $1}')
 else
   compat_header_sha=$(shasum -a 256 "$compat_header" | awk '{print $1}')
 fi
 [ "$compat_header_sha" = \
-  3a700fed26e8f695ac02f23f0cfb4ee3022d993e6f668c5c27a7e97d336e283d ]
+  00e0f0e6f15219242cf843681fce89b5c909aa134bb570daf87acf454fee621d ]
 
 official_helper_functions="$fixtures/nvidia_samples/Common/helper_functions.h"
 [ "$(wc -c <"$official_helper_functions" | tr -d ' ')" -eq 2358 ]
