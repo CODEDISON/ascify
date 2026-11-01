@@ -27,6 +27,8 @@ run_check "repository identity, artifacts, and documentation links" \
   "$python" -B tools/check_repository.py
 run_check "engineering entry points and CLI contracts" \
   "$python" -B -m unittest discover -s tests/engineering -p 'test_*.py' -q
+run_check "static shared word ELF alignment gate" \
+  "$python" -B "$rewrite_dir/test_shared_word_metadata.py" -q
 run_check "dav-c310 recipe static contract" \
   sh "$rewrite_dir/check_dav_c310_recipe.sh"
 run_check "canonical warp reduction static contract" \
@@ -360,6 +362,11 @@ run_check "complete helper status collection after residual declarations" \
     --binary "$ASCIFY_BINARY" --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
     --clang "${CLANG:-clang++}" --evidence-dir "$work_dir/helper_status_walk"
+run_check "closed builtin16 static shared object word alignment" \
+  "$python" -B "$rewrite_dir/check_shared_word_alignment.py" \
+    --binary "$ASCIFY_BINARY" --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang++}" --evidence-dir "$work_dir/shared_word_alignment"
 run_check "quoted frozen sample-helper transaction ownership" \
   "$python" -B "$rewrite_dir/check_quoted_sample_helper.py"
 run_check "resolved device float frexp overload boundary" \

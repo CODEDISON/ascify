@@ -391,6 +391,24 @@ separate [device probe](../tests/rewrite/uniform_block_reduction_probe.cce).
 
 ## Device memory and atomics
 
+For `dav-c310-vec`, a fixed-size, directly spelled `__shared__` array of builtin
+16-bit `short` or `unsigned short` can receive `ASCIFY_ALIGN(4)` on its `__ubuf__`
+object. The AST proof closes local pointer aliases and direct source device
+helpers before changing that qualifier. Element types, array extents, `sizeof`,
+initializers and index strides remain unchanged. Existing explicit alignments
+keep their original value; this rule does not raise an explicit 1/2-byte or
+unknown alignment. Macro-spelled declarations, dynamic/extern arrays, records,
+templates and multiple declarators receive no new alignment admission.
+Object alignment reflection, numeric address/layout observations and pointer
+escapes reject the new transformation. A local-header candidate and its helper
+bodies require the existing complete source-context transaction.
+
+This object-placement rule does not repair an unaligned element offset or
+establish device correctness by itself. The
+[syntax-first checks](../tests/rewrite/check_shared_word_alignment.py) include
+an optional CCEC object-only check of actual UB section size and alignment;
+no check in that script launches a device program.
+
 Global atomic rewriting requires a direct call to an admitted CUDA system
 declaration in the current kernel, a directly spelled main-file call, and an
 address rooted at that kernel's pointer parameter. Supported operations use

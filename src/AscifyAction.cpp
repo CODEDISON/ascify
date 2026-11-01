@@ -1480,6 +1480,11 @@ void AscifyAction::FindAndReplace(StringRef name,
     return;
   }
   StringRef repName = found->second.dppName;
+  // The AST proof owns this exact original qualifier, not every __shared__
+  // spelling. Merge the object alignment into its ordinary token replacement.
+  if (name == "__shared__" &&
+      sharedWordAlignmentPlan.qualifiers.count(sl.getRawEncoding()))
+    repName = "__ubuf__ ASCIFY_ALIGN(4)";
   // The final texture boundary still authenticates the original SDK call.
   // Only an explicit fast policy selects unquantized FP32 interpolation;
   // precise output retains the bounded 1/256-weight sampler.
@@ -14346,6 +14351,74 @@ void AscifyAction::ExecuteAction() {
     getCompilerInstance().getDiagnostics().Report(nttpVoidLocation, diagnostic) << nttpVoidError;
     cudaRuntimeApiBoundaryFailed = true;
     return;
+  }
+  std::string sharedWordError;
+  clang::SourceLocation sharedWordLocation;
+  const auto trustedSharedQualifier = [&](clang::SourceLocation location) {
+    // Same SDK/compiler macro-chain proof as the existing device qualifier
+    // guard. The outer physical token alone cannot authenticate a redefinition.
+    std::set<const clang::IdentifierInfo *> seen;
+    std::vector<const clang::IdentifierInfo *> pending = {PP.getIdentifierInfo("__shared__")};
+    while (!pending.empty()) {
+      const auto *identifier = pending.back(); pending.pop_back();
+      if (!seen.insert(identifier).second) continue;
+      if (seen.size() > 16) return false;
+      const auto *info = PP.getMacroDefinitionAtLoc(identifier, location).getMacroInfo();
+      if (info == nullptr) return false;
+      const auto file = SM.getFileID(SM.getSpellingLoc(info->getDefinitionLoc()));
+      if (file.isInvalid() || (!cudaRuntimeApiSdkFileIds.count(file.getHashValue()) &&
+                              !isOwnedCudaCompilerInput(file, getCompilerInstance()))) return false;
+      for (const auto &token : info->tokens()) {
+        if (token.is(clang::tok::hash) || token.is(clang::tok::hashhash)) return false;
+        const auto *dependency = token.getIdentifierInfo();
+        if (dependency == nullptr) continue;
+        bool parameter = false;
+        if (info->isFunctionLike())
+          for (const auto *argument : info->params()) parameter |= argument == dependency;
+        if (!parameter && PP.getMacroDefinitionAtLoc(dependency, location).getMacroInfo())
+          pending.push_back(dependency);
+      }
+    }
+    return true;
+  };
+  if (!ascify::ProveSharedWordAlignment(getCompilerInstance().getASTContext(),
+          [&](clang::SourceLocation location) { return ownedNttpVoidCallLocation(location); },
+          trustedSharedQualifier,
+          [&](llvm::StringRef name, clang::SourceLocation location) {
+            return !PP.getMacroDefinitionAtLoc(PP.getIdentifierInfo(name), location);
+          }, TargetPolicy == "dav-c310-vec" &&
+              !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks,
+          sharedWordAlignmentPlan, sharedWordLocation, sharedWordError)) {
+    const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error, "shared word alignment boundary: %0");
+    getCompilerInstance().getDiagnostics().Report(sharedWordLocation, diagnostic) << sharedWordError;
+    cudaRuntimeApiBoundaryFailed = true;
+    return;
+  }
+  if (sharedWordAlignmentPlan.used()) {
+    if (cudaAttributeControlModified || deviceTemplateAttributeMacroConflict) {
+      const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error,
+          "shared word alignment boundary: CUDA qualifier provenance was modified");
+      getCompilerInstance().getDiagnostics().Report(diagnostic);
+      cudaRuntimeApiBoundaryFailed = true;
+      return;
+    }
+    if (!sharedWordAlignmentPlan.contextualHeaders.empty() &&
+        (localHeaderContext == nullptr || localHeaderContext->plan == nullptr)) {
+      const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error,
+          "shared word alignment boundary: selected header needs the joint source transaction");
+      getCompilerInstance().getDiagnostics().Report(diagnostic);
+      cudaRuntimeApiBoundaryFailed = true;
+      return;
+    }
+    for (const auto &path : sharedWordAlignmentPlan.contextualHeaders)
+      localHeaderContext->plan->requireInheritedSourceContext(path);
+    needsCudaCompatHeader = true;
+    llvm::errs() << "Ascify shared word alignment v1: arrays=" << sharedWordAlignmentPlan.arrays
+                 << ", closed_helpers=" << sharedWordAlignmentPlan.helpers
+                 << ", minimum_object_alignment=4\n";
   }
   if (nttpVoidCallPlan.used() && (cudaAttributeControlModified ||
       deviceTemplateAttributeMacroConflict || frontendCgControlModified)) {

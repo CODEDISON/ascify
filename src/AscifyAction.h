@@ -42,6 +42,7 @@ THE SOFTWARE.
 #include "Scalar64Lowering.h"
 #include "NttpVoidCall.h"
 #include "HostPointerSwap.h"
+#include "SharedWordAlignment.h"
 
 namespace ct = clang::tooling;
 namespace mat = clang::ast_matchers;
@@ -113,6 +114,7 @@ private:
   bool isWitnessedProfilerHostRoot(clang::FileID file);
   std::string contextualPragmaEvents;
   ascify::PackedRecordBoundary packedRecords;
+  ascify::SharedWordAlignmentPlan sharedWordAlignmentPlan;
   bool finalizePackedRecordEdits(const std::vector<ct::Replacement> &owned);
   void recordContextPragmaSource(clang::FileID file);
   std::set<std::string> siblingSourceMacroContextUsers;
