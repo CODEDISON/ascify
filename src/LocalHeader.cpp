@@ -95,6 +95,16 @@ bool writeManifest(const std::string &path,
     out << "header=" << node.sourcePath << "\t" << node.artifactPath
         << "\n";
   }
+  for (const auto &entry : plan.kernelThreadBoundPolicies()) {
+    const auto &policy = entry.second;
+    const auto artifact = plan.kernelThreadBoundArtifacts().find(entry.first);
+    if (artifact == plan.kernelThreadBoundArtifacts().end()) return false;
+    out << "kernel_thread_bound_policy=" << policy.sourcePath << "\t"
+        << policy.sourceSha256 << "\t" << policy.sourceBytes << "\t"
+        << policy.declarationOffset << "\t" << policy.qualifierOffset << "\t"
+        << policy.kernelName << "\t" << policy.maximum << "\t"
+        << policy.artifactPath << "\t" << artifact->second << "\n";
+  }
   if (!plan.contextInlines().empty()) {
     const auto &proof = plan.contextEvidence();
     out << "context_proof=expanded-tokens-and-final-macros-v1\n";
@@ -890,6 +900,92 @@ bool LocalHeaderClosurePlan::validateArtifactIsolation(
   return true;
 }
 
+bool LocalHeaderClosurePlan::requireKernelThreadBoundPolicy(
+    const LocalKernelThreadBoundPolicy &policy) {
+  const auto found = nodeBySource_.find(policy.sourcePath);
+  std::string bytes;
+  if (failed_ || mode_ != LocalHeaderClosureMode::Recursive ||
+      canonicalExisting(policy.sourcePath) != policy.sourcePath || found == nodeBySource_.end() ||
+      nodes_[found->second].depth != 1 || policy.artifactPath != nodes_[found->second].artifactPath ||
+      policy.maximum < 1 || policy.maximum > 2048 || policy.kernelName.empty() ||
+      policy.qualifierOffset >= policy.sourceBytes || policy.declarationOffset >= policy.sourceBytes ||
+      !readFile(policy.sourcePath, bytes) || bytes.size() != policy.sourceBytes ||
+      policy.sourceSha256.empty() || inputSha256(bytes) != policy.sourceSha256) {
+    fail("kernel-bound header policy has an unproved physical selected-header identity");
+    return false;
+  }
+  const LocalKernelThreadBoundPolicyKey key{policy.sourcePath, policy.qualifierOffset};
+  for (const auto &entry : kernelThreadBoundPolicies_) {
+    const auto &other = entry.second;
+    if (other.sourcePath == policy.sourcePath &&
+        (other.qualifierOffset == policy.qualifierOffset ||
+         other.declarationOffset == policy.declarationOffset) && !(other == policy)) {
+      fail("kernel-bound header policy conflicts with a prior kernel identity/bound");
+      return false;
+    }
+  }
+  kernelThreadBoundPolicies_.emplace(key, policy);
+  return true;
+}
+
+bool LocalHeaderClosurePlan::sealKernelThreadBoundPolicies(
+    const std::string &sourcePath, const std::string &artifactPath,
+    const std::string &stagedPath, const LocalKernelThreadBoundPolicies &applied) {
+  LocalKernelThreadBoundPolicies expected;
+  for (const auto &entry : kernelThreadBoundPolicies_)
+    if (entry.second.sourcePath == sourcePath) expected.insert(entry);
+  if (failed_ || expected != applied) {
+    fail("kernel-bound header annotation was not independently applied exactly once");
+    return false;
+  }
+  if (expected.empty()) return true;
+  std::string source, artifact;
+  if (!readFile(sourcePath, source) || !existsAndIsNonemptyRegular(stagedPath) ||
+      !readFile(stagedPath, artifact) || inputSha256(artifact).empty()) {
+    fail("kernel-bound staged header or its original input is missing");
+    return false;
+  }
+  for (const auto &entry : expected) {
+    const auto &policy = entry.second;
+    if (canonicalExisting(sourcePath) != sourcePath || artifactPath != policy.artifactPath ||
+        source.size() != policy.sourceBytes ||
+        inputSha256(source) != policy.sourceSha256 ||
+        artifact.find("ASCIFY_GLOBAL __launch_bounds__(" + std::to_string(policy.maximum) + ")") ==
+            std::string::npos || kernelThreadBoundArtifacts_.count(entry.first)) {
+      fail("kernel-bound staged header identity/annotation changed or was sealed twice");
+      return false;
+    }
+  }
+  const auto artifactHash = inputSha256(artifact);
+  for (const auto &entry : expected) kernelThreadBoundArtifacts_[entry.first] = artifactHash;
+  return true;
+}
+
+bool LocalHeaderClosurePlan::validateKernelThreadBoundPolicies(
+    const std::string &stagedBundlePath) {
+  if (failed_ || kernelThreadBoundArtifacts_.size() != kernelThreadBoundPolicies_.size()) {
+    fail("kernel-bound header policy remains unfulfilled before publication");
+    return false;
+  }
+  for (const auto &entry : kernelThreadBoundPolicies_) {
+    const auto &policy = entry.second;
+    const auto node = nodeBySource_.find(policy.sourcePath);
+    std::string source, artifact;
+    if (canonicalExisting(policy.sourcePath) != policy.sourcePath ||
+        node == nodeBySource_.end() || nodes_[node->second].depth != 1 ||
+        nodes_[node->second].artifactPath != policy.artifactPath ||
+        !readFile(policy.sourcePath, source) || source.size() != policy.sourceBytes ||
+        inputSha256(source) != policy.sourceSha256 ||
+        !readFile(pathString(fs::path(stagedBundlePath) /
+            nodes_[node->second].artifactRelativePath), artifact) ||
+        inputSha256(artifact) != kernelThreadBoundArtifacts_.at(entry.first)) {
+      fail("kernel-bound source or sealed artifact changed before publication");
+      return false;
+    }
+  }
+  return true;
+}
+
 bool LocalHeaderClosurePlan::validateStagedArtifacts(
     const std::string &rootStagedPath,
     const std::string &stagedBundlePath) {
@@ -908,6 +1004,8 @@ bool LocalHeaderClosurePlan::validateStagedArtifacts(
       return false;
     }
   }
+
+  if (!validateKernelThreadBoundPolicies(stagedBundlePath)) return false;
 
   for (const LocalHeaderEdge &edge : edges_) {
     std::string parentStaged = rootStagedPath;
@@ -1050,6 +1148,10 @@ bool ascifySourceWithLocalHeaderClosure(
   if (recursive && (!plan.inheritedHelperHeaders().empty() ||
                     !plan.inheritedSourceHeaders().empty())) {
     auto contextualize = [&]() -> bool {
+      if (!plan.kernelThreadBoundPolicies().empty()) {
+        plan.fail("kernel-bound selected-header policies cannot mix with contextual flattening");
+        return false;
+      }
       if (!discoveryEvidence.standardPreprocessing || AscifyAMAP) {
         plan.fail("contextual local headers require standard preprocessing "
                   "(--default-preprocessor) without --amap");
@@ -1435,6 +1537,11 @@ bool ascifySourceWithLocalHeaderClosure(
                                  node.sourcePath +
                                  " (standalone header parse; parent "
                                  "macro/declaration context is not replayed)");
+      break;
+    }
+    if (!plan.sealKernelThreadBoundPolicies(node.sourcePath, node.artifactPath,
+            pathString(stagedHeader), headerContext.appliedKernelThreadBoundPolicies)) {
+      plan.markFailed(index, "kernel-bound selected-header annotation was not sealed");
       break;
     }
     plan.markStaged(index);

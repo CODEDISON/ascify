@@ -393,6 +393,11 @@ extern aclError ascify_test_grid_limit_status[3];
 extern int64_t ascify_test_grid_limit[3];
 extern aclError ascify_test_warp_info_status;
 extern int64_t ascify_test_warp_size;
+#if defined(ASCIFY_TEST_ACL_CONTROLLABLE_OCCUPANCY)
+extern aclError ascify_test_ub_status;
+extern int64_t ascify_test_ub_bytes;
+extern int64_t ascify_test_grid_blocks;
+#endif
 #endif
 
 inline aclError aclrtGetDevice(int32_t* device) {
@@ -421,6 +426,16 @@ inline aclError aclrtGetDeviceInfo(
     if (ascify_test_warp_info_status == ACL_SUCCESS) *value = ascify_test_warp_size;
     return ascify_test_warp_info_status;
   }
+#if defined(ASCIFY_TEST_ACL_CONTROLLABLE_OCCUPANCY)
+  if (static_cast<unsigned int>(attribute) == 204U) {
+    if (ascify_test_ub_status == ACL_SUCCESS) *value = ascify_test_ub_bytes;
+    return ascify_test_ub_status;
+  }
+  if (static_cast<unsigned int>(attribute) == 208U) {
+    *value = ascify_test_grid_blocks;
+    return ACL_SUCCESS;
+  }
+#endif
   if (static_cast<unsigned int>(attribute) == 301U) {
     if (ascify_test_memory_info_status == ACL_SUCCESS)
       *value = ascify_test_total_global_memory;

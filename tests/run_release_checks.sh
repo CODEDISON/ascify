@@ -57,6 +57,8 @@ run_check "NVIDIA sample-helper compatibility contract" \
   sh "$rewrite_dir/check_sample_helper_compat.sh"
 run_check "packed unsigned-byte SAD host arithmetic" \
   sh "$rewrite_dir/check_packed_sad_host.sh"
+run_check "kernel-bound occupancy host model and failure propagation" \
+  sh "$rewrite_dir/check_occupancy_kernel_bounds_host.sh"
 run_check "versioned NVIDIA SM helper host table and stdout" \
   sh "$rewrite_dir/check_sample_sm_cores_host.sh"
 run_check "unsigned texture host arithmetic and type rejection" \
@@ -330,6 +332,14 @@ run_check "CUDA profiler, host allocation, callback and unavailable-SM boundarie
     --binary "$ASCIFY_BINARY" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+
+run_check "closed kernel-bound occupancy and erased-helper boundaries" \
+  "$python" -B "$rewrite_dir/check_occupancy_kernel_bounds.py" \
+    --binary "$ASCIFY_BINARY" \
+    --clang "${CLANG:-clang}" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --evidence-dir "$work_dir/occupancy_kernel_bounds"
 
 run_check "CUDA same-module device symbol registration boundaries" \
   "$python" -B "$rewrite_dir/check_symbol_conversion.py" \

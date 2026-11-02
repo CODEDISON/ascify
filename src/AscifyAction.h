@@ -43,6 +43,8 @@ THE SOFTWARE.
 #include "NttpVoidCall.h"
 #include "HostPointerSwap.h"
 #include "SharedWordAlignment.h"
+#include "KernelThreadBounds.h"
+#include "LocalHeader.h"
 
 namespace ct = clang::tooling;
 namespace mat = clang::ast_matchers;
@@ -121,6 +123,11 @@ private:
   std::string contextualPragmaEvents;
   ascify::PackedRecordBoundary packedRecords;
   ascify::SharedWordAlignmentPlan sharedWordAlignmentPlan;
+  ascify::KernelThreadBoundPlan kernelThreadBoundPlan;
+  bool trustedKernelBoundQualifier(llvm::StringRef, clang::SourceLocation);
+  std::map<unsigned, LocalKernelThreadBoundPolicy> kernelThreadBoundHeaderPolicies;
+  bool stageKernelThreadBoundFact(const ascify::PureSimtKernelThreadBound &);
+  bool prepareKernelThreadBoundHeaderPolicies();
   bool finalizePackedRecordEdits(const std::vector<ct::Replacement> &owned);
   void recordContextPragmaSource(clang::FileID file);
   std::set<std::string> siblingSourceMacroContextUsers;

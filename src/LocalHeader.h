@@ -84,6 +84,23 @@ struct LocalHeaderContextInline {
   unsigned includeOffset = 0;
 };
 
+// A root AST may require an explicit bound in an independently staged
+// selected header. No FunctionDecl/FileID survives between the two parses.
+struct LocalKernelThreadBoundPolicy {
+  std::string sourcePath, sourceSha256, kernelName, artifactPath;
+  std::uint64_t sourceBytes = 0;
+  unsigned declarationOffset = 0, qualifierOffset = 0, maximum = 0;
+  bool operator==(const LocalKernelThreadBoundPolicy &other) const {
+    return sourcePath == other.sourcePath && sourceSha256 == other.sourceSha256 &&
+        sourceBytes == other.sourceBytes && kernelName == other.kernelName &&
+        declarationOffset == other.declarationOffset && qualifierOffset == other.qualifierOffset &&
+        maximum == other.maximum && artifactPath == other.artifactPath;
+  }
+};
+using LocalKernelThreadBoundPolicyKey = std::pair<std::string, unsigned>;
+using LocalKernelThreadBoundPolicies =
+    std::map<LocalKernelThreadBoundPolicyKey, LocalKernelThreadBoundPolicy>;
+
 struct LocalHeaderIncludeDecision {
   bool redirect = false;
   bool fatal = false;
@@ -158,6 +175,18 @@ class LocalHeaderClosurePlan {
   bool validateArtifactIsolation(bool allowInplaceRootAlias);
   bool validateStagedArtifacts(const std::string &rootStagedPath,
                                const std::string &stagedBundlePath);
+  bool requireKernelThreadBoundPolicy(const LocalKernelThreadBoundPolicy &policy);
+  const LocalKernelThreadBoundPolicies &kernelThreadBoundPolicies() const {
+    return kernelThreadBoundPolicies_;
+  }
+  bool sealKernelThreadBoundPolicies(const std::string &sourcePath,
+      const std::string &artifactPath, const std::string &stagedPath,
+      const LocalKernelThreadBoundPolicies &applied);
+  bool validateKernelThreadBoundPolicies(const std::string &stagedBundlePath);
+  const std::map<LocalKernelThreadBoundPolicyKey, std::string> &kernelThreadBoundArtifacts() const {
+    return kernelThreadBoundArtifacts_;
+  }
+
 
  private:
   struct EligibleRoot {
@@ -194,6 +223,8 @@ class LocalHeaderClosurePlan {
   LocalHeaderClosureStats stats_;
   std::set<std::string> inheritedHelperHeaders_;
   std::set<std::string> inheritedSourceHeaders_;
+  LocalKernelThreadBoundPolicies kernelThreadBoundPolicies_;
+  std::map<LocalKernelThreadBoundPolicyKey, std::string> kernelThreadBoundArtifacts_;
   LocalHeaderInputEvidence contextEvidence_;
   std::vector<LocalHeaderContextInline> contextInlines_;
   bool failed_ = false;
@@ -219,6 +250,8 @@ struct LocalHeaderRewriteContext {
   bool deferredInheritedHelperDiscovery = false;
   bool requireHelperTransaction = false;
   bool helperTransactionCommitted = false;
+  // Filled only after the independently rebuilt AST fact produced its exact edit.
+  LocalKernelThreadBoundPolicies appliedKernelThreadBoundPolicies;
 
   LocalHeaderIncludeDecision observe(
       unsigned sourceOffset,

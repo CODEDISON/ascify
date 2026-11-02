@@ -1834,7 +1834,9 @@ inline aclError cudaOccupancyMaxPotentialBlockSizeEstimate(
   if (status != ACL_SUCCESS) { return status; }
   const int64_t blocks_per_grid = query(static_cast<aclrtDevAttr>(208U));
   if (status != ACL_SUCCESS) { return status; }
-  if (warp <= 0 || threads_per_core <= 0 || threads_per_block_limit <= 0) {
+  if (warp <= 0 || warp > INT_MAX || threads_per_core <= 0 || threads_per_core > INT_MAX ||
+      threads_per_block_limit <= 0 || threads_per_block_limit > INT_MAX || ub_bytes < 0 ||
+      vector_cores <= 0 || vector_cores > INT_MAX || blocks_per_grid <= 0 || blocks_per_grid > INT_MAX) {
     return ACL_ERROR_FEATURE_UNSUPPORTED;
   }
   int64_t cap = block_size_limit > 0
@@ -1843,7 +1845,7 @@ inline aclError cudaOccupancyMaxPotentialBlockSizeEstimate(
       : threads_per_block_limit;
   if (cap > threads_per_core) { cap = threads_per_core; }
   int64_t candidate = (cap / warp) * warp;
-  if (candidate <= 0) { candidate = warp; }
+  if (candidate < warp) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
   bool found = false;
   // Bounded descent: at most threads_per_core/warp candidates, itself capped.
   for (int steps = 0; candidate >= warp && steps < 1024; ++steps) {
@@ -1901,6 +1903,85 @@ inline aclError cudaOccupancyMaxPotentialBlockSize(
       &detail::PotentialBlockSizeUbModel<UnaryFunction>::apply, &ub_per_block);
 }
 
+// These entry points are emitted only with the converter's closed kernel
+// bound proof. MaxThreads is a source-explicit or converter-explicit compiler
+// constraint, independent of the device's real 203/209 limits. The original
+// block size and the caller's argument evaluation remain unchanged.
+template<unsigned MaxThreads, typename Kernel>
+inline aclError cudaOccupancyMaxActiveBlocksPerMultiprocessorMaxThreads(
+    int* active_blocks, Kernel kernel, int block_size, size_t dynamic_ub_bytes) {
+  static_assert(MaxThreads >= 1 && MaxThreads <= 2048,
+                "Ascify: unproved pure-SIMT kernel launch bound");
+  static_assert(std::is_pointer<Kernel>::value,
+                "Ascify: a proven kernel pointer is required");
+  if (active_blocks == nullptr || kernel == nullptr || block_size <= 0)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  if (static_cast<unsigned>(block_size) > MaxThreads)
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) return ready;
+  int32_t device = -1;
+  aclError status = aclrtGetDevice(&device);
+  if (status != ACL_SUCCESS) return status;
+  if (device < 0) return ACL_ERROR_FEATURE_UNSUPPORTED;
+  int64_t device_limit = 0, threads = 0;
+  status = aclrtGetDeviceInfo(static_cast<uint32_t>(device),
+                            cudaDevAttrMaxThreadsPerBlock, &device_limit);
+  if (status != ACL_SUCCESS) return status;
+  status = aclrtGetDeviceInfo(static_cast<uint32_t>(device),
+                            cudaDevAttrMaxThreadsPerVectorCore, &threads);
+  if (status != ACL_SUCCESS) return status;
+  if (device_limit <= 0 || device_limit > INT_MAX || threads <= 0 || threads > INT_MAX ||
+      block_size > device_limit || block_size > threads)
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  int64_t blocks = threads / block_size;
+  if (dynamic_ub_bytes != 0) {
+    int64_t ub_bytes = 0;
+    status = aclrtGetDeviceInfo(static_cast<uint32_t>(device),
+                              cudaDevAttrLocalMemoryPerVectorCore, &ub_bytes);
+    if (status != ACL_SUCCESS) return status;
+    if (ub_bytes <= 0 || static_cast<uint64_t>(dynamic_ub_bytes) >
+                             static_cast<uint64_t>(INT64_MAX))
+      return ACL_ERROR_FEATURE_UNSUPPORTED;
+    const int64_t ub_blocks = ub_bytes / static_cast<int64_t>(dynamic_ub_bytes);
+    if (ub_blocks < blocks) blocks = ub_blocks;
+  }
+  *active_blocks = static_cast<int>(blocks);
+  return ACL_SUCCESS;
+}
+
+template<unsigned MaxThreads, typename Kernel>
+inline aclError cudaOccupancyMaxPotentialBlockSizeMaxThreads(
+    int* min_grid_size, int* block_size, Kernel kernel,
+    size_t dynamic_ub_bytes = 0, int block_size_limit = 0) {
+  static_assert(MaxThreads >= 1 && MaxThreads <= 2048,
+                "Ascify: unproved pure-SIMT kernel launch bound");
+  static_assert(std::is_pointer<Kernel>::value,
+                "Ascify: a proven kernel pointer is required");
+  if (kernel == nullptr || block_size_limit < 0) return ACL_ERROR_RT_PARAM_INVALID;
+  const int limit = block_size_limit > 0 && block_size_limit < static_cast<int>(MaxThreads)
+      ? block_size_limit : static_cast<int>(MaxThreads);
+  return cudaOccupancyMaxPotentialBlockSizeEstimate(
+      min_grid_size, block_size, limit, dynamic_ub_bytes, nullptr, nullptr);
+}
+
+template<unsigned MaxThreads, typename Kernel, typename UnaryFunction,
+         typename std::enable_if<std::is_invocable<UnaryFunction&, int>::value, int>::type = 0>
+inline aclError cudaOccupancyMaxPotentialBlockSizeMaxThreads(
+    int* min_grid_size, int* block_size, Kernel kernel, UnaryFunction ub_per_block,
+    int block_size_limit = 0) {
+  static_assert(MaxThreads >= 1 && MaxThreads <= 2048,
+                "Ascify: unproved pure-SIMT kernel launch bound");
+  static_assert(std::is_pointer<Kernel>::value,
+                "Ascify: a proven kernel pointer is required");
+  if (kernel == nullptr || block_size_limit < 0) return ACL_ERROR_RT_PARAM_INVALID;
+  const int limit = block_size_limit > 0 && block_size_limit < static_cast<int>(MaxThreads)
+      ? block_size_limit : static_cast<int>(MaxThreads);
+  return cudaOccupancyMaxPotentialBlockSizeEstimate(
+      min_grid_size, block_size, limit, 0,
+      &detail::PotentialBlockSizeUbModel<UnaryFunction>::apply, &ub_per_block);
+}
+
 // beta3 does not expose CUDA-style per-kernel static/dynamic UB metadata.
 // Static shared usage is conservatively reported as zero; setting the dynamic
 // limit is a successful no-op because launch-time UB size remains authoritative.
@@ -1912,9 +1993,9 @@ inline aclError cudaFuncGetAttributes(cudaFuncAttributes* attributes, Kernel) {
 }
 
 // This restricted query supplies only maxThreadsPerBlock. The converter proves
-// a concrete kernel definition, its literal/default pure-SIMT launch bound,
+// a concrete kernel definition, its source-explicit or generated-explicit launch bound,
 // and that the local output object has no other observations or escapes.
-// CCEC allocates per-thread registers from that bound (default 1024), while
+// The converter retains a literal bound or emits its chosen explicit bound;
 // the live device supplies its independent limit. Do not infer static UB size.
 template<unsigned MaxThreads, typename Kernel>
 inline aclError cudaFuncGetAttributesMaxThreads(
