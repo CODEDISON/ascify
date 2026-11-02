@@ -14809,6 +14809,40 @@ void AscifyAction::ExecuteAction() {
       cudaRuntimeApiBoundaryFailed = true;
       return;
     }
+    // Stage both zero-length insertions together so existing token/API edits
+    // remain intact. Only the closed, effect-free host launches above obtain
+    // lazy initialization; legacy32 and unrelated launch paths are unchanged.
+    ct::Replacements staged(*replacements);
+    std::string startupError;
+    std::set<std::pair<unsigned,unsigned>> startupRanges;
+    for (const auto* launch : fullWarpGroups.hostLaunches) {
+      const auto begin=launch->getBeginLoc();
+      const auto end=clang::Lexer::getLocForEndOfToken(
+          launch->getEndLoc(),0,SM,getCompilerInstance().getLangOpts());
+      if (!begin.isFileID() || !end.isFileID() || SM.getFileID(begin)!=SM.getFileID(end) ||
+          SM.getFileOffset(begin)>=SM.getFileOffset(end)) {
+        startupError="prelaunch edit has no complete literal range"; break;
+      }
+      if (!startupRanges.insert({begin.getRawEncoding(),end.getRawEncoding()}).second) continue;
+      for (const auto& range : SemanticRewriteRanges)
+        if (range.file==SM.getFileID(begin) && SM.getFileOffset(begin)<range.endOffset &&
+            range.beginOffset<SM.getFileOffset(end)) startupError="prelaunch edit overlaps a semantic transaction";
+      if (!startupError.empty()) break;
+      // ACL's owned success value is0. The literal avoids capturing a caller
+      // local named ACL_SUCCESS in the surrounding host lexical scope.
+      if (!llcompat::insertReplacement(staged,ct::Replacement(SM,begin,0,
+              "(::ascify::cudaRuntimeEnsureReady() == 0 ? (void)("),&startupError) ||
+          !llcompat::insertReplacement(staged,ct::Replacement(SM,end,0,
+              ") : (void)0)"),&startupError)) break;
+    }
+    if (!startupError.empty()) {
+      const auto diagnostic=getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error,"full-warp group boundary: %0");
+      getCompilerInstance().getDiagnostics().Report(diagnostic)<<startupError;
+      cudaRuntimeApiBoundaryFailed=true;
+      return;
+    }
+    *replacements=std::move(staged);
     needsCudaCompatHeader = true;
     llvm::errs() << "Ascify full-warp groups v1: kernels=" << fullWarpGroups.kernels
                  << ", helpers=" << fullWarpGroups.helpers

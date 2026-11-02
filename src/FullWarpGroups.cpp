@@ -480,6 +480,87 @@ class Proof {
     if (!x || !y || !z || *y != 1 || *z != 1 || *x < 32 || *x > 1024 || *x % 32 != 0) return {};
     return static_cast<unsigned>(*x);
   }
+  bool hostLaunchValue(const Expr* e) const {
+    if (!e) return false;
+    if (const auto* a=dyn_cast<CXXDefaultArgExpr>(e)) {
+      // Only the selected real SDK parameter can supply its own literal
+      // defaults. A caller default/constructor never borrows this identity.
+      if (!sdk(a->getParam()) || !a->getParam()->hasDefaultArg() ||
+          a->getExpr()!=a->getParam()->getDefaultArg()) return false;
+      const auto* zero=dyn_cast<IntegerLiteral>(plain(a->getExpr()));
+      return zero && zero->getExprLoc().isFileID() && zero->getValue()<=1;
+    }
+    if (!directiveFreeSource(e->getExprLoc()) || e->getType().isVolatileQualified()) return false;
+    if (const auto* c=dyn_cast<CXXConstructExpr>(e)) {
+      const auto* ctor=c->getConstructor();
+      if (!ctor || !sdk(ctor) || ctor->getParent()->getQualifiedNameAsString()!="dim3" ||
+          c->getNumArgs()!=3) return false;
+      for (const auto* d : ctor->redecls()) if (!sdk(d)) return false;
+      const auto* definition=dyn_cast_or_null<CXXConstructorDecl>(ctor->getDefinition());
+      const auto* body=definition ? dyn_cast_or_null<CompoundStmt>(definition->getBody()) : nullptr;
+      if (!definition || !sdk(definition) || !body || !body->body_empty() ||
+          definition->getNumParams()!=3 || definition->getNumCtorInitializers()!=3 ||
+          !definition->getParent()->hasTrivialDestructor()) return false;
+      unsigned index=0;
+      for (const auto* init : definition->inits()) {
+        const auto* value=dyn_cast_or_null<DeclRefExpr>(plain(init->getInit()));
+        const auto* parameter=definition->getParamDecl(index);
+        const auto* member=init->isMemberInitializer() ? init->getMember() : nullptr;
+        const char* fields[]={"x","y","z"};
+        if (!member || member->getName()!=fields[index] || !value ||
+            value->getDecl()!=parameter ||
+            !context.hasSameType(parameter->getType(),context.UnsignedIntTy) ||
+            !context.hasSameType(member->getType(),context.UnsignedIntTy)) return false;
+        ++index;
+      }
+      for (const auto* a : c->arguments()) if (!hostLaunchValue(a)) return false;
+      return true;
+    }
+    if (const auto* p=dyn_cast<ParenExpr>(e)) return hostLaunchValue(p->getSubExpr());
+    if (const auto* p=dyn_cast<ExprWithCleanups>(e))
+      return !p->cleanupsHaveSideEffects() && hostLaunchValue(p->getSubExpr());
+    if (const auto* p=dyn_cast<ImplicitCastExpr>(e)) return hostLaunchValue(p->getSubExpr());
+    if (e->HasSideEffects(context)) return false;
+    if (isa<IntegerLiteral>(e) || isa<FloatingLiteral>(e) || isa<CXXBoolLiteralExpr>(e) ||
+        isa<CXXNullPtrLiteralExpr>(e)) return true;
+    if (const auto* r=dyn_cast<DeclRefExpr>(e)) {
+      const auto* v=dyn_cast<VarDecl>(r->getDecl());
+      if (!v || (!v->isLocalVarDecl() && !isa<ParmVarDecl>(v)) || !v->hasLocalStorage() ||
+          v->isStaticLocal() || v->getTLSKind()!=VarDecl::TLS_None || v->hasAttrs() ||
+          v->getType().isVolatileQualified() || !directiveFreeSource(v->getLocation()) ||
+          !(v->getType()->isBuiltinType() || v->getType()->isPointerType()) ||
+          v->getType()->isFunctionPointerType()) return false;
+      for (const auto* use : inventory.references) if (use->getDecl()==v) {
+        const auto parents=context.getParents(*use);
+        const auto* cast=parents.size()==1 ? parents[0].get<ImplicitCastExpr>() : nullptr;
+        if (!cast || cast->getCastKind()!=CK_LValueToRValue) return false;
+      }
+      return true;
+    }
+    if (const auto* u=dyn_cast<UnaryExprOrTypeTraitExpr>(e))
+      return u->getKind()==UETT_SizeOf && u->isArgumentType() &&
+          u->getArgumentType()->isBuiltinType();
+    if (const auto* b=dyn_cast<BinaryOperator>(e))
+      return !b->isAssignmentOp() && b->getOpcode()!=BO_Comma &&
+          hostLaunchValue(b->getLHS()) && hostLaunchValue(b->getRHS());
+    if (const auto* u=dyn_cast<UnaryOperator>(e))
+      return (u->getOpcode()==UO_Plus || u->getOpcode()==UO_Minus ||
+              u->getOpcode()==UO_Not || u->getOpcode()==UO_LNot) &&
+          hostLaunchValue(u->getSubExpr());
+    return false;
+  }
+  bool guardedHostLaunch(const CUDAKernelCallExpr* launch, const FunctionDecl* owner) const {
+    if (!owner || owner->hasAttr<CUDADeviceAttr>() || owner->hasAttr<CUDAGlobalAttr>() ||
+        !literal(owner->getLocation()) || !launch->getType()->isVoidType() ||
+        !literal(launch->getBeginLoc()) || !literal(launch->getEndLoc())) return false;
+    const auto* config=launch->getConfig();
+    if (!config || config->getNumArgs()!=4 || !config->getDirectCallee() ||
+        !sdk(config->getDirectCallee())) return false;
+    for (const auto* d : config->getDirectCallee()->redecls()) if (!sdk(d)) return false;
+    for (const auto* a : config->arguments()) if (!hostLaunchValue(a)) return false;
+    for (const auto* a : launch->arguments()) if (!hostLaunchValue(a)) return false;
+    return true;
+  }
   Value binary(BinaryOperatorKind op, Value a, Value b) const {
     Value out{a.uniform && b.uniform, {}};
     if (!out.uniform || !a.constant || !b.constant) return out;
@@ -951,6 +1032,7 @@ bool Proof::run(bool enabled) {
   std::set<const FunctionDecl*> kernels;
   for (const auto* f : affected) if (f->hasAttr<CUDAGlobalAttr>()) kernels.insert(f);
   if (kernels.empty()) return fail({}, "new group definitions have no closed direct-launch kernel root");
+  std::vector<const CUDAKernelCallExpr*> hostLaunches;
   for (const auto* kernel : kernels) {
     bool launched=false;
     for (const auto& site : inventory.calls) if (canonical(site.call->getDirectCallee())==kernel) {
@@ -959,7 +1041,10 @@ bool Proof::run(bool enabled) {
         return fail(site.call->getExprLoc(), "group kernel has an unproved caller/launch");
       const auto threads=blockThreads(launch);
       if (!threads) return fail(launch->getExprLoc(), "group kernel requires a closed immutable 1D block32..1024 multiple32 launch");
+      if (!guardedHostLaunch(launch,site.owner))
+        return fail(launch->getExprLoc(), "prelaunch initialization requires a physical host launch with closed side-effect-free configuration/arguments");
       if (!function(kernel->getDefinition(),*threads,{})) return false;
+      hostLaunches.push_back(launch);
       approve(launch); launched=true;
     }
     if (!launched) return fail(kernel->getLocation(), "group kernel has no visible proved launch");
@@ -975,6 +1060,7 @@ bool Proof::run(bool enabled) {
       !approvedCalls.count(site.call))
     return fail(site.call->getExprLoc(), "group path contains an unproved call site");
   result.kernels=kernels.size(); result.helpers=reached.size()-kernels.size(); result.syncs=syncSites.size();
+  result.hostLaunches=std::move(hostLaunches);
   return true;
 }
 } // namespace

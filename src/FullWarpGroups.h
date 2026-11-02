@@ -2,13 +2,16 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 #include "clang/Basic/SourceLocation.h"
 #include "llvm/ADT/StringRef.h"
 
-namespace clang { class ASTContext; class Decl; class FunctionDecl; }
+namespace clang { class ASTContext; class Decl; class FunctionDecl; class CUDAKernelCallExpr; }
 namespace ascify {
 struct FullWarpGroupStats {
   unsigned kernels = 0, helpers = 0, syncs = 0;
+  // AST owners are the current Tool.run only; never retain in header context.
+  std::vector<const clang::CUDAKernelCallExpr*> hostLaunches;
   bool used() const { return kernels != 0; }
 };
 
