@@ -488,7 +488,7 @@ class Proof {
       if (!sdk(a->getParam()) || !a->getParam()->hasDefaultArg() ||
           a->getExpr()!=a->getParam()->getDefaultArg()) return false;
       const auto* zero=dyn_cast<IntegerLiteral>(plain(a->getExpr()));
-      return zero && zero->getExprLoc().isFileID() && zero->getValue()<=1;
+      return zero && zero->getExprLoc().isFileID() && zero->getValue().ule(1);
     }
     if (!directiveFreeSource(e->getExprLoc()) || e->getType().isVolatileQualified()) return false;
     if (const auto* c=dyn_cast<CXXConstructExpr>(e)) {
