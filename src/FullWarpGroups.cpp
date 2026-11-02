@@ -13,11 +13,37 @@
 #include "clang/AST/ParentMapContext.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/TypeLoc.h"
+#include "clang/Basic/SourceManager.h"
 #include "clang/Lex/Lexer.h"
 
 namespace ascify {
 namespace {
 using namespace clang;
+// Select the available primary API without guessing a release boundary.
+template <class Context, class Record>
+static auto groupRecordType(Context& context, const Record* record, int)
+    -> decltype(context.getRecordType(record), clang::QualType()) {
+  return context.getRecordType(record);
+}
+template <class Context, class Record>
+static auto groupRecordType(Context& context, const Record* record, long)
+    -> decltype(context.getCanonicalTagType(record), clang::QualType()) {
+  return context.getCanonicalTagType(record);
+}
+template <class Member>
+static auto groupMemberClass(const Member* member, int)
+    -> decltype(member->getClass(), clang::QualType()) {
+  return clang::QualType(member->getClass(), 0);
+}
+template <class Member>
+static auto groupMemberClass(const Member* member, long)
+    -> decltype(member->getQualifier().getAsType(), clang::QualType()) {
+  const auto qualifier = member->getQualifier();
+  using Qualifier = decltype(member->getQualifier());
+  if (qualifier.getKind() != Qualifier::Kind::Type)
+    return {};
+  return clang::QualType(qualifier.getAsType(), 0);
+}
 enum class Role { None, Block, Tile16, Erased, Internal16 };
 enum class Origin { Block, Tile16 };
 const FunctionDecl* canonical(const FunctionDecl* f) {
@@ -55,7 +81,7 @@ bool carriesNew(QualType t, unsigned depth = 0) {
   if (t->isPointerType() || t->isReferenceType()) return carriesNew(t->getPointeeType(), depth + 1);
   if (const auto* a = dyn_cast<ArrayType>(t.getTypePtr())) return carriesNew(a->getElementType(), depth + 1);
   if (const auto* m = t->getAs<MemberPointerType>())
-    return carriesNew(QualType(m->getClass(), 0), depth + 1) || carriesNew(m->getPointeeType(), depth + 1);
+    return carriesNew(groupMemberClass(m, 0), depth + 1) || carriesNew(m->getPointeeType(), depth + 1);
   if (const auto* s = dyn_cast_or_null<ClassTemplateSpecializationDecl>(t->getAsCXXRecordDecl()))
     for (const auto& a : s->getTemplateArgs().asArray())
       if (a.getKind() == TemplateArgument::Type && carriesNew(a.getAsType(), depth + 1)) return true;
@@ -512,7 +538,7 @@ bool Proof::expression(const Expr* input, Frame& f, bool control, Value& out) {
       if (!literal(m->getMemberLoc())) return fail(m->getMemberLoc(), "macro-derived group/member call is not admitted");
       if (!object) object=m->getBase();
     }
-    const bool groupMethod = method && role(context.getRecordType(method->getParent())) != Role::None;
+    const bool groupMethod = method && role(groupRecordType(context, method->getParent(), 0)) != Role::None;
     const bool freeSync = target->getQualifiedNameAsString() == "cooperative_groups::sync";
     if (groupMethod || freeSync) {
       if (!trustedFunction(target) || (groupMethod ? call->getNumArgs() != 0 : call->getNumArgs() != 1))
@@ -525,7 +551,7 @@ bool Proof::expression(const Expr* input, Frame& f, bool control, Value& out) {
           return fail(call->getExprLoc(), "collective requires block-uniform control at one common epoch");
         syncSites.insert(call);
       } else if (groupMethod && (name == "size" || name == "thread_rank")) {
-        const auto ownerRole = role(context.getRecordType(method->getParent()));
+        const auto ownerRole = role(groupRecordType(context, method->getParent(), 0));
         const QualType expected = ownerRole == Role::Erased ? context.UnsignedLongLongTy : context.UnsignedIntTy;
         if (!context.hasSameUnqualifiedType(target->getReturnType(), expected))
           return fail(call->getExprLoc(), "group result type differs from authenticated CUDA interface");
@@ -635,7 +661,7 @@ bool Proof::expression(const Expr* input, Frame& f, bool control, Value& out) {
   }
   if (const auto* m = dyn_cast<MemberExpr>(input)) {
     if (const auto* method = dyn_cast<CXXMethodDecl>(m->getMemberDecl()))
-      if (role(context.getRecordType(method->getParent())) != Role::None)
+      if (role(groupRecordType(context, method->getParent(), 0)) != Role::None)
         return fail(m->getExprLoc(), "group method address/inquiry is not admitted");
   }
   if (role(input->getType()) != Role::None || carriesNew(input->getType()) || isa<CXXConstructExpr>(input))
