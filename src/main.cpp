@@ -293,7 +293,40 @@ bool ascifySingleSource(const std::string &srcPath,
   }
   const bool contextualInput = localHeaderContext != nullptr &&
                               localHeaderContext->virtualInput != nullptr;
-  if (contextualInput || languageDatabase.hostCxx()) {
+  std::unique_ptr<const ascify::HostCxxRootInputWitness> physicalPolicyHeaderInput;
+  if (!contextualInput && !languageDatabase.hostCxx() && localHeaderContext &&
+      localHeaderContext->plan && localHeaderContext->depth == 1) {
+    const auto &plan = *localHeaderContext->plan;
+    bool required = false;
+    for (const auto &entry : plan.kernelThreadBoundPolicies())
+      required |= entry.second.sourcePath == localHeaderContext->sourcePath;
+    if (required) {
+      if (plan.failed() || localHeaderContext->sourceOnlyJointInput ||
+          localHeaderContext->requireHelperTransaction ||
+          srcPath != localHeaderContext->sourcePath || mainContextPath != srcPath ||
+          dstPath.empty() || dstPath == srcPath || !plan.isSelectedRootHeader(srcPath))
+        return false;
+      unsigned translating = 0;
+      for (const auto &node : plan.nodes())
+        if (node.state == LocalHeaderNodeState::Translating && node.depth == 1 &&
+            node.sourcePath == srcPath && node.artifactPath == localHeaderContext->artifactPath)
+          ++translating;
+      if (translating != 1) return false;
+      // Reuse only the canonical physical bytes/UID reader. This witness stays
+      // local: it grants no Host C++ input or SDK permission to AscifyAction.
+      physicalPolicyHeaderInput = ascify::HostCxxRootInputWitness::capture(srcPath);
+      if (!physicalPolicyHeaderInput) return false;
+      for (const auto &entry : plan.kernelThreadBoundPolicies()) {
+        const auto &policy = entry.second;
+        if (policy.sourcePath == srcPath &&
+            (policy.artifactPath != localHeaderContext->artifactPath ||
+             policy.sourceBytes != physicalPolicyHeaderInput->bytes().size() ||
+             policy.sourceSha256 != physicalPolicyHeaderInput->sha256()))
+          return false;
+      }
+    }
+  }
+  if (contextualInput || languageDatabase.hostCxx() || physicalPolicyHeaderInput) {
     // Reparse a verified contextual input at the original root identity.
     // No physical source is overwritten: only apply edits to the memory
     // buffer, then write the existing unpublished staging destination.
@@ -303,7 +336,8 @@ bool ascifySingleSource(const std::string &srcPath,
     std::string hostInput;
     std::unique_ptr<const ascify::HostCxxRootInputWitness> hostRootInput;
     std::unique_ptr<const ascify::HostCxxRootInputWitness> unmodifiedHostInput;
-    if (!contextualInput) {
+    if (physicalPolicyHeaderInput) hostInput = physicalPolicyHeaderInput->bytes();
+    if (!contextualInput && !physicalPolicyHeaderInput) {
 #if LLVM_VERSION_MAJOR >= 13
       const bool unmodifiedHostRoot = languageDatabase.hostCxx() &&
           (localHeaderContext == nullptr ||
@@ -356,7 +390,10 @@ bool ascifySingleSource(const std::string &srcPath,
     ct::RefactoringTool Tool(languageDatabase, parsePath);
     if (hostRootInput && !hostRootInput->matchesPhysical()) return false;
     if (unmodifiedHostInput && !unmodifiedHostInput->matchesPhysical()) return false;
-    Tool.mapVirtualFile(parsePath, input);
+    if (physicalPolicyHeaderInput && !physicalPolicyHeaderInput->matchesPhysical()) return false;
+    // The selected CUDA header is parsed at its actual physical identity.
+    // Its Action policy still checks canonical path, UID, bytes and kernel.
+    if (!physicalPolicyHeaderInput) Tool.mapVirtualFile(parsePath, input);
     if (hostRootInput && !hostRootInput->matchesPhysical()) return false;
     if (unmodifiedHostInput && !unmodifiedHostInput->matchesPhysical()) return false;
     ct::Replacements &edits = llcompat::getReplacements(Tool, parsePath);
@@ -369,7 +406,8 @@ bool ascifySingleSource(const std::string &srcPath,
         unmodifiedHostInput.get());
     if (Tool.run(&factory) ||
         (hostRootInput && !hostRootInput->matchesPhysical()) ||
-        (unmodifiedHostInput && !unmodifiedHostInput->matchesPhysical()))
+        (unmodifiedHostInput && !unmodifiedHostInput->matchesPhysical()) ||
+        (physicalPolicyHeaderInput && !physicalPolicyHeaderInput->matchesPhysical()))
       return false;
     if (localHeaderContext != nullptr &&
         localHeaderContext->deferredInheritedHelperDiscovery)
@@ -387,7 +425,8 @@ bool ascifySingleSource(const std::string &srcPath,
       return false;
     out << *rewritten;
     out.close();
-    return !out.has_error();
+    return !out.has_error() &&
+        (!physicalPolicyHeaderInput || physicalPolicyHeaderInput->matchesPhysical());
   }
   std::error_code EC;
   SmallString<128> tmpFile;
