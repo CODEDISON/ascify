@@ -395,6 +395,11 @@ run_check "uniform block reduction whole-TU admission and publication boundaries
     --binary "$ASCIFY_BINARY" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+run_check "complete-warp static16 and erased-group source/publication boundaries" \
+  "$python" -B "$repo_root/tests/frontend_compat/check_fullwarp_groups.py" \
+    --binary "$ASCIFY_BINARY" --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang++}" --evidence-dir "$work_dir/fullwarp_groups"
 run_check "uniform scratch empty namespace import and reactivation boundaries" \
   "$python" -B "$repo_root/tests/frontend_compat/check_uniform_namespace_context.py" \
     --binary "$ASCIFY_BINARY" \

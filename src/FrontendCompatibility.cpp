@@ -77,6 +77,16 @@ template <unsigned int Size> class tile_register_operations {
       std::is_same<T, uint4>::value, T>::type
   shfl_xor(T value, unsigned int lane_mask) const;
 };
+// Rank/size/sync only. A mandatory source proof establishes complete-warp
+// participation at every call/epoch before this projection can publish.
+template <> class tile_register_operations<16> {
+ protected:
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ tile_register_operations();
+ public:
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int thread_rank();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static constexpr unsigned int size() { return 16; }
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync() const;
+};
 }  // namespace ascify_detail
 
 template <unsigned int Size, typename ParentT>
@@ -106,6 +116,24 @@ tiled_partition(const thread_block& parent);
 template <unsigned int Size, typename ParentT>
 ASCIFY_FRONTEND_COMPAT_DEVICE_ inline void
 sync(const thread_block_tile<Size, ParentT>& group) {
+  group.sync();
+}
+
+// Erased values may originate only from an authenticated block or static16
+// tile. The mandatory whole-TU proof rejects representation observations,
+// escapes, source overloads and unproved control/call/launch paths.
+class thread_group final {
+ public:
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ thread_group(const thread_block&);
+  template <typename ParentT, typename std::enable_if<
+      std::is_same<ParentT, thread_block>::value ||
+      std::is_same<ParentT, void>::value, int>::type = 0>
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ thread_group(const thread_block_tile<16, ParentT>&);
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned long long size() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned long long thread_rank() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync() const;
+};
+ASCIFY_FRONTEND_COMPAT_DEVICE_ inline void sync(const thread_group& group) {
   group.sync();
 }
 
@@ -241,11 +269,11 @@ inline int max(A a, B b) {
 constexpr char kProfileManifest[] =
     "schema=ascify.frontend-compat-profile.v1\n"
     "profile=ascify-admitted-v1\n"
-    "file=cooperative_groups.h;bytes=5801;sha256=45bcf927b3f5717b20468bc244a84f791a59e3780f1cdd9d7b56df42fd58f1a3\n"
+    "file=cooperative_groups.h;bytes=7153;sha256=5659d22211f4263794820af69d741adf51159642a043f903c8dd2fa8e3a22779\n"
     "file=cooperative_groups/reduce.h;bytes=1612;sha256=bc6f9130deaa55a786df70d127a118ecf57b1014dddbb0700a45ef05f597c928\n"
     "file=host_math.h;bytes=2594;sha256=3b87b69a619cff6333d8fb2728d6af31a90a28fd2073077084b81ba602d70e2f\n";
 
-static_assert(sizeof(kAdmissionHeader) - 1 == 5801,
+static_assert(sizeof(kAdmissionHeader) - 1 == 7153,
               "admission header identity drifted");
 static_assert(sizeof(kReductionHeader) - 1 == 1612,
               "reduction header identity drifted");
@@ -262,7 +290,7 @@ struct RequiredProfileFile {
 
 constexpr RequiredProfileFile kRequiredProfileFiles[] = {
     {"profile.manifest", 393, kProfileManifest},
-    {"cooperative_groups.h", 5801, kAdmissionHeader},
+    {"cooperative_groups.h", 7153, kAdmissionHeader},
     {"cooperative_groups/reduce.h", 1612, kReductionHeader},
     {"host_math.h", 2594, kHostMathHeader},
 };

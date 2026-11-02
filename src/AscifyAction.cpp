@@ -76,6 +76,7 @@ THE SOFTWARE.
 #include "BoundedDeviceTemplateInlining.h"
 #include "Scalar64Lowering.h"
 #include "NttpVoidCall.h"
+#include "FullWarpGroups.h"
 
 using namespace ascify;
 
@@ -14605,6 +14606,85 @@ void AscifyAction::ExecuteAction() {
       if (!nttpCgFile(declaration->getLocation())) return false;
     return true;
   };
+  ascify::FullWarpGroupStats fullWarpGroups;
+  std::string fullWarpGroupError;
+  clang::SourceLocation fullWarpGroupLocation;
+  if (!ascify::ProveFullWarpGroups(getCompilerInstance().getASTContext(),
+          [&](clang::SourceLocation location) { return ownedNttpVoidCallLocation(location); },
+          [&](const clang::Decl* declaration) {
+            return declaration && nttpCgFile(declaration->getLocation());
+          },
+          [&](const clang::Decl* declaration) {
+            return declaration && scalar64Sdk(declaration->getLocation());
+          },
+          [&](const clang::FunctionDecl* function) {
+            if (!function) return false;
+            for (const auto* declaration : function->redecls()) {
+              const auto location=SM.getSpellingLoc(declaration->getLocation());
+              if (!location.isFileID()) return false;
+              const auto file=SM.getFileID(location);
+              if (cudaRuntimeApiSdkFileIds.count(file.getHashValue()) ||
+                  isOwnedCudaCompilerInput(file,getCompilerInstance())) continue;
+              const auto* entry=SM.getFileEntryForID(file);
+              if (!entry || !trustedSystemFileIds.count(file.getHashValue()) ||
+                  !SM.isInSystemHeader(location) || SM.isFileOverridden(entry) ||
+                  contextualCanonicalPath(SM.getFilename(location))!="/usr/include/stdio.h" ||
+                  !physicalSourceFileMatches(SM.getFilename(location),*entry,SM)) return false;
+            }
+            return true;
+          },
+          [&](llvm::StringRef name,clang::SourceLocation location) {
+            const auto definition=PP.getMacroDefinitionAtLoc(PP.getIdentifierInfo(name),location);
+            if (!definition) return true;
+            // Only these exact native error-path macros are benign nonempty
+            // host spellings needed by the original sample. They cannot lend
+            // an x witness: launchInteger still requires owned FileID nodes.
+            if (name!="EXIT_FAILURE" && name!="EXIT_SUCCESS" && name!="stderr") return false;
+            const auto* macro=definition.getMacroInfo();
+            if (!macro || definition.isAmbiguous() || !definition.getModuleMacros().empty() ||
+                macro->isFunctionLike() || macro->getNumTokens()!=1) return false;
+            const auto at=SM.getSpellingLoc(macro->getDefinitionLoc());
+            if (!at.isFileID()) return false;
+            const auto file=SM.getFileID(at);
+            const auto* entry=SM.getFileEntryForID(file);
+            const auto path=contextualCanonicalPath(SM.getFilename(at));
+            if (!entry || !trustedSystemFileIds.count(file.getHashValue()) || !SM.isInSystemHeader(at) ||
+                SM.isFileOverridden(entry) || path!=(name=="stderr"?"/usr/include/stdio.h":"/usr/include/stdlib.h") ||
+                !physicalSourceFileMatches(SM.getFilename(at),*entry,SM)) return false;
+            const auto replacement=clang::Lexer::getSpelling(macro->tokens()[0],SM,getCompilerInstance().getLangOpts());
+            return replacement==(name=="stderr"?"stderr":name=="EXIT_FAILURE"?"1":"0");
+          },
+          [&](clang::FileID file) {
+            if (file.isInvalid()) return false;
+            if (cudaRuntimeApiSdkFileIds.count(file.getHashValue()) ||
+                isOwnedCudaCompilerInput(file,getCompilerInstance()) ||
+                (verifiedFrontendCgEntryFileIds.count(file.getHashValue()) && nttpCgFile(SM.getLocForStartOfFile(file))) ||
+                (!frontendHostMathGuardModified && !frontendCgControlModified && !cudaAttributeControlModified &&
+                 verifiedFrontendHostMathEntryFileIds.count(file.getHashValue()) &&
+                 !macroAlteredFrontendHostMathFileIds.count(file.getHashValue()) &&
+                 verifiedForcedFrontendHostMathFile(file,getCompilerInstance(),frontendCompatibility))) return true;
+            const auto at=SM.getLocForStartOfFile(file);
+            const auto* entry=SM.getFileEntryForID(file);
+            return entry && trustedSystemFileIds.count(file.getHashValue()) && SM.isInSystemHeader(at) &&
+                !SM.isFileOverridden(entry) && physicalSourceFileMatches(SM.getFilename(at),*entry,SM) &&
+                (pathIsWithinPhysicalDirectory(SM.getFilename(at),"/usr/include") ||
+                 pathIsWithinPhysicalDirectory(SM.getFilename(at),"/usr/lib/gcc"));
+          }, !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks &&
+              TargetPolicy == "dav-c310-vec" && TargetRecipe == "none",
+          fullWarpGroups, fullWarpGroupLocation, fullWarpGroupError)) {
+    const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error, "full-warp group boundary: %0");
+    getCompilerInstance().getDiagnostics().Report(fullWarpGroupLocation, diagnostic) << fullWarpGroupError;
+    cudaRuntimeApiBoundaryFailed = true;
+    return;
+  }
+  if (fullWarpGroups.used()) {
+    needsCudaCompatHeader = true;
+    llvm::errs() << "Ascify full-warp groups v1: kernels=" << fullWarpGroups.kernels
+                 << ", helpers=" << fullWarpGroups.helpers
+                 << ", sync_sites=" << fullWarpGroups.syncs
+                 << ", tile16_sync_requires_complete_warp=1\n";
+  }
   std::string nttpVoidError;
   clang::SourceLocation nttpVoidLocation;
   if (!ascify::ProveNttpVoidCalls(getCompilerInstance().getASTContext(),

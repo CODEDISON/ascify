@@ -64,7 +64,7 @@ require_fixed \
 require_fixed 'schema=ascify.frontend-compat-profile.v1' "$manifest"
 require_fixed 'profile=ascify-admitted-v1' "$manifest"
 require_fixed \
-  'file=cooperative_groups.h;bytes=5801;sha256=45bcf927b3f5717b20468bc244a84f791a59e3780f1cdd9d7b56df42fd58f1a3' \
+  'file=cooperative_groups.h;bytes=7153;sha256=5659d22211f4263794820af69d741adf51159642a043f903c8dd2fa8e3a22779' \
   "$manifest"
 require_fixed \
   'file=cooperative_groups/reduce.h;bytes=1612;sha256=bc6f9130deaa55a786df70d127a118ecf57b1014dddbb0700a45ef05f597c928' \
@@ -73,7 +73,7 @@ require_fixed \
   'file=host_math.h;bytes=2594;sha256=3b87b69a619cff6333d8fb2728d6af31a90a28fd2073077084b81ba602d70e2f' \
   "$manifest"
 if [ "$(sha256_file "$header")" != \
-    '45bcf927b3f5717b20468bc244a84f791a59e3780f1cdd9d7b56df42fd58f1a3' ]; then
+    '5659d22211f4263794820af69d741adf51159642a043f903c8dd2fa8e3a22779' ]; then
   echo "frontend admission header SHA-256 mismatch" >&2
   exit 1
 fi
@@ -150,6 +150,8 @@ trap cleanup 0 1 2 15
 
 "$cxx" -std=c++17 -fsyntax-only -I"$profile_root" \
   "$test_root/tile32_positive.cpp"
+"$cxx" -std=c++17 -fsyntax-only -I"$profile_root" \
+  "$test_root/tile16_sync_positive.cpp"
 "$cxx" -std=c++17 -x c++ -D__global__= -fsyntax-only -I"$profile_root" \
   "$test_root/reduce_input.cu"
 for reject_case in 3 4 5 6 7; do

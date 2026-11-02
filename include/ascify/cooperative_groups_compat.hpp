@@ -118,6 +118,32 @@ template <unsigned int Size> class tile_register_operations {
     return result;
   }
 };
+// The source publication proof restricts this helper to a complete physical
+// warp reaching the same call/epoch. It is not a named partial-mask barrier.
+__SIMT_DEVICE_FUNCTIONS_DECL__ inline void full_warp_group_sync_v1() {
+  if (asc_activemask() != 0xffffffffu)
+    ::ascify::detail::reject_device_contract();
+  asc_threadfence_block();
+  if (asc_ballot(1) != 0xffffffffu)
+    ::ascify::detail::reject_device_contract();
+  asc_threadfence_block();
+}
+
+// Deliberately separate from the existing Size==32 register facade: tile16
+// gains only rank/size/sync, never shuffle, reduce or scalar64 transport.
+template <> class tile_register_operations<16> {
+ protected:
+  using native_tile = ::cooperative_groups::thread_block_tile<16, thread_block>;
+  native_tile native_;
+  __SIMT_DEVICE_FUNCTIONS_DECL__ explicit tile_register_operations(native_tile value)
+      : native_(value) {}
+ public:
+  __SIMT_DEVICE_FUNCTIONS_DECL__ static unsigned int thread_rank() {
+    return static_cast<unsigned int>(native_tile::thread_rank());
+  }
+  __SIMT_DEVICE_FUNCTIONS_DECL__ static constexpr unsigned int size() { return 16; }
+  __SIMT_DEVICE_FUNCTIONS_DECL__ void sync() const { full_warp_group_sync_v1(); }
+};
 }  // namespace ascify_detail
 
 template <unsigned int Size, typename ParentT>
@@ -164,6 +190,38 @@ tiled_partition(const thread_block& parent) {
 template <unsigned int Size, typename ParentT>
 __SIMT_DEVICE_FUNCTIONS_DECL__ inline void
 sync(const thread_block_tile<Size, ParentT>& group) {
+  group.sync();
+}
+
+// Only authenticated block/tile16 origins and closed by-value copies are
+// admitted by the mandatory source proof. Do not downcast a sliced native
+// thread_group to a derived object, or expose representation to caller code.
+class thread_group final {
+  enum class kind { block, full_warp_tile16 };
+  kind kind_;
+ public:
+  __SIMT_DEVICE_FUNCTIONS_DECL__ thread_group(const thread_block&)
+      : kind_(kind::block) {}
+  template <typename ParentT, typename std::enable_if<
+      std::is_same<ParentT, thread_block>::value ||
+      std::is_same<ParentT, void>::value, int>::type = 0>
+  __SIMT_DEVICE_FUNCTIONS_DECL__ thread_group(const thread_block_tile<16, ParentT>&)
+      : kind_(kind::full_warp_tile16) {}
+  // The real CUDA erased group uses ULL; static block/tile methods use uint.
+  __SIMT_DEVICE_FUNCTIONS_DECL__ unsigned long long size() const {
+    return kind_ == kind::block ? thread_block::size() : 16u;
+  }
+  __SIMT_DEVICE_FUNCTIONS_DECL__ unsigned long long thread_rank() const {
+    return kind_ == kind::block ? thread_block::thread_rank()
+        : ascify_detail::tile_register_operations<16>::thread_rank();
+  }
+  __SIMT_DEVICE_FUNCTIONS_DECL__ void sync() const {
+    if (kind_ == kind::block) thread_block::sync();
+    else ascify_detail::full_warp_group_sync_v1();
+  }
+};
+
+__SIMT_DEVICE_FUNCTIONS_DECL__ inline void sync(const thread_group& group) {
   group.sync();
 }
 

@@ -1,0 +1,450 @@
+{
+  "schema": "ascify.fullwarp-group.checker-fixtures.v1",
+  "prepared_total": 61,
+  "expected_commits": 4,
+  "expected_refusals": 56,
+  "expected_legacy_unchanged": 1,
+  "cases": [
+    {
+      "name": "complete_warp_typed_and_erased",
+      "sha256": "fe47d853e0d6f8a75f33d8e97430749a19f301d3831c37199fb8e489aab4698a",
+      "expected_frontend_after_implementation": "commit",
+      "why": "Generic64-thread4tile16+block shared reduction; complete warp reaches every corresponding collective. Future device oracle out[0..3]==120,out[4]==2016.",
+      "file": "complete_warp_typed_and_erased.cu"
+    },
+    {
+      "name": "complete_warp_128",
+      "sha256": "e89ea63ab99f2314236b04b8c7820e675c854f72cbb30518e7bd7ab55861469d",
+      "expected_frontend_after_implementation": "commit",
+      "why": "No sample-name or64-only whitelist;8tiles16/block128 and preserved shared geometry. Future device oracle8tile results120,block8128.",
+      "file": "complete_warp_128.cu"
+    },
+    {
+      "name": "half_warp_call",
+      "sha256": "b87d153d84661c1236ab9853a99d5fc786ad7c84f230e558db2927f0430268f6",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "dxtc-like only16active call; cannot use full-warp protocol or promote to block barrier.",
+      "file": "half_warp_call.cu"
+    },
+    {
+      "name": "odd_lane_sync",
+      "sha256": "84a5ebee4d20e4e71ac3c6db4f2b1beba38659fc98d486c6474c92eb16e41637",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Not all physical warp lanes reach corresponding sync.",
+      "file": "odd_lane_sync.cu"
+    },
+    {
+      "name": "member_return",
+      "sha256": "684ff6a53be89512f8bef77b2861b3e0e25fe3bb8382b01523f3eab3edacae39",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Missing participant before later sync; guard is not source proof.",
+      "file": "member_return.cu"
+    },
+    {
+      "name": "lane_dependent_epoch",
+      "sha256": "e0e626d9e05bb84fac31ae737f57afdf5ee055590470be9641aea6bb96936e20",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Lane-dependent loop iterations/collective epoch.",
+      "file": "lane_dependent_epoch.cu"
+    },
+    {
+      "name": "partial_last_warp",
+      "sha256": "76231c1094996b768cc771f336b850dacc2e3d73411cabf602d36a3d1ac8831f",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Complete tile16 in last partial warp still violates this full-warp-only protocol.",
+      "file": "partial_last_warp.cu"
+    },
+    {
+      "name": "mutated_launch",
+      "sha256": "e52084b95d3ed310cf22db7a136439deb467cc8ca672c340a13a2ad33cfb892c",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Mutable initializer64 cannot authorize later48; all writes must be inventoried.",
+      "file": "mutated_launch.cu"
+    },
+    {
+      "name": "launch_address_escape",
+      "sha256": "ee5ba1d9e8b3b0ba53961b98cbd9af993bc9bcb5842dbccb87d179a52ed140f5",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Reject address escape of shape witness, even if nominal value64.",
+      "file": "launch_address_escape.cu"
+    },
+    {
+      "name": "group_reflection",
+      "sha256": "7837ed39cacb8d32015f3e6e020794c55494fe7800c10c6d6fefb53b7b8c5120",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "No layout/identity observation of own erased representation.",
+      "file": "group_reflection.cu"
+    },
+    {
+      "name": "group_pointer_escape",
+      "sha256": "3bed51e6d468b406fa8f6f41d4af6209ac8cf5e183d6f1a963262555eae09f97",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Only closed by-value group flow; no pointers/references/captures.",
+      "file": "group_pointer_escape.cu"
+    },
+    {
+      "name": "helper_address_escape",
+      "sha256": "ed0d033d79d2c36f3e5607c1754c11c3b258be87bbd7dd8a41f9016430216136",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Device-side function address escape is valid CUDA syntax to be validated with RDC; closure must reject address even if unused.",
+      "file": "helper_address_escape.cu"
+    },
+    {
+      "name": "tail_branch_returns",
+      "sha256": "5578c10a5c238d86f2c746d8c115425c7d3aa351e093fee860ffafc93a4da463",
+      "expected_frontend_after_implementation": "commit",
+      "why": "Lane-dependent tail returns with no following callee collective; caller continuation still needs future real reconvergence litmus.",
+      "file": "tail_branch_returns.cu"
+    },
+    {
+      "name": "continue_outer_sync",
+      "sha256": "79e2ff915956edf61ac201456c2bc07ef06458a39aff262c9c621902fac7b34b",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Continue can omit a later collective at the same lexical outer loop depth; whole construct is refused.",
+      "file": "continue_outer_sync.cu"
+    },
+    {
+      "name": "break_outer_sync",
+      "sha256": "2e4201700ceeebe80d164aee5329470ecbd06bbbed3a2e2e05f10107760519c7",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Break bypasses future collective/epochs; whole construct is refused.",
+      "file": "break_outer_sync.cu"
+    },
+    {
+      "name": "goto_outer_sync",
+      "sha256": "15d9293fa130bd92699a4dab866c9b76c84e991226b22bb3c1ca35b41492d2a7",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Goto is refused globally, not allowed because destination is outside lexical if.",
+      "file": "goto_outer_sync.cu"
+    },
+    {
+      "name": "short_circuit_collective",
+      "sha256": "7e66109cfc4d7eedb6f19dd1d341ce54257106fcfd4d6413980cfa57387a28bf",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Short-circuit RHS has varying participation even when no IfStmt encloses sync.",
+      "file": "short_circuit_collective.cu"
+    },
+    {
+      "name": "conditional_collective",
+      "sha256": "9c7cda614ea52e251a58e90b16da3648c9e09f8168bc3f3668d5106085bde989",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Conditional expression carries branch-specific collective; comma must not hide it.",
+      "file": "conditional_collective.cu"
+    },
+    {
+      "name": "scalar_reference_alias",
+      "sha256": "b0a3ba900944ac16e2840743c4d9b695cede8844083b42aa9c1f86c84b926e6e",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Reference alias writes a control witness under varying lanes; refusing local refs prevents stale-uniform proof.",
+      "file": "scalar_reference_alias.cu"
+    },
+    {
+      "name": "argument_counter_side_effect",
+      "sha256": "18ca2f8702bc2b984ff8dc9c8750b51e48cd98b6534dddf1c225636ae64af9eb",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Comma/side effect in an argument or RHS cannot mutate finite loop induction witness.",
+      "file": "argument_counter_side_effect.cu"
+    },
+    {
+      "name": "group_reassignment",
+      "sha256": "ec67e7af9efb25626f1f8eab0409d8a383db742c69ee2075805083c7885d36af",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Assigning a fresh group origin invalidates immutable by-value origin witness.",
+      "file": "group_reassignment.cu"
+    },
+    {
+      "name": "narrow_shape_witness",
+      "sha256": "9cd9974023c9dfc19f08ceba9213b5fe36682b7281c4ea6685e4b23535a1c311",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Int32-only shape-witness grammar rejects narrowing carriers; original validation remains pending.",
+      "file": "narrow_shape_witness.cu"
+    },
+    {
+      "name": "separate_sync_sites",
+      "sha256": "66d1d927918db94c62e4374be3f0ebf75ce2ea3ab746f82e5d906290b540f92c",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Same group reaches different static sync sites; both paths varying and no lexical shortcut.",
+      "file": "separate_sync_sites.cu"
+    },
+    {
+      "name": "second_caller_half",
+      "sha256": "02ddc240d93cf46f9e5efaa7a585311256635a53d6fd24abf52666a50e272881",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "A safe first caller cannot confer proof on another half-block caller of the same helper.",
+      "file": "second_caller_half.cu"
+    },
+    {
+      "name": "source_helper_overload",
+      "sha256": "f0abed5beb23a81e12bd0a5c3de9af807c503f9b444a7ebfe694135abb955678",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "User overloads can observe projected conversion rank; v1 rejects the entire overload family.",
+      "file": "source_helper_overload.cu"
+    },
+    {
+      "name": "cg_name_collision",
+      "sha256": "31754d627bfb7975a799778f8a01384e1e0971eb4abb05be99b7c68e67383c5a",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Three-argument helper is source-valid independently of CG factory arity, but name collision with admitted CG ADL surface is conservatively refused.",
+      "file": "cg_name_collision.cu"
+    },
+    {
+      "name": "member_macro",
+      "sha256": "cf37d80bcd6e656fe02144d036bf3303088b2a2bb8ef835dc6c28caffb155a10",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Actual member token is macro-derived even when receiver/call begin is literal.",
+      "file": "member_macro.cu"
+    },
+    {
+      "name": "shape_reference_alias",
+      "sha256": "ac31ded54dcbeb29a27ac2107d3a554762252a7752f868983e1003cf616981f1",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "All host launch-witness references are checked; by-ref writes cannot retain original64 permission.",
+      "file": "shape_reference_alias.cu"
+    },
+    {
+      "name": "legacy32_dynamic_shape",
+      "sha256": "19b8d2264329ec452b3941594c7cd23d42ba27e6860e90d8194b006a42d1237c",
+      "expected_frontend_after_implementation": "legacy_contract_unchanged",
+      "why": "No16/erased use: new source gate must be unused; old32 capability/runtime checks alone decide. No new static launch restriction applies.",
+      "file": "legacy32_dynamic_shape.cu"
+    },
+    {
+      "name": "external_syncthreads_and_varying",
+      "sha256": "a26b4e7850d5d9d2f601ccc71fca543c8ee77d6a829c3960eba74625aee2acb2",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: raw SDK collective cannot borrow nongroup noncollective permission; syntax validation pending.",
+      "file": "external_syncthreads_and_varying.cu"
+    },
+    {
+      "name": "external_syncthreads_or_varying",
+      "sha256": "568145785d1d443ae8422142751e5031f23908ff1a226aeae238202c819e9650",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: raw SDK collective cannot borrow nongroup noncollective permission; syntax validation pending.",
+      "file": "external_syncthreads_or_varying.cu"
+    },
+    {
+      "name": "external_syncthreads_count_varying",
+      "sha256": "fb021b7fb0a0f15aadacdec1f241e122522d3b3e121e312742ffde2377d20990",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: raw SDK collective cannot borrow nongroup noncollective permission; syntax validation pending.",
+      "file": "external_syncthreads_count_varying.cu"
+    },
+    {
+      "name": "external_syncwarp_varying",
+      "sha256": "194cd44f158032b1bf8addda3b2a322d2fa75472d26d5d14856b8c8bde756b70",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: raw SDK collective cannot borrow nongroup noncollective permission; syntax validation pending.",
+      "file": "external_syncwarp_varying.cu"
+    },
+    {
+      "name": "external_ballot_sync_varying",
+      "sha256": "2c28dec5b571b7268aa259512d5eaa1a93df5ca7f6a3d83b821fd30ead436fc8",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: raw SDK collective cannot borrow nongroup noncollective permission; syntax validation pending.",
+      "file": "external_ballot_sync_varying.cu"
+    },
+    {
+      "name": "external_all_sync_varying",
+      "sha256": "fced3b001d6476f94c3f0fcc2598318d7d7d20661f3d69bb15cc180062fe2e4b",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: raw SDK collective cannot borrow nongroup noncollective permission; syntax validation pending.",
+      "file": "external_all_sync_varying.cu"
+    },
+    {
+      "name": "external_any_sync_varying",
+      "sha256": "d5526e0e851b2a8be2c70ac91e4bd45ee68054a24de9b963e446d38983559e22",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: raw SDK collective cannot borrow nongroup noncollective permission; syntax validation pending.",
+      "file": "external_any_sync_varying.cu"
+    },
+    {
+      "name": "external_shfl_sync_varying",
+      "sha256": "7b628b8c98f6ebfcbecae4166a149cf506fae30c21c2d0202288fc9976c37396",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: raw SDK collective cannot borrow nongroup noncollective permission; syntax validation pending.",
+      "file": "external_shfl_sync_varying.cu"
+    },
+    {
+      "name": "external_shfl_up_sync_varying",
+      "sha256": "7929c1bee3f9dbb13ac3e8b709b41c7c67390f8f4701c873d9ced85fb431e456",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: raw SDK collective cannot borrow nongroup noncollective permission; syntax validation pending.",
+      "file": "external_shfl_up_sync_varying.cu"
+    },
+    {
+      "name": "external_shfl_down_sync_varying",
+      "sha256": "4e12c26b257c02241f43c4b67262d789c8cbf23b7ee96332cd845df90403a02d",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: raw SDK collective cannot borrow nongroup noncollective permission; syntax validation pending.",
+      "file": "external_shfl_down_sync_varying.cu"
+    },
+    {
+      "name": "external_shfl_xor_sync_varying",
+      "sha256": "6b4fc555c5afe8e90509a84d54de46daff6c1cd7ac8bb370d68ec66ef4222a39",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: raw SDK collective cannot borrow nongroup noncollective permission; syntax validation pending.",
+      "file": "external_shfl_xor_sync_varying.cu"
+    },
+    {
+      "name": "external_match_any_sync_varying",
+      "sha256": "be794ce18c734695120ddd75a733e4f7e3f866393d230e1d7e2674258188d152",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: raw SDK collective cannot borrow nongroup noncollective permission; syntax validation pending.",
+      "file": "external_match_any_sync_varying.cu"
+    },
+    {
+      "name": "external_syncwarp_uniform",
+      "sha256": "8ec95973d7ab573b01c2826d76e2f9ecae3b3a8f26ac96b0ae286dc493882ef6",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "New16/erased domain deliberately refuses raw external collectives even under uniform control; old32-only domain unchanged.",
+      "file": "external_syncwarp_uniform.cu"
+    },
+    {
+      "name": "external_reduce_add_sync",
+      "sha256": "71dc7f03a2259dac34da1c0b1848e677f511f43c4665f971201b46fd924faa4c",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: no blanket SDK reduce permission. Original syntax must be validated on supported sm80 probe, not claimed for9architecture75 baseline.",
+      "original_syntax_arch": "sm_80",
+      "file": "external_reduce_add_sync.cu",
+      "fixture_original_syntax_requirement": "sm80_required_not_executed"
+    },
+    {
+      "name": "trap_varying",
+      "sha256": "381c30d10dc0d65c05ec645e08f722b9316a56457598540dd2024e2fb50489ae",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: termination removes participants and cannot be treated as ordinary external call.",
+      "file": "trap_varying.cu"
+    },
+    {
+      "name": "trap_hidden_helper",
+      "sha256": "9f3e988f3b0e6dbdc7d10f3c5eb9c4e7ae0eaa9342524b532b88c17be545fce7",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: a closed source helper must not hide a terminating external call.",
+      "file": "trap_hidden_helper.cu"
+    },
+    {
+      "name": "noreturn_source_helper",
+      "sha256": "3a24962239ccc5c508a19eae80c7d6e65c91a278461be8a0452522ebc901523b",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F1: noreturn semantic attribute is refused before approving helper continuation.",
+      "file": "noreturn_source_helper.cu"
+    },
+    {
+      "name": "printf_integer_rank",
+      "sha256": "e4ea216010e1d0601a4d7d7bfe03fd702d32a6860f4f40ac2d6f998334403993",
+      "expected_frontend_after_implementation": "commit",
+      "why": "Bounded physically-owned builtin printf with literal integer-only format, discarded result and rank-varying control; actual SDK declaration check pending.",
+      "file": "printf_integer_rank.cu"
+    },
+    {
+      "name": "printf_used_result",
+      "sha256": "f581e49c211e6dd9dea96f8324795d8890969e0fa35cd5b786e1af023c21e9a7",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "printf count cannot become control witness; only discarded diagnostics are allowed.",
+      "file": "printf_used_result.cu"
+    },
+    {
+      "name": "printf_percent_n",
+      "sha256": "52c5bb53940058a842d6685fb966d2c0c7742099da4ca1bef0b35b9c749cba42",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Literal%n can write through arguments; not an approved harmless diagnostic.",
+      "file": "printf_percent_n.cu"
+    },
+    {
+      "name": "printf_shadow_namespace",
+      "sha256": "e331166842bb95b885a680896bb70d19a097139f2c9be164c731db8488b753f5",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "A printf spelling/namespace is not physical SDK/compiler/libc ownership.",
+      "file": "printf_shadow_namespace.cu"
+    },
+    {
+      "name": "loop_mutable_rhs_limit",
+      "sha256": "bf5bc1f5c918a0fcc8ff382b93f4a7dc1b07d3a025fcda3a5b84eab6859e1b6a",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F2: initial uniform RHS cannot authorize later varying loop termination; RHS now literal-only.",
+      "file": "loop_mutable_rhs_limit.cu"
+    },
+    {
+      "name": "loop_condition_side_effect",
+      "sha256": "e6e82b4c3655928e77d4daf45041c977c62daeb91f8ab2743cd12082363f9474",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F2: comma assignment in condition can reset counter indefinitely; literal RHS grammar refuses it.",
+      "file": "loop_condition_side_effect.cu"
+    },
+    {
+      "name": "loop_entry_gate_after_sync",
+      "sha256": "fd6f589797ee3e3ee2f408c167a3b4b436175f09411caab0c9404d6576f83bc7",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F2 epoch gate: changing an entry-uniform local after this iteration sync is refused before body approval.",
+      "file": "loop_entry_gate_after_sync.cu"
+    },
+    {
+      "name": "loop_entry_uniform_write",
+      "sha256": "10ce6fbc505272a109b72f3e88136995b7854c8dd62da330c4f38c81f47881a0",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Stronger conservative boundary: any loop-entry uniform local body write is refused, including uniform writes.",
+      "file": "loop_entry_uniform_write.cu"
+    },
+    {
+      "name": "global_not_uniform",
+      "sha256": "d5b2a72fd9f25a9020693c37dc335f9097c4b4cb622a6659f427fd4079d444ac",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "A global assignment cannot create an automatic per-thread uniform witness.",
+      "file": "global_not_uniform.cu"
+    },
+    {
+      "name": "shared_not_uniform",
+      "sha256": "a2787c3197f8268ea7624590fcee325bbcfc19f83d1b6f4444bdc6bab1a89c5d",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "CUDA shared attr excludes uniform-local state even if syntax looks function-local.",
+      "file": "shared_not_uniform.cu"
+    },
+    {
+      "name": "volatile_not_uniform",
+      "sha256": "f3be2ebdef0184fd37b65fb2b3eb3477f42220f76b81d9284e1f05b3e4567af0",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "Volatile storage does not become uniform after assignment.",
+      "file": "volatile_not_uniform.cu"
+    },
+    {
+      "name": "launch_macro_direct",
+      "sha256": "375d703d8f57fcd36dfdc3f7b2408d0e0e641fd017fff5be241752c1c64c5451",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F3: CUDA32/target16 macro cannot be accepted as a physical shape literal.",
+      "file": "launch_macro_direct.cu"
+    },
+    {
+      "name": "launch_macro_initializer",
+      "sha256": "93c2cfede37014857f3e0f40adbcb0dacfaa711dc3787f041010b85a8d18a855",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F3: recursive local initializer must be physical/macro-free, not merely readonly VarDecl.",
+      "file": "launch_macro_initializer.cu"
+    },
+    {
+      "name": "launch_physical_alternative",
+      "sha256": "5ce46a2482521474586ee8761537e27a6b5c4767b08da51424afd0a4c57321b1",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F3: target conditional can select a different physical declaration; caller directive grammar refuses it.",
+      "file": "launch_physical_alternative.cu"
+    },
+    {
+      "name": "launch_empty_macro",
+      "sha256": "9eb1c98d543983840c8d30d5701e30a73c9ad657664f96393c6fd0c9ce322895",
+      "expected_frontend_after_implementation": "refuse",
+      "why": "F3: empty expansion may disappear from CUDA AST; raw source macro and all caller-header closure must refuse it.",
+      "file": "launch_empty_macro.cu",
+      "extra_inputs": [
+        {
+          "file": "empty_target_macro.h",
+          "sha256": "2f1a6d0cd250d5daf9167e745906b259b4efbca4c3b265ddd5e2a479a8790e00"
+        }
+      ]
+    }
+  ],
+  "extra_files": [
+    {
+      "file": "empty_target_macro.h",
+      "sha256": "2f1a6d0cd250d5daf9167e745906b259b4efbca4c3b265ddd5e2a479a8790e00"
+    }
+  ]
+}

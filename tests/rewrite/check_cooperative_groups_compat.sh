@@ -108,6 +108,20 @@ if command -v "$cxx" >/dev/null 2>&1; then
     -I"$repo_root/include" \
     "$positive_test"
 
+  "$cxx" -std=c++17 -fsyntax-only \
+    -I"$legacy_stubs" -I"$repo_root/include" \
+    "$repo_root/tests/rewrite/cooperative_groups_tile16_header_syntax.cpp"
+  for reject_case in 1 2 3; do
+    if "$cxx" -std=c++17 -fsyntax-only \
+        -I"$legacy_stubs" -I"$repo_root/include" \
+        -DASCIFY_TILE16_REJECT_CASE="$reject_case" \
+        "$repo_root/tests/rewrite/cooperative_groups_tile16_reject.cpp" \
+        >"$test_tmp/tile16-$reject_case.stdout" 2>"$test_tmp/tile16-$reject_case.stderr"; then
+      echo "tile16 register operation $reject_case compiled unexpectedly" >&2
+      exit 1
+    fi
+  done
+
   "$cxx" -std=c++17 -O2 \
     -I"$legacy_stubs" -I"$repo_root/include" \
     "$repo_root/tests/rewrite/cooperative_groups_uint4_test.cpp" \

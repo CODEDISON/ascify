@@ -59,6 +59,16 @@ template <unsigned int Size> class tile_register_operations {
       std::is_same<T, uint4>::value, T>::type
   shfl_xor(T value, unsigned int lane_mask) const;
 };
+// Rank/size/sync only. A mandatory source proof establishes complete-warp
+// participation at every call/epoch before this projection can publish.
+template <> class tile_register_operations<16> {
+ protected:
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ tile_register_operations();
+ public:
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned int thread_rank();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static constexpr unsigned int size() { return 16; }
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync() const;
+};
 }  // namespace ascify_detail
 
 template <unsigned int Size, typename ParentT>
@@ -88,6 +98,24 @@ tiled_partition(const thread_block& parent);
 template <unsigned int Size, typename ParentT>
 ASCIFY_FRONTEND_COMPAT_DEVICE_ inline void
 sync(const thread_block_tile<Size, ParentT>& group) {
+  group.sync();
+}
+
+// Erased values may originate only from an authenticated block or static16
+// tile. The mandatory whole-TU proof rejects representation observations,
+// escapes, source overloads and unproved control/call/launch paths.
+class thread_group final {
+ public:
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ thread_group(const thread_block&);
+  template <typename ParentT, typename std::enable_if<
+      std::is_same<ParentT, thread_block>::value ||
+      std::is_same<ParentT, void>::value, int>::type = 0>
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ thread_group(const thread_block_tile<16, ParentT>&);
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned long long size() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned long long thread_rank() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync() const;
+};
+ASCIFY_FRONTEND_COMPAT_DEVICE_ inline void sync(const thread_group& group) {
   group.sync();
 }
 
