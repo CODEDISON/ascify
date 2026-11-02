@@ -203,7 +203,12 @@ def main():
         summary['error'] = str(error)
         raise
     finally:
+        after = {name: sha(Path(name)) for name in identities}
+        summary['identities_after'] = after
+        summary['immutable_inputs_unchanged'] = after == identities
+        summary['passed'] = summary['passed'] and after == identities
         save()
+        assert after == identities, 'tool/source/profile/native dependency identity changed'
 
 
 if __name__ == '__main__':
