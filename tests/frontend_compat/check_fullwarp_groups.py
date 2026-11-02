@@ -88,7 +88,8 @@ def main():
             # of presenting a parser/projection failure as a source-proof test.
             arch = case.get('original_syntax_arch', 'sm_75')
             assert arch in ('sm_75', 'sm_80')
-            flags = ['-x', 'cuda', '-std=c++17', '-fgpu-rdc', '-I' + str(folder)]
+            flags = ['-x', 'cuda', '-std=c++17', '-fgpu-rdc', '-I' + str(folder),
+                     '-I' + str(args.cuda_path / 'include/cccl')]
             original = run(folder, 'original_syntax', [args.clang, '-nocudalib',
                 '--cuda-gpu-arch=' + arch, '--cuda-path=' + str(args.cuda_path),
                 '-resource-dir=' + str(args.resource_dir), '-Wno-unknown-cuda-version',
