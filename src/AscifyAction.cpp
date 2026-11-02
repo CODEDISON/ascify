@@ -5058,7 +5058,7 @@ bool AscifyAction::RewriteToken(clang::Lexer &, clang::Token &tok) {
     if (!target.empty()) {
       const auto mapped = CUDA_RENAMES_MAP().find(name);
       if (mapped != CUDA_RENAMES_MAP().end())
-        Statistics::current().incrementCounter(mapped->second, name);
+        Statistics::current().incrementCounter(mapped->second, name.str());
       const auto end = clang::Lexer::getLocForEndOfToken(tok.getLocation(), 0, boundSource,
                                                          getCompilerInstance().getLangOpts());
       const ct::Replacement edit(boundSource, tok.getLocation(), tok.getLength(), target);

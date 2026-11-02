@@ -24,6 +24,7 @@ int64_t ascify_test_warp_size = 32;
 aclError ascify_test_ub_status = ACL_SUCCESS;
 int64_t ascify_test_ub_bytes = 65536;
 int64_t ascify_test_grid_blocks = 4096;
+const char* ascify_test_soc_name = "Ascend950DT";
 int main() {
   int token_storage = 0;
   void *token = &token_storage; // Only a CPU fixture token, no frontend proof.
