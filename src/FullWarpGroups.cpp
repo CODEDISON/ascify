@@ -345,6 +345,19 @@ class Proof {
     return r == Role::Erased || (r == Role::Block && o == Origin::Block) ||
         (r == Role::Tile16 && o == Origin::Tile16);
   }
+  bool static16Parent(QualType type, bool erased) const {
+    const auto* record = type.isNull() ? nullptr : type->getAsCXXRecordDecl();
+    const auto* tile = dyn_cast_or_null<ClassTemplateSpecializationDecl>(record);
+    if (!tile || !trustedRecord(type) ||
+        tile->getSpecializedTemplate()->getQualifiedNameAsString() !=
+            "cooperative_groups::thread_block_tile") return false;
+    const auto& args = tile->getTemplateArgs();
+    if (args.size() != 2 || args[0].getKind() != TemplateArgument::Integral ||
+        args[0].getAsIntegral() != 16 || args[1].getKind() != TemplateArgument::Type)
+      return false;
+    const auto parent = args[1].getAsType();
+    return erased ? parent->isVoidType() : role(parent) == Role::Block && trustedRecord(parent);
+  }
   std::optional<Origin> origin(const Expr* input, Frame& f) {
     const Expr* e = plain(input);
     if (!e || !literal(e->getExprLoc())) return {};
@@ -361,6 +374,27 @@ class Proof {
       }
       const auto value = origin(c->getArg(0), f);
       if (value && fits(role(c->getType()), *value)) return value;
+    }
+    if (const auto* c = dyn_cast<CXXMemberCallExpr>(e)) {
+      const auto* method = dyn_cast_or_null<CXXConversionDecl>(c->getMethodDecl());
+      const auto* member = dyn_cast<MemberExpr>(plain(c->getCallee()));
+      if (!method || !member || member->isArrow() || member->getMemberDecl() != method ||
+          !trustedFunction(method) || method->isStatic() || method->isVirtual() ||
+          !method->isConst() || method->isVolatile() || method->getRefQualifier() != RQ_None ||
+          method->isVariadic() || method->getNumParams() != 0 || c->getNumArgs() != 0 ||
+          method->getPrimaryTemplate() || method->getDescribedFunctionTemplate()) return {};
+      const auto provider = groupRecordType(context, method->getParent(), 0);
+      const auto* receiver = c->getImplicitObjectArgument();
+      if (!receiver || receiver->getType().isVolatileQualified() ||
+          !static16Parent(provider, false) || !static16Parent(c->getType(), true) ||
+          !context.hasSameUnqualifiedType(receiver->getType(), provider) ||
+          !context.hasSameType(method->getConversionType(), c->getType())) return {};
+      // CUDA's typed16 -> void-parent16 value conversion preserves an already
+      // proved tile origin; neither the return type nor the operator spelling
+      // creates one. The frozen target implements the same value copy.
+      const auto value = origin(receiver, f);
+      if (value && *value == Origin::Tile16) { approve(c); return value; }
+      return {};
     }
     if (const auto* c = dyn_cast<CallExpr>(e)) {
       const auto* target = c->getDirectCallee();
