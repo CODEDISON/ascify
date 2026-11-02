@@ -12,8 +12,9 @@ POTENTIAL = 'int main(){int g,b;return cudaOccupancyMaxPotentialBlockSize(&g,&b,
 HELPER = 'static int report(void* kernel,int block){int n;return cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n,kernel,block,0);}\n'
 
 def fixtures():
-    def row(name, body, accepted, markers=(), auxiliary=None):
-        return dict(name=name, source=PREFIX+body, accepted=accepted, markers=list(markers), auxiliary=auxiliary or {})
+    def row(name, body, accepted, markers=(), auxiliary=None, frontend_compat=False):
+        return dict(name=name, source=PREFIX+body, accepted=accepted, markers=list(markers),
+                    auxiliary=auxiliary or {}, frontend_compat=frontend_compat)
     attributes='int attributes(){cudaFuncAttributes a;auto status=cudaFuncGetAttributes(&a,k);return a.maxThreadsPerBlock+int(status); }\n'
     yield row('default_explicit_policy',KERNEL+attributes+POTENTIAL,True,
               ['ASCIFY_GLOBAL __launch_bounds__(1024)', 'cudaOccupancyMaxPotentialBlockSizeMaxThreads<1024>',
@@ -69,6 +70,14 @@ def fixtures():
               'int main(){int n;cudaError_t (*f)(int*,const void*,int,size_t)=&cudaOccupancyMaxActiveBlocksPerMultiprocessor;return f(&n,(void*)k,32,0);}\n',False)
     yield row('forged_kernel_pointer',KERNEL+
               'int main(){int g,b;return cudaOccupancyMaxPotentialBlockSize(&g,&b,(void*)1,0,0);}\n',False)
+    yield row('helper_verified_frontend_profile',KERNEL+HELPER+'int main(){return report((void*)k,32);}\n',True,
+              ['cudaOccupancyMaxActiveBlocksPerMultiprocessorMaxThreads<1024>'],frontend_compat=True)
+    # Reuse the exact existing profile bytes as a caller copy. A matching name
+    # and byte payload cannot acquire the product provider's physical identity.
+    host_math=(Path(__file__).resolve().parents[2]/'frontend_compat/ascify-admitted-v1/host_math.h').read_text()
+    yield row('helper_caller_host_math_copy',KERNEL+HELPER+
+              '#include "host_math.h"\nint main(){return report((void*)k,32);}\n',False,
+              auxiliary={'host_math.h':host_math},frontend_compat=True)
 
 def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
 def main():
@@ -76,7 +85,7 @@ def main():
     for n in ['binary','clang','cuda-path','resource-dir','evidence-dir']:
         p.add_argument('--'+n,type=Path,required=True)
     a=p.parse_args();a.evidence_dir.mkdir(parents=True,exist_ok=False)
-    cases=list(fixtures());assert len(cases)==25 and sum(c['accepted'] for c in cases)==8
+    cases=list(fixtures());assert len(cases)==27 and sum(c['accepted'] for c in cases)==9
     tools={str(x.resolve()):sha(x) for x in [a.binary,a.clang,Path(__file__)]}
     result=dict(passed=False,cases=[],CCEC_invocations=0,device_executed=False,original_sample_successes=0)
     def save():(a.evidence_dir/'summary.json').write_text(json.dumps(result,indent=2)+'\n')
@@ -102,7 +111,8 @@ def main():
                 if mode=='existing':output.write_bytes(sentinel)
                 r=run(folder,mode,[a.binary,source,'--target-policy=dav-c310-vec','--target-recipe=none',
                       '--simt-math=fast','--default-preprocessor','--cuda-path='+str(a.cuda_path),
-                      '--clang-resource-directory='+str(a.resource_dir),'--migration-receipt='+str(receipt),'-o',output,'--',*common])
+                      '--clang-resource-directory='+str(a.resource_dir),'--migration-receipt='+str(receipt),'-o',output,
+                      *(['--frontend-compat=ascify-admitted-v1'] if case['frontend_compat'] else []),'--',*common])
                 if case['accepted']:
                     assert r.returncode==0,(case['name'],r.stderr.decode())
                     text=output.read_text();assert all(s in text for s in case['markers']),(case['name'],text)
@@ -112,7 +122,7 @@ def main():
                     assert 'occupancy kernel-bound boundary' in r.stderr.decode(),(case['name'],r.stderr.decode())
             assert sha(source)==row['input_sha256'] and all(sha(Path(p))==v for p,v in auxiliary.items());row['passed']=True;save()
         assert all(sha(Path(p))==v for p,v in tools.items())
-        result.update(passed=True,case_count=25,positive=8,negative=17);save()
+        result.update(passed=True,case_count=27,positive=9,negative=18);save()
     except Exception as error:
         result['error']=str(error);save();raise
 if __name__=='__main__':main()

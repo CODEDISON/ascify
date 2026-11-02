@@ -15161,6 +15161,13 @@ void AscifyAction::ExecuteAction() {
               const auto path = SM.getFilename(start);
               if (!entry || SM.isFileOverridden(entry) ||
                   !physicalSourceFileMatches(path, *entry, SM)) return false;
+              // These three exact parser providers already have an entry-time
+              // CUDA-control proof. Recheck their current physical bytes and
+              // forced-include/CG role; the enclosing directory grants nothing.
+              if ((verifiedFrontendHostMathEntryFileIds.count(file.getHashValue()) &&
+                   verifiedForcedFrontendHostMathFile(file, getCompilerInstance(), frontendCompatibility)) ||
+                  (verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
+                   verifiedFrontendCgFile(file, getCompilerInstance(), frontendCompatibility))) continue;
               if (isOwnedCudaCompilerInput(file, getCompilerInstance(), true) ||
                   cudaRuntimeApiSdkFileIds.count(file.getHashValue()) ||
                   frozenNvidiaSampleHelperFileRole(SM, start) != 0 ||
