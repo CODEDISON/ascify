@@ -156,6 +156,7 @@ private:
   bool sealOriginalCgProviders();
   std::set<unsigned> macroAlteredFrontendCgFileIds;
   bool frontendCgControlModified = false;
+  clang::SourceLocation fullWarpCompilerIncludeFailure;
   std::set<clang::FileID> enteredSourceFileIds;
   std::map<std::string, clang::SourceLocation> Ifndefs;
   std::vector<clang::SourceRange> SkippedSourceRanges;

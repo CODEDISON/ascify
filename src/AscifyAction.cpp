@@ -1829,6 +1829,79 @@ static bool isOwnedCudaCompilerInput(clang::FileID file,
   return false;
 }
 
+// This additional role is local to the full-warp source proof. Native C/C++
+// headers can enter private compiler resources outside the forced CUDA wrapper.
+// Include-search settings, copied resources and system_header pragmas cannot
+// establish this role: require the actual product inode and parsed bytes.
+static bool physicalOwnedClangInput(clang::FileID file,
+                                    clang::CompilerInstance &compiler) {
+  auto &source = compiler.getSourceManager();
+  if (file.isInvalid()) return false;
+  const auto owned = ownedClangResourceDirectory();
+  const auto path = source.getFilename(source.getLocForStartOfFile(file));
+  const auto *entry = source.getFileEntryForID(file);
+  llvm::SmallString<256> root, selected, physical;
+  if (owned.empty() || entry == nullptr ||
+      llvm::sys::fs::real_path(owned, root) ||
+      llvm::sys::fs::real_path(compiler.getHeaderSearchOpts().ResourceDir, selected) ||
+      root != selected || !pathIsWithinPhysicalDirectory(path, root) ||
+      llvm::sys::fs::real_path(path, physical)) return false;
+  llvm::SmallString<256> reference(root);
+  llvm::sys::path::append(reference, llvm::StringRef(physical).drop_front(root.size() + 1));
+  if (!physicalFileIdentityMatches(reference, *entry) ||
+      !physicalSourceFileMatches(path, *entry, source)) return false;
+  bool invalid = false;
+  const auto parsed = source.getBufferData(file, &invalid);
+  const auto bytes = llvm::MemoryBuffer::getFile(reference);
+  return !invalid && bytes && parsed == (*bytes)->getBuffer() &&
+      contextualInputSha256(parsed) == contextualInputSha256((*bytes)->getBuffer());
+}
+
+static bool fullWarpCommandMacroMention(clang::FileID file,
+                                        clang::CompilerInstance &compiler) {
+  std::set<std::string> names;
+  for (const auto &option : compiler.getPreprocessorOpts().Macros) {
+    const auto name = llvm::StringRef(option.first).split('=').first.split('(').first;
+    if (name.empty() || name.contains('\\') || name.contains('\n') || name.contains('\r')) return true;
+    names.insert(name.str());
+  }
+  auto &source = compiler.getSourceManager();
+  bool invalid = false;
+  const auto bytes = source.getBufferData(file, &invalid);
+  if (invalid) return true;
+  clang::Lexer lexer(source.getLocForStartOfFile(file), compiler.getLangOpts(),
+                     bytes.begin(), bytes.begin(), bytes.end());
+  for (;;) {
+    clang::Token token; lexer.LexFromRawLexer(token);
+    if (token.is(clang::tok::eof)) return false;
+    if (token.isAnyIdentifier() && names.count(clang::Lexer::getSpelling(
+            token, source, compiler.getLangOpts()))) return true;
+  }
+}
+
+static bool fullWarpNativeCompilerInput(clang::FileID file,
+    clang::CompilerInstance &compiler, const std::set<unsigned> &initialSystemFiles) {
+  auto &source = compiler.getSourceManager();
+  if (!physicalOwnedClangInput(file, compiler)) return false;
+  std::set<unsigned> visited;
+  while (file.isValid() && visited.insert(file.getHashValue()).second) {
+    if (fullWarpCommandMacroMention(file, compiler)) return false;
+    if (!physicalOwnedClangInput(file, compiler)) {
+      const auto at = source.getLocForStartOfFile(file);
+      const auto path = source.getFilename(at);
+      const auto *entry = source.getFileEntryForID(file);
+      return entry && initialSystemFiles.count(file.getHashValue()) &&
+          source.isInSystemHeader(at) && physicalSourceFileMatches(path, *entry, source) &&
+          (pathIsWithinPhysicalDirectory(path, "/usr/include") ||
+           pathIsWithinPhysicalDirectory(path, "/usr/lib/gcc"));
+    }
+    const auto include = source.getIncludeLoc(file);
+    if (!include.isFileID() || source.isWrittenInMainFile(include)) return false;
+    file = source.getFileID(include);
+  }
+  return false;
+}
+
 // This establishes a physical parent-system provider, not general ownership
 // of system declarations. The existing context transaction still proves the
 // original include position, complete token stream, macros and file bytes.
@@ -6131,6 +6204,50 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
   }
   outs() << "File included: " << file_name << "\n";
   auto &SM = getCompilerInstance().getSourceManager();
+  // Preserve every real include lookup, including guarded/skipped children.
+  // An input with a resource spelling cannot substitute a caller-owned file
+  // and disappear from the later FileID inventory merely by being empty.
+  if (includeToken.getIdentifierInfo() &&
+      includeToken.getIdentifierInfo()->getName() == "include") {
+    const auto owned = ownedClangResourceDirectory();
+    const auto parent = SM.getFileID(SM.getExpansionLoc(hash_loc));
+    llvm::SmallString<256> expected;
+    if (!is_angled && physicalOwnedClangInput(parent, getCompilerInstance())) {
+      expected = llvm::sys::path::parent_path(SM.getFilename(SM.getLocForStartOfFile(parent)));
+      llvm::sys::path::append(expected, file_name);
+    }
+    if (expected.empty() || !llvm::sys::fs::exists(expected)) {
+      expected = owned;
+      llvm::sys::path::append(expected, "include", file_name);
+    }
+    if (!owned.empty() && llvm::sys::fs::exists(expected) &&
+        pathIsWithinPhysicalDirectory(expected, owned)) {
+      llvm::sys::fs::UniqueID wanted, actual;
+      llvm::SmallString<256> wantedPath, actualPath;
+      bool invalid = false;
+      const auto literal = clang::Lexer::getSourceText(filename_range, SM,
+          getCompilerInstance().getLangOpts(), &invalid);
+      const auto at = SM.getLocForStartOfFile(parent);
+      const auto *entry = SM.getFileEntryForID(parent);
+      const auto path = SM.getFilename(at);
+      const bool nativeParent = entry && trustedSystemFileIds.count(parent.getHashValue()) &&
+          SM.isInSystemHeader(at) && physicalSourceFileMatches(path, *entry, SM) &&
+          (pathIsWithinPhysicalDirectory(path, "/usr/include") ||
+           pathIsWithinPhysicalDirectory(path, "/usr/lib/gcc"));
+      const bool forcedWrapper = parent == getCompilerInstance().getPreprocessor().getPredefinesFileID() &&
+          llvm::sys::path::filename(expected) == "__clang_cuda_runtime_wrapper.h";
+      const bool ownedParent = forcedWrapper || physicalOwnedClangInput(parent, getCompilerInstance()) ||
+          cudaRuntimeApiSdkFileIds.count(parent.getHashValue()) || nativeParent;
+      if (!ownedParent || module || !hash_loc.isFileID() || invalid ||
+          !filename_range.getBegin().isFileID() || !filename_range.getEnd().isFileID() ||
+          literal != (is_angled ? "<" + file_name.str() + ">" : "\"" + file_name.str() + "\"") ||
+          llvm::sys::fs::getUniqueID(expected, wanted) ||
+          llvm::sys::fs::getUniqueID(resolved_file_name, actual) || wanted != actual ||
+          llvm::sys::fs::real_path(expected, wantedPath) ||
+          llvm::sys::fs::real_path(resolved_file_name, actualPath) || wantedPath != actualPath)
+        fullWarpCompilerIncludeFailure = hash_loc;
+    }
+  }
   if (localHeaderContext != nullptr && localHeaderContext->inputEvidence != nullptr) {
     auto &evidence = *localHeaderContext->inputEvidence;
     const auto parent = contextualRecordPathBinding(evidence, SM.getFilename(SM.getExpansionLoc(hash_loc)));
@@ -14658,6 +14775,7 @@ void AscifyAction::ExecuteAction() {
             if (file.isInvalid()) return false;
             if (cudaRuntimeApiSdkFileIds.count(file.getHashValue()) ||
                 isOwnedCudaCompilerInput(file,getCompilerInstance()) ||
+                fullWarpNativeCompilerInput(file,getCompilerInstance(),trustedSystemFileIds) ||
                 (verifiedFrontendCgEntryFileIds.count(file.getHashValue()) && nttpCgFile(SM.getLocForStartOfFile(file))) ||
                 (!frontendHostMathGuardModified && !frontendCgControlModified && !cudaAttributeControlModified &&
                  verifiedFrontendHostMathEntryFileIds.count(file.getHashValue()) &&
@@ -14679,6 +14797,18 @@ void AscifyAction::ExecuteAction() {
     return;
   }
   if (fullWarpGroups.used()) {
+    for (const auto file : enteredSourceFileIds)
+      if (physicalOwnedClangInput(file,getCompilerInstance()) &&
+          fullWarpCommandMacroMention(file,getCompilerInstance()))
+        fullWarpCompilerIncludeFailure = SM.getLocForStartOfFile(file);
+    if (fullWarpCompilerIncludeFailure.isValid()) {
+      const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error,
+          "full-warp group boundary: private compiler include lookup or macro controls are unproved");
+      getCompilerInstance().getDiagnostics().Report(fullWarpCompilerIncludeFailure,diagnostic);
+      cudaRuntimeApiBoundaryFailed = true;
+      return;
+    }
     needsCudaCompatHeader = true;
     llvm::errs() << "Ascify full-warp groups v1: kernels=" << fullWarpGroups.kernels
                  << ", helpers=" << fullWarpGroups.helpers
