@@ -37,6 +37,7 @@ def fixtures():
     yield row('argument_once',KERNEL+
               'int main(){int g,b,limit=128;return cudaOccupancyMaxPotentialBlockSize(&g,&b,(void*)k,0,limit++);}\n',True,
               ['MaxPotentialBlockSizeMaxThreads<1024>(&g,&b,(void*)k,0,limit++)'])
+    yield row('macro_leading_kernel_signature','#define PREFIX\nPREFIX\n'+KERNEL+POTENTIAL,False)
     yield row('undefined_kernel','__global__ void k(int*);\n'+POTENTIAL,False)
     yield row('macro_bound','#define B 512\n'+KERNEL.replace('__global__','__global__ __launch_bounds__(B)')+POTENTIAL,False)
     yield row('conditional_definition','#if 1\n'+KERNEL+'#endif\n'+POTENTIAL,False)
@@ -75,7 +76,7 @@ def main():
     for n in ['binary','clang','cuda-path','resource-dir','evidence-dir']:
         p.add_argument('--'+n,type=Path,required=True)
     a=p.parse_args();a.evidence_dir.mkdir(parents=True,exist_ok=False)
-    cases=list(fixtures());assert len(cases)==24 and sum(c['accepted'] for c in cases)==8
+    cases=list(fixtures());assert len(cases)==25 and sum(c['accepted'] for c in cases)==8
     tools={str(x.resolve()):sha(x) for x in [a.binary,a.clang,Path(__file__)]}
     result=dict(passed=False,cases=[],CCEC_invocations=0,device_executed=False,original_sample_successes=0)
     def save():(a.evidence_dir/'summary.json').write_text(json.dumps(result,indent=2)+'\n')
@@ -111,7 +112,7 @@ def main():
                     assert 'occupancy kernel-bound boundary' in r.stderr.decode(),(case['name'],r.stderr.decode())
             assert sha(source)==row['input_sha256'] and all(sha(Path(p))==v for p,v in auxiliary.items());row['passed']=True;save()
         assert all(sha(Path(p))==v for p,v in tools.items())
-        result.update(passed=True,case_count=24,positive=8,negative=16);save()
+        result.update(passed=True,case_count=25,positive=8,negative=17);save()
     except Exception as error:
         result['error']=str(error);save();raise
 if __name__=='__main__':main()

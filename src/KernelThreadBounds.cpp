@@ -29,12 +29,36 @@ struct Tokens {
   const KernelBoundOwned &owned;
   const KernelBoundQualifier &qualifier;
   const KernelBoundMacroFree &macroFree;
+  // Preserve the old attribute proof's boundary=2 rule. Empty-expanding
+  // source tokens before the AST begin are still part of its declaration.
+  bool declarationBoundary(SourceLocation begin) const {
+    if (!begin.isFileID()) return false;
+    bool invalid = false;
+    const auto bytes = source.getBufferData(source.getFileID(begin), &invalid);
+    if (invalid) return false;
+    Lexer lexer(source.getLocForStartOfFile(source.getFileID(begin)), context.getLangOpts(),
+                bytes.begin(), bytes.begin(), bytes.end());
+    const unsigned first = source.getFileOffset(begin);
+    bool directiveLine = false, hasPrevious = false;
+    tok::TokenKind previous = tok::unknown;
+    Token token;
+    while (true) {
+      lexer.LexFromRawLexer(token);
+      if (token.is(tok::eof)) return false;
+      if (source.getFileOffset(token.getLocation()) >= first)
+        return !hasPrevious || previous == tok::semi || previous == tok::r_brace;
+      if (token.isAtStartOfLine()) directiveLine = false;
+      if (token.is(tok::hash) && token.isAtStartOfLine()) directiveLine = true;
+      if (!directiveLine) { previous = token.getKind(); hasPrevious = true; }
+    }
+  }
   bool scan(SourceRange range, bool signature,
             std::vector<Token> *saved = nullptr) const {
     const auto begin = source.getExpansionLoc(range.getBegin());
     const auto last = source.getExpansionLoc(range.getEnd());
     if (!begin.isFileID() || !last.isFileID() || !owned(begin) || !owned(last) ||
         source.getFileID(begin) != source.getFileID(last)) return false;
+    if (signature && !declarationBoundary(begin)) return false;
     const auto end = Lexer::getLocForEndOfToken(last, 0, source, context.getLangOpts());
     if (!end.isFileID()) return false;
     auto cursor = begin;
