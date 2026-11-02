@@ -399,7 +399,10 @@ run_check "complete-warp static16 and erased-group source/publication boundaries
   "$python" -B "$repo_root/tests/frontend_compat/check_fullwarp_groups.py" \
     --binary "$ASCIFY_BINARY" --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
-    --clang "${CLANG:-clang++}" --evidence-dir "$work_dir/fullwarp_groups"
+    --clang "${CLANG:-clang++}" --evidence-dir "$work_dir/fullwarp_groups" \
+    --nvcc-sdk "${ASCIFY_NVCC_SDK:?real NVCC SDK required for original group fixtures}" \
+    --nvcc-frozen-manifest "${ASCIFY_NVCC_FROZEN_MANIFEST:?frozen NVCC SDK manifest required}" \
+    --native-host-compiler "${ASCIFY_NATIVE_HOST_COMPILER:?actual NVCC host compiler required}"
 run_check "uniform scratch empty namespace import and reactivation boundaries" \
   "$python" -B "$repo_root/tests/frontend_compat/check_uniform_namespace_context.py" \
     --binary "$ASCIFY_BINARY" \

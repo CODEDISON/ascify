@@ -8,6 +8,9 @@ execute a kernel, or establish a memory-visibility/device result.
 import argparse
 import hashlib
 import json
+import os
+import shlex
+import struct
 from pathlib import Path
 import re
 import shutil
@@ -22,9 +25,28 @@ def main():
     if not __debug__:
         raise RuntimeError('optimized Python refused')
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ['binary', 'clang', 'cuda-path', 'resource-dir', 'evidence-dir']:
+    for name in ['binary', 'clang', 'cuda-path', 'resource-dir', 'evidence-dir',
+                 'nvcc-sdk', 'nvcc-frozen-manifest', 'native-host-compiler']:
         parser.add_argument('--' + name, type=Path, required=True)
     args = parser.parse_args()
+    nvcc = args.nvcc_sdk / 'bin/nvcc'
+    native_env = os.environ.copy()
+    for name in ['LD_PRELOAD', 'LD_AUDIT', 'CPATH', 'CPLUS_INCLUDE_PATH', 'C_INCLUDE_PATH',
+                 'OBJC_INCLUDE_PATH', 'LIBRARY_PATH', 'LD_LIBRARY_PATH', 'NVCC_PREPEND_FLAGS',
+                 'NVCC_APPEND_FLAGS']:
+        native_env.pop(name, None)
+    native_env['PATH'] = str(args.nvcc_sdk / 'bin') + ':/usr/bin:/bin'
+    frozen = json.loads(args.nvcc_frozen_manifest.read_text())
+    native_inputs = {str(args.nvcc_frozen_manifest.resolve()): sha(args.nvcc_frozen_manifest),
+                     str(args.native_host_compiler.resolve()): sha(args.native_host_compiler)}
+    for item in frozen:
+        path = args.nvcc_sdk / item['path']
+        if item['type'] == 'file':
+            assert path.is_file() and path.stat().st_size == item['size'] and sha(path) == item['sha256']
+            native_inputs[str(path)] = item['sha256']
+        else:
+            assert item['type'] == 'symlink' and path.is_symlink() and str(path.readlink()) == item['target']
+            if path.is_file(): native_inputs[str(path)] = sha(path)
     root = Path(__file__).resolve().parents[2]
     fixtures = Path(__file__).resolve().parent / 'fullwarp_groups'
     manifest = fixtures / 'cases.json'
@@ -45,6 +67,7 @@ def main():
         root / 'frontend_compat/ascify-admitted-v1/profile.manifest',
         root / 'include/ascify/cooperative_groups_compat.hpp',
         root / 'src/AscifyCudaCompatIdentifiers.inc']}
+    identities.update(native_inputs)
     for entry in cases + spec['extra_files']:
         path = fixtures / entry['file']
         assert path.name == entry['file'] and not path.is_symlink()
@@ -52,19 +75,20 @@ def main():
         identities[str(path.resolve())] = entry['sha256']
     args.evidence_dir.mkdir(parents=True, exist_ok=False)
     summary = dict(schema='ascify.fullwarp-group.checker-results.v1', passed=False,
-                   source_validation_kind='clang_cuda_both_phases_original_source_no_profile',
+                   source_validation_kind='nvidia_nvcc_native_object_single_arch_rdc',
                    total=61, expected_commits=4, expected_refusals=56,
                    expected_legacy_unchanged=1, cases=[], identities_before=identities,
-                   original_syntax_invocations=0, converter_invocations=0,
+                   original_syntax_invocations=0, NVCC_dependency_invocations=0, NVCC_object_invocations=0,
+                   converter_invocations=0,
                    CCEC_invocations=0, device_executed=False, original_sample_successes=0)
 
     def save():
         (args.evidence_dir / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
 
-    def run(folder, label, argv):
+    def run(folder, label, argv, env=None):
         argv = list(map(str, argv))
         (folder / (label + '.argv.json')).write_text(json.dumps(argv, indent=2) + '\n')
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=120, env=env)
         for stream in ['stdout', 'stderr']:
             (folder / (label + '.' + stream + '.log')).write_text(getattr(result, stream))
         (folder / (label + '.process.json')).write_text(json.dumps({'returncode': result.returncode}) + '\n')
@@ -84,21 +108,46 @@ def main():
             row = dict(name=case['name'], expected=expectation, passed=False,
                        source_syntax_passed=False, inputs=inputs, conversions=[])
             summary['cases'].append(row); save()
-            # No profile -I/-include: reject invalid original fixtures instead
-            # of presenting a parser/projection failure as a source-proof test.
+            # Real unmodified NVCC/SDK source oracle. No projection, Clang
+            # version override, source shim, link or device execution.
             arch = case.get('original_syntax_arch', 'sm_75')
             assert arch in ('sm_75', 'sm_80')
             flags = ['-x', 'cuda', '-std=c++17', '-fgpu-rdc', '-I' + str(folder),
                      '-I' + str(args.cuda_path / 'include/cccl')]
-            original = run(folder, 'original_syntax', [args.clang, '-nocudalib',
-                '--cuda-gpu-arch=' + arch, '--cuda-path=' + str(args.cuda_path),
-                '-resource-dir=' + str(args.resource_dir), '-Wno-unknown-cuda-version',
-                '-fsyntax-only', *flags, source])
+            native_flags = [nvcc, '-ccbin', args.native_host_compiler, '-std=c++17',
+                '--extended-lambda', '-rdc=true', '-Xcompiler=-fPIC', '-lineinfo', '--threads=1',
+                '-Wno-deprecated-gpu-targets', '--generate-code=arch=compute_' + arch[3:] +
+                ',code=[compute_' + arch[3:] + ',' + arch + ']',
+                '-I' + str(args.nvcc_sdk / 'include'),
+                '-I' + str(args.nvcc_sdk / 'include/cccl'), '-I' + str(folder)]
+            dependency_file = folder / 'original_native.d'
+            dependencies = run(folder, 'original_dependencies',
+                [*native_flags, '-M', source, '-o', dependency_file], native_env)
+            summary['NVCC_dependency_invocations'] += 1; save()
+            assert dependencies.returncode == 0, (case['name'], 'native dependency scan failed', dependencies.stderr)
+            dependency_text = dependency_file.read_text().replace('\\\n', ' ')
+            assert ':' in dependency_text
+            dependency_paths = shlex.split(dependency_text.split(':', 1)[1])
+            assert str(source) in dependency_paths
+            assert all(Path(name).is_absolute() and Path(name).is_file() for name in dependency_paths)
+            dependency_identity = {name: sha(Path(name)) for name in dependency_paths}
+            for name, digest in dependency_identity.items():
+                assert name not in identities or identities[name] == digest, 'native dependency changed across cases'
+                identities[name] = digest
+            row['native_dependency_identity'] = dependency_identity; save()
+            obj = folder / 'original_native.o'
+            original = run(folder, 'original_syntax', [*native_flags, '-c', source, '-o', obj], native_env)
+            summary['NVCC_object_invocations'] += 1
             summary['original_syntax_invocations'] += 1
             row.update(source_syntax_passed=original.returncode == 0,
                        source_syntax_arch=arch, source_syntax_returncode=original.returncode)
             save()
             assert original.returncode == 0, (case['name'], 'invalid original CUDA', original.stderr)
+            header = obj.read_bytes()[:64]
+            assert len(header) == 64 and header[:6] == b'\x7fELF\x02\x01'
+            assert struct.unpack_from('<HH', header, 16) == (1, 183), 'expected AArch64 ET_REL original object'
+            assert {name: sha(Path(name)) for name in dependency_paths} == dependency_identity
+            row.update(native_object_sha256=sha(obj), native_object_bytes=obj.stat().st_size)
             for mode in (['fresh'] if accepted else ['fresh', 'existing']):
                 output = folder / (mode + '.cce')
                 receipt = folder / (mode + '.receipt.json')
@@ -141,7 +190,9 @@ def main():
                         assert marker is None, 'tile32-only input unexpectedly entered the new proof domain'
                     item.update(output_sha256=sha(output), output_bytes=output.stat().st_size)
             assert all(sha(Path(name)) == digest for name, digest in inputs.items())
-            row['passed'] = True; save()
+            assert {name: sha(Path(name)) for name in dependency_paths} == dependency_identity
+            row['passed'] = True; save(); print(case['name'] + ': passed', flush=True)
+        assert summary['NVCC_dependency_invocations'] == summary['NVCC_object_invocations'] == 61
         assert summary['original_syntax_invocations'] == 61
         assert summary['converter_invocations'] == 117  # 4 commit + 56*2 refusal + 1 legacy.
         after = {name: sha(Path(name)) for name in identities}
