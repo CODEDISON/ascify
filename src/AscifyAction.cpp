@@ -5066,6 +5066,12 @@ bool AscifyAction::RewriteToken(clang::Lexer &, clang::Token &tok) {
                                      tok.getLocation(), end)) {
         cudaRuntimeApiBoundaryFailed = true;
       } else {
+        // Like the FuncAttributes proof, only this successfully rewritten,
+        // bound-proven callee token may nest in a certified status macro.
+        // Its arguments and the enclosing expression gain no exemption.
+        if (occupancy != kernelThreadBoundPlan.occupancyCallees.end())
+          provenKernelAttributeCalleeRanges.push_back(
+              {boundSource.getFileID(tok.getLocation()), offset, boundSource.getFileOffset(end)});
         const auto required = kernelThreadBoundHeaderPolicies.find(offset);
         if (required != kernelThreadBoundHeaderPolicies.end()) {
           const auto &proof = required->second;
