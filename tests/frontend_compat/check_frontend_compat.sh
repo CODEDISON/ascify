@@ -49,6 +49,30 @@ sha256_file() {
   fi
 }
 
+# Physical parser resources and the product-owned exact authentication bytes
+# must move together. This catches same-length content drift as well as sizes.
+python3 - "$repo_root" <<'PY_INNER'
+import ast
+from pathlib import Path
+import re
+import sys
+root = Path(sys.argv[1])
+source = (root / 'src/FrontendCompatibility.cpp').read_text()
+profile = root / 'frontend_compat/ascify-admitted-v1'
+for name, filename in [('kAdmissionHeader', 'cooperative_groups.h'),
+                       ('kReductionHeader', 'cooperative_groups/reduce.h'),
+                       ('kHostMathHeader', 'host_math.h')]:
+    match = re.search(r'constexpr char ' + name + r'\[\] = R"ASCIFY\((.*?)\)ASCIFY";', source, re.S)
+    if not match or match.group(1).encode() != (profile / filename).read_bytes():
+        raise RuntimeError(name + ': physical/embedded profile bytes differ')
+match = re.search(r'constexpr char kProfileManifest\[\] =((?:\s*"(?:[^"\\]|\\.)*")+\s*);', source, re.S)
+if not match:
+    raise RuntimeError('embedded manifest missing')
+text = ''.join(ast.literal_eval(value) for value in re.findall(r'"(?:[^"\\]|\\.)*"', match.group(1)))
+if text.encode() != (profile / 'profile.manifest').read_bytes():
+    raise RuntimeError('physical/embedded manifest bytes differ')
+PY_INNER
+
 require_fixed 'class thread_block {' "$header"
 require_fixed 'static void sync();' "$header"
 require_fixed 'thread_block this_thread_block();' "$header"
