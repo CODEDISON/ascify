@@ -69,6 +69,7 @@ if(NOT ASCIFY_CLANG_TESTS_ONLY)
     src/NttpVoidCall.cpp
     src/FullWarpGroups.cpp
     src/SharedWordAlignment.cpp
+    src/KernelThreadBounds.cpp
     src/Statistics.cpp
     src/Scalar64Lowering.cpp
     src/StringUtils.cpp
@@ -192,6 +193,22 @@ if(ASCIFY_CLANG_TESTS OR ASCIFY_CLANG_TESTS_ONLY)
     target_link_directories(ascify-host-cxx-root-input-test PRIVATE ${LLVM_LIBRARY_DIRS})
     add_test(NAME ascify-host-cxx-root-input-witness
       COMMAND ascify-host-cxx-root-input-test)
+    # Exercise the real LocalHeader policy registry/seal/publication gate.
+    # The test substitutes only the unused CLI entry and diagnostic labels.
+    add_llvm_executable(ascify-local-header-kernel-bound-policy-test
+      src/LocalHeader.cpp src/ArgParse.cpp
+      tests/rewrite/local_header_kernel_bound_policy_test.cpp)
+    target_compile_features(ascify-local-header-kernel-bound-policy-test PRIVATE cxx_std_17)
+    target_include_directories(ascify-local-header-kernel-bound-policy-test SYSTEM PRIVATE
+      ${CLANG_INCLUDE_DIRS} ${LLVM_INCLUDE_DIRS})
+    target_include_directories(ascify-local-header-kernel-bound-policy-test PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_options(ascify-local-header-kernel-bound-policy-test PRIVATE ${ASCIFY_LLVM_DEFINITIONS})
+    target_link_directories(ascify-local-header-kernel-bound-policy-test PRIVATE ${LLVM_LIBRARY_DIRS})
+    target_link_libraries(ascify-local-header-kernel-bound-policy-test PRIVATE
+      clangTooling clangToolingCore clangFrontend clangBasic ${ASCIFY_ADDL_LINK_LIBS} Threads::Threads)
+    add_test(NAME ascify-local-header-kernel-bound-policy
+      COMMAND ascify-local-header-kernel-bound-policy-test)
   endif()
 
   find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)

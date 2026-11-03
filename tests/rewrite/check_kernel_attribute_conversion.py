@@ -116,6 +116,19 @@ def main():
   else:
    assert z.returncode==0 and json.loads(receipt.read_text())['status']=='succeeded',(name,z.stderr)
    actual=re.findall(r'::ascify::cudaFuncGetAttributesMaxThreads<(\d+)>',dst.read_text());assert actual==([str(expected)] if expected else []),(name,actual,expected,dst.read_text())
+   if name in ('header_kernel','unrelated_completed_condition'):
+    # Preserve the original input/expected1024 contract, now backed by the
+    # independently emitted annotation in the actual published header bundle.
+    bundle=dst.with_name(dst.name+'.headers')
+    policies=[x for x in bundle.rglob('kernel.cuh.dpp')]
+    assert len(policies)==1,(name,policies)
+    artifact=policies[0]
+    assert artifact.read_text().count('ASCIFY_GLOBAL __launch_bounds__(1024)')==1
+    manifest=(bundle/'.ascify-local-closure').read_text()
+    assert 'kernel_thread_bound_policy=' in manifest and hashlib.sha256(artifact.read_bytes()).hexdigest() in manifest
+    assert (d/'kernel.cuh').read_text()==K
+    row['annotated_header_sha256']=sha(artifact)
+
   assert sha(src)==row['source_sha256'];row['passed']=True;save();print(name,'passed',flush=True)
  assert sha(a.binary)==summary['binary_sha256'];summary.update(passed=True,total=len(CASES));save()
  if temp:temp.cleanup()

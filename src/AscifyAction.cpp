@@ -774,12 +774,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 87339)
+  if (contents.size() != 91859)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "9ac857b169eb00ef3006fd24acc15117b97e68483c3dbdbb5be66a0708a4f8f8");
+      "1b6861e2e04b5da04b058bef0cbb0be52519efddf5f3239f712addd01be23385");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -806,12 +806,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 87339)
+  if (invalidBuffer || contents.size() != 91859)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "9ac857b169eb00ef3006fd24acc15117b97e68483c3dbdbb5be66a0708a4f8f8");
+      "1b6861e2e04b5da04b058bef0cbb0be52519efddf5f3239f712addd01be23385");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -5110,6 +5110,56 @@ bool AscifyAction::RewriteToken(clang::Lexer &, clang::Token &tok) {
 
   llvm::StringRef name = tok.getRawIdentifier();
 
+  const auto &boundSource = getCompilerInstance().getSourceManager();
+  if (boundSource.isWrittenInMainFile(tok.getLocation())) {
+    const auto offset = boundSource.getFileOffset(tok.getLocation());
+    const auto policy = kernelThreadBoundPlan.policyQualifiers.find(offset);
+    const auto occupancy = kernelThreadBoundPlan.occupancyCallees.find(offset);
+    std::string target;
+    if (name == "__global__" && policy != kernelThreadBoundPlan.policyQualifiers.end())
+      target = "ASCIFY_GLOBAL __launch_bounds__(" + std::to_string(policy->second) + ")";
+    else if (name == "cudaOccupancyMaxActiveBlocksPerMultiprocessor" ||
+             name == "cudaOccupancyMaxPotentialBlockSize") {
+      if (occupancy == kernelThreadBoundPlan.occupancyCallees.end()) {
+        const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+            clang::DiagnosticsEngine::Error, "occupancy kernel-bound boundary: raw API has no proven kernel bound");
+        getCompilerInstance().getDiagnostics().Report(tok.getLocation(), diagnostic);
+        cudaRuntimeApiBoundaryFailed = true;
+        return false;
+      }
+      target = occupancy->second;
+    }
+    if (!target.empty()) {
+      const auto mapped = CUDA_RENAMES_MAP().find(name);
+      if (mapped != CUDA_RENAMES_MAP().end())
+        Statistics::current().incrementCounter(mapped->second, name.str());
+      const auto end = clang::Lexer::getLocForEndOfToken(tok.getLocation(), 0, boundSource,
+                                                         getCompilerInstance().getLangOpts());
+      const ct::Replacement edit(boundSource, tok.getLocation(), tok.getLength(), target);
+      if (!insertSemanticReplacement(edit, clang::FullSourceLoc(tok.getLocation(), boundSource),
+                                     tok.getLocation(), end)) {
+        cudaRuntimeApiBoundaryFailed = true;
+      } else {
+        // Like the FuncAttributes proof, only this successfully rewritten,
+        // bound-proven callee token may nest in a certified status macro.
+        // Its arguments and the enclosing expression gain no exemption.
+        if (occupancy != kernelThreadBoundPlan.occupancyCallees.end())
+          provenKernelAttributeCalleeRanges.push_back(
+              {boundSource.getFileID(tok.getLocation()), offset, boundSource.getFileOffset(end)});
+        const auto required = kernelThreadBoundHeaderPolicies.find(offset);
+        if (required != kernelThreadBoundHeaderPolicies.end()) {
+          const auto &proof = required->second;
+          if (!localHeaderContext || localHeaderContext->depth != 1 ||
+              !localHeaderContext->appliedKernelThreadBoundPolicies.emplace(
+                  LocalKernelThreadBoundPolicyKey{proof.sourcePath, proof.qualifierOffset}, proof).second)
+            cudaRuntimeApiBoundaryFailed = true;
+        }
+      }
+      needsCudaCompatHeader = true;
+      return false;
+    }
+  }
+
   // Do not turn std::exp (or another explicitly-qualified function) into an
   // invalid std::expf spelling. Unqualified CUDA device math remains mapped.
   if (isUnqualifiedFloatMathName(name)) {
@@ -8438,6 +8488,126 @@ bool AscifyAction::rewriteUnsupportedCudaSmAttribute(
 
 // A launch-bound proof describes one concrete kernel and one nonescaping
 // output object. It does not turn the partial adapter into full CUDA metadata.
+bool AscifyAction::trustedKernelBoundQualifier(llvm::StringRef name,
+                                                clang::SourceLocation location) {
+  auto &compiler = getCompilerInstance();
+  auto &source = compiler.getSourceManager();
+  auto &preprocessor = compiler.getPreprocessor();
+  std::set<const clang::IdentifierInfo *> seen;
+  std::vector<const clang::IdentifierInfo *> pending = {preprocessor.getIdentifierInfo(name)};
+  while (!pending.empty()) {
+    const auto *identifier = pending.back(); pending.pop_back();
+    if (!seen.insert(identifier).second) continue;
+    if (seen.size() > 16) return false;
+    const auto *info = preprocessor.getMacroDefinitionAtLoc(identifier, location).getMacroInfo();
+    if (!info) return false;
+    const auto file = source.getFileID(source.getSpellingLoc(info->getDefinitionLoc()));
+    if (file.isInvalid() || (!cudaRuntimeApiSdkFileIds.count(file.getHashValue()) &&
+                            !isOwnedCudaCompilerInput(file, compiler))) return false;
+    for (const auto &token : info->tokens()) {
+      if (token.is(clang::tok::hash) || token.is(clang::tok::hashhash)) return false;
+      const auto *dependency = token.getIdentifierInfo();
+      if (!dependency) continue;
+      bool parameter = false;
+      if (info->isFunctionLike())
+        for (const auto *argument : info->params()) parameter |= argument == dependency;
+      if (!parameter && preprocessor.getMacroDefinitionAtLoc(dependency, location))
+        pending.push_back(dependency);
+    }
+  }
+  return true;
+}
+
+bool AscifyAction::stageKernelThreadBoundFact(const ascify::PureSimtKernelThreadBound &fact) {
+  if (!fact.policyQualifier.isValid()) return true;
+  auto &source = getCompilerInstance().getSourceManager();
+  if (source.isWrittenInMainFile(fact.policyQualifier)) return true;
+  if (!localHeaderContext || localHeaderContext->depth != 0 || !localHeaderContext->plan ||
+      localHeaderContext->plan->failed() ||
+      localHeaderContext->sourcePath != localHeaderContext->plan->rootSourcePath() ||
+      localHeaderContext->artifactPath != localHeaderContext->plan->rootArtifactPath() ||
+      localHeaderContext->sourceOnlyJointInput ||
+      localHeaderContext->requireHelperTransaction || !fact.kernel ||
+      !fact.policyQualifier.isFileID() || !fact.kernel->getLocation().isFileID() ||
+      source.getFileID(fact.kernel->getLocation()) != source.getFileID(fact.policyQualifier)) return false;
+  const auto file = source.getFileID(fact.policyQualifier);
+  const auto path = contextualCanonicalPath(source.getFilename(fact.policyQualifier));
+  if (path.empty() || !localHeaderContext->plan->isSelectedRootHeader(path)) return false;
+  const auto *entry = source.getFileEntryForID(file);
+  bool invalid = false;
+  const auto bytes = source.getBufferData(file, &invalid);
+  if (!entry || invalid || !physicalSourceFileMatches(path, *entry, source)) return false;
+  std::string artifact;
+  for (const auto &node : localHeaderContext->plan->nodes())
+    if (node.sourcePath == path && node.depth == 1) artifact = node.artifactPath;
+  LocalKernelThreadBoundPolicy policy;
+  policy.sourcePath = path; policy.sourceSha256 = contextualInputSha256(bytes);
+  policy.sourceBytes = bytes.size(); policy.kernelName = fact.kernel->getQualifiedNameAsString();
+  policy.declarationOffset = source.getFileOffset(fact.kernel->getLocation());
+  policy.qualifierOffset = source.getFileOffset(fact.policyQualifier);
+  policy.maximum = fact.maximum; policy.artifactPath = artifact;
+  return localHeaderContext->plan->requireKernelThreadBoundPolicy(policy);
+}
+
+bool AscifyAction::prepareKernelThreadBoundHeaderPolicies() {
+  if (!localHeaderContext || !localHeaderContext->plan || localHeaderContext->depth != 1) return true;
+  auto &compiler = getCompilerInstance(); auto &source = compiler.getSourceManager();
+  const auto reject = [&](const char *message) {
+    const auto diagnostic = compiler.getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error, "kernel-bound header policy boundary: %0");
+    compiler.getDiagnostics().Report(diagnostic) << message;
+    cudaRuntimeApiBoundaryFailed = true;
+    return false;
+  };
+  const auto path = contextualCanonicalPath(localHeaderContext->sourcePath);
+  for (const auto &entry : localHeaderContext->plan->kernelThreadBoundPolicies()) {
+    const auto &policy = entry.second;
+    if (policy.sourcePath != path) continue;
+    const auto main = source.getMainFileID();
+    const auto begin = source.getLocForStartOfFile(main);
+    const auto *file = source.getFileEntryForID(main);
+    bool invalid = false; const auto bytes = source.getBufferData(main, &invalid);
+    if (TargetPolicy != "dav-c310-vec" || TargetRecipe != "none" ||
+        cudaAttributeControlModified || deviceTemplateAttributeMacroConflict ||
+        compiler.getPreprocessorOpts().RetainExcludedConditionalBlocks ||
+        localHeaderContext->virtualInput || policy.artifactPath != localHeaderContext->artifactPath ||
+        path != contextualCanonicalPath(source.getFilename(begin)) || !file || invalid ||
+        !physicalSourceFileMatches(path, *file, source) || bytes.size() != policy.sourceBytes ||
+        contextualInputSha256(bytes) != policy.sourceSha256)
+      return reject("selected-header parse input/target identity differs from the root fact");
+    struct Find : clang::RecursiveASTVisitor<Find> {
+      clang::SourceManager &source; const LocalKernelThreadBoundPolicy &policy;
+      std::vector<const clang::FunctionDecl *> matches;
+      Find(clang::SourceManager &s, const LocalKernelThreadBoundPolicy &p) : source(s), policy(p) {}
+      bool VisitFunctionDecl(clang::FunctionDecl *function) {
+        const auto loc = function->getLocation();
+        if (loc.isFileID() && source.isWrittenInMainFile(loc) &&
+            source.getFileOffset(loc) == policy.declarationOffset &&
+            function->getQualifiedNameAsString() == policy.kernelName) matches.push_back(function);
+        return true;
+      }
+    } find(source, policy);
+    find.TraverseDecl(compiler.getASTContext().getTranslationUnitDecl());
+    if (find.matches.size() != 1) return reject("kernel identity is not unique at its bound physical offset");
+    ascify::PureSimtKernelThreadBound fact; clang::SourceLocation bad; std::string error;
+    if (!ascify::ProvePureSimtKernelThreadBound(compiler.getASTContext(), find.matches.front(),
+        [&](clang::SourceLocation loc) { return ownedNttpVoidCallLocation(loc); },
+        [&](llvm::StringRef name, clang::SourceLocation loc) { return trustedKernelBoundQualifier(name, loc); },
+        [&](llvm::StringRef name, clang::SourceLocation loc) {
+          return !compiler.getPreprocessor().getMacroDefinitionAtLoc(
+              compiler.getPreprocessor().getIdentifierInfo(name), loc);
+        }, fact, bad, error) || !fact.policyQualifier.isFileID() ||
+        !source.isWrittenInMainFile(fact.policyQualifier) || fact.maximum != policy.maximum ||
+        source.getFileOffset(fact.policyQualifier) != policy.qualifierOffset)
+      return reject("standalone header cannot rebuild the exact source kernel-bound policy");
+    if (!kernelThreadBoundHeaderPolicies.emplace(policy.qualifierOffset, policy).second)
+      return reject("two policies alias one physical header qualifier");
+    kernelThreadBoundPlan.kernels[fact.kernel] = fact;
+    kernelThreadBoundPlan.policyQualifiers[policy.qualifierOffset] = policy.maximum;
+  }
+  return true;
+}
+
 bool AscifyAction::rewriteProvenKernelAttributeCall(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
@@ -8709,79 +8879,19 @@ bool AscifyAction::rewriteProvenKernelAttributeCall(
   // different function after preprocessing. Keep the actual canonical name.
   if (kernel == nullptr || qualifiedSpelling != kernel->getQualifiedNameAsString())
     return false;
-  const clang::FunctionDecl *definition = nullptr;
-  if (kernel == nullptr || !kernel->hasAttr<clang::CUDAGlobalAttr>() ||
-      !kernel->getDeclContext()->getRedeclContext()->isTranslationUnit() ||
-      kernel->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
-      !kernel->hasBody(definition) || definition == nullptr ||
-      definition->getLocation().isMacroID()) return false;
-  const auto definitionLoc = source.getSpellingLoc(definition->getLocation());
-  if (!source.isWrittenInMainFile(definitionLoc) &&
-      (localHeaderContext == nullptr || localHeaderContext->plan == nullptr ||
-       !localHeaderContext->plan->isSelectedRootHeader(source.getFilename(definitionLoc).str())))
-    return false;
-  // Forward declarations may carry inherited launch bounds from a different
-  // preprocessing context. This bounded path admits the sole definition only.
-  if (kernel->getPreviousDecl() != nullptr ||
-      kernel->getMostRecentDecl() != kernel || kernel != definition) return false;
-  // A retained conditional declaration can select a different launch bound
-  // during target preprocessing. Limit this proof to unconditional physical
-  // declaration files; include guards and conditional bodies are retained too.
-  std::set<unsigned> checkedFiles;
-  for (const auto *declaration : kernel->redecls()) {
-    const auto begin = source.getExpansionLoc(declaration->getBeginLoc());
-    if (begin.isInvalid()) return false;
-    const auto file = source.getFileID(begin);
-    if (checkedFiles.insert(file.getHashValue()).second) {
-      bool invalid = false;
-      const auto buffer = source.getBufferData(file, &invalid);
-      if (invalid) return false;
-      clang::Lexer fileLexer(clang::SourceLocation(),
-          getCompilerInstance().getLangOpts(), buffer.data(), buffer.data(),
-          buffer.data() + buffer.size());
-      clang::Token directive;
-      while (true) {
-        fileLexer.LexFromRawLexer(directive);
-        if (directive.is(clang::tok::eof)) break;
-        if (!directive.is(clang::tok::hash) || !directive.isAtStartOfLine()) continue;
-        fileLexer.LexFromRawLexer(directive);
-        if (directive.is(clang::tok::eof)) break;
-        if (!directive.is(clang::tok::raw_identifier)) continue;
-        const auto name = directive.getRawIdentifier();
-        if (name == "if" || name == "ifdef" || name == "ifndef" ||
-            name == "elif" || name == "elifdef" || name == "elifndef" ||
-            name == "else" || name == "endif") return false;
-      }
-    }
-    // A macro expanding to nothing in the CUDA signature could introduce a
-    // launch attribute on the target. Only the actual SDK qualifier macros are
-    // admitted, and launch-bound arguments are separately proved below.
-    const auto last = declaration->isThisDeclarationADefinition()
-        ? source.getExpansionLoc(declaration->getBody()->getBeginLoc())
-        : source.getExpansionLoc(declaration->getEndLoc());
-    if (last.isInvalid() || source.getFileID(last) != file) return false;
-    if (!stablePhysicalRange(begin, last, true, 2)) return false;
-  }
-  unsigned bound = 1024;  // Official pure-SIMT default, corroborated by CCEC metadata.
-  if (const auto *attribute = definition->getAttr<clang::CUDALaunchBoundsAttr>()) {
-    if (attribute->getMinBlocks() != nullptr || attribute->getMaxBlocks() != nullptr)
-      return false;
-    // Admit literal single-argument spelling only: do not assume a macro or
-    // constexpr expression retains its CUDA value under target preprocessing.
-    bool invalid = false;
-    auto range = source.getExpansionRange(attribute->getRange());
-    auto spelling = clang::Lexer::getSourceText(range, source,
-        getCompilerInstance().getLangOpts(), &invalid).trim();
-    if (invalid || !spelling.consume_front("__launch_bounds__")) return false;
-    spelling = spelling.trim();
-    if (!spelling.consume_front("(") || !spelling.consume_back(")")) return false;
-    spelling = spelling.trim();
-    if (spelling.getAsInteger(10, bound) || bound == 0 || bound > 2048) return false;
-    clang::Expr::EvalResult evaluated;
-    if (!attribute->getMaxThreads()->EvaluateAsInt(evaluated, context) ||
-        evaluated.Val.getInt().isNegative() || evaluated.Val.getInt().getLimitedValue() != bound)
-      return false;
-  }
+  ascify::PureSimtKernelThreadBound boundFact;
+  clang::SourceLocation boundLocation;
+  std::string boundError;
+  if (!ascify::ProvePureSimtKernelThreadBound(context, kernel,
+          [&](clang::SourceLocation location) { return ownedNttpVoidCallLocation(location); },
+          [&](llvm::StringRef name, clang::SourceLocation location) {
+            return trustedKernelBoundQualifier(name, location);
+          }, [&](llvm::StringRef name, clang::SourceLocation location) {
+            return !getCompilerInstance().getPreprocessor().getMacroDefinitionAtLoc(
+                getCompilerInstance().getPreprocessor().getIdentifierInfo(name), location);
+          }, boundFact, boundLocation, boundError) ||
+      !stageKernelThreadBoundFact(boundFact)) return false;
+  const unsigned bound = boundFact.maximum;
   const auto *reference = llvm::dyn_cast<clang::DeclRefExpr>(call->getCallee()->IgnoreParenImpCasts());
   if (reference == nullptr || reference->hasQualifier() || reference->hasExplicitTemplateArgs())
     return false;
@@ -8804,6 +8914,9 @@ bool AscifyAction::rewriteProvenKernelAttributeCall(
   provenKernelAttributeCalleeRanges.push_back(
       {source.getFileID(name), offset, source.getFileOffset(end)});
   provenKernelAttributeObjects.insert(object->getCanonicalDecl());
+  kernelThreadBoundPlan.kernels[boundFact.kernel] = boundFact;
+  if (boundFact.policyQualifier.isValid() && source.isWrittenInMainFile(boundFact.policyQualifier))
+    kernelThreadBoundPlan.policyQualifiers[source.getFileOffset(boundFact.policyQualifier)] = bound;
   needsCudaCompatHeader = true;
   static const dppCounter counter = {"CUDA kernel launch bound", CONV_DEVICE, API_RUNTIME, 0, FULL};
   Statistics::current().incrementCounter(counter, "proven per-kernel maximum threads");
@@ -9599,6 +9712,8 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
   directImageUtilityControls.clear();
   directImageUtilityInvalid = false;
   originalCgInputs.clear();
+  kernelThreadBoundPlan = {};
+  kernelThreadBoundHeaderPolicies.clear();
   originalCgIncludes.clear();
   originalCgSdkRoot.clear();
   originalCgControlChanged = false;
@@ -15227,6 +15342,99 @@ void AscifyAction::ExecuteAction() {
         hasUnsupportedNvidiaSampleHelperDeclarationUse();
     rewriteProvenNvidiaSampleHelperMacros();
   }
+  if (!prepareKernelThreadBoundHeaderPolicies()) return;
+  std::string kernelBoundError;
+  clang::SourceLocation kernelBoundLocation;
+  const auto closedBoundInvocation = [&](const clang::CallExpr *call) {
+    const auto physical = [&](clang::SourceLocation location) {
+      while (location.isMacroID()) {
+        if (!SM.isMacroArgExpansion(location)) return clang::SourceLocation();
+        location = SM.getImmediateSpellingLoc(location);
+      }
+      return location;
+    };
+    const auto first = physical(call->getBeginLoc()), last = physical(call->getEndLoc());
+    if (!first.isFileID() || !last.isFileID() || SM.getFileID(first) != SM.getFileID(last))
+      return false;
+    const auto file = SM.getFileID(first);
+    const auto end = clang::Lexer::getLocForEndOfToken(last, 0, SM,
+                                                       getCompilerInstance().getLangOpts());
+    if (!end.isFileID()) return false;
+    const unsigned beginOffset = SM.getFileOffset(first), endOffset = SM.getFileOffset(end);
+    for (const auto &range : cudaLaneIdMacroRanges) {
+      if (range.file != file || range.endOffset <= beginOffset || range.beginOffset >= endOffset)
+        continue;
+      bool helper = false;
+      for (const auto &candidate : nvidiaSampleHelperMacroCandidates)
+        if (candidate.kind == NvidiaSampleHelperMacroKind::CheckCudaErrors &&
+            candidate.statusDomainProven && candidate.invocationRange.file == file &&
+            candidate.invocationRange.beginOffset == range.beginOffset &&
+            candidate.invocationRange.endOffset == range.endOffset &&
+            range.beginOffset < beginOffset && endOffset < range.endOffset) helper = true;
+      if (!helper) return false;
+    }
+    return true;
+  };
+  if (!ascify::ProveOccupancyKernelThreadBounds(getCompilerInstance().getASTContext(),
+          [&](clang::SourceLocation location) { return ownedNttpVoidCallLocation(location); },
+          [&](llvm::StringRef name, clang::SourceLocation location) {
+            return trustedKernelBoundQualifier(name, location);
+          }, [&](llvm::StringRef name, clang::SourceLocation location) {
+            return !PP.getMacroDefinitionAtLoc(PP.getIdentifierInfo(name), location);
+          }, [&](const clang::CallExpr *call) {
+            const auto *callee = call->getDirectCallee();
+            if (!callee || !isAdmittedCudaRuntimeStatusCall(SM, call, trustedSystemFileIds)) return false;
+            for (const auto *decl : callee->redecls()) {
+              const auto loc = SM.getSpellingLoc(decl->getLocation());
+              if (!loc.isFileID() || !cudaRuntimeApiSdkFileIds.count(SM.getFileID(loc).getHashValue()))
+                return false;
+            }
+            return true;
+          }, closedBoundInvocation, [&]() {
+            // A static helper can otherwise acquire a hidden assembly caller
+            // or raw inquiry from an unreviewed include. Keep this domain to
+            // the physical root plus already certified SDK/helper/system files.
+            std::set<clang::FileID> inputs = enteredSourceFileIds;
+            for (auto info = SM.fileinfo_begin(); info != SM.fileinfo_end(); ++info)
+              inputs.insert(SM.translateFile(info->first));
+            for (const auto file : inputs) {
+              if (file.isInvalid() || file == SM.getMainFileID() ||
+                  file == PP.getPredefinesFileID()) continue;
+              const auto *entry = SM.getFileEntryForID(file);
+              const auto start = SM.getLocForStartOfFile(file);
+              const auto path = SM.getFilename(start);
+              if (!entry || SM.isFileOverridden(entry) ||
+                  !physicalSourceFileMatches(path, *entry, SM)) return false;
+              // These three exact parser providers already have an entry-time
+              // CUDA-control proof. Recheck their current physical bytes and
+              // forced-include/CG role; the enclosing directory grants nothing.
+              if ((verifiedFrontendHostMathEntryFileIds.count(file.getHashValue()) &&
+                   verifiedForcedFrontendHostMathFile(file, getCompilerInstance(), frontendCompatibility)) ||
+                  (verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
+                   verifiedFrontendCgFile(file, getCompilerInstance(), frontendCompatibility))) continue;
+              if (isOwnedCudaCompilerInput(file, getCompilerInstance(), true) ||
+                  cudaRuntimeApiSdkFileIds.count(file.getHashValue()) ||
+                  frozenNvidiaSampleHelperFileRole(SM, start) != 0 ||
+                  (trustedSystemFileIds.count(file.getHashValue()) &&
+                   (pathIsWithinPhysicalDirectory(path, "/usr/include") ||
+                    pathIsWithinPhysicalDirectory(path, "/usr/lib/gcc")))) continue;
+              return false;
+            }
+            return true;
+          }, [&](const ascify::PureSimtKernelThreadBound &fact) {
+            return stageKernelThreadBoundFact(fact);
+          },
+          TargetPolicy == "dav-c310-vec" && TargetRecipe == "none" &&
+              !cudaAttributeControlModified && !deviceTemplateAttributeMacroConflict &&
+              !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks,
+          kernelThreadBoundPlan, kernelBoundLocation, kernelBoundError)) {
+    const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error, "occupancy kernel-bound boundary: %0");
+    getCompilerInstance().getDiagnostics().Report(kernelBoundLocation, diagnostic) << kernelBoundError;
+    cudaRuntimeApiBoundaryFailed = true;
+    return;
+  }
+  if (kernelThreadBoundPlan.used()) needsCudaCompatHeader = true;
   // Texture macro admission consumes the existing helper status proof.
   // Keep it after that single proof pass and before the raw token rewrites.
   std::string textureError;

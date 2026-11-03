@@ -72,10 +72,10 @@ for name, code, expected, absent in [
 ]:
  cases.append((name,'#include <cuda_runtime.h>\n'+('#include <helper_cuda.h>\n' if name=='peer_checked' else '')+code+'\n',expected,absent,False))
 for name, code, expected, absent in [
-  ('occupancy_checked','int main(){int n=0;checkCudaErrors(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n,main,0,0));}', ['ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n,main,0,0))'], ['#include <helper_cuda.h>']),
+  ('occupancy_checked','__global__ void occupancy_kernel(){}\nint main(){int n=0;checkCudaErrors(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n,(void*)occupancy_kernel,32,0));}', ['ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(::ascify::cudaOccupancyMaxActiveBlocksPerMultiprocessorMaxThreads<1024>(&n,(void*)occupancy_kernel,32,0))'], ['#include <helper_cuda.h>']),
   ('assert_error_enum','int main(){cudaError_t e=cudaGetLastError();return e==cudaErrorAssert;}', ['ascify::cudaErrorAssert'], []),
-  ('potential_plain','int main(){int g,b;return cudaOccupancyMaxPotentialBlockSize(&g,&b,main,0,0);}', ['ascify::cudaOccupancyMaxPotentialBlockSize(&g,&b,main,0,0)'], []),
-  ('potential_checked','int main(){int g,b;checkCudaErrors(cudaOccupancyMaxPotentialBlockSize(&g,&b,main,0,0));}', ['ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaOccupancyMaxPotentialBlockSize(&g,&b,main,0,0))'], ['#include <helper_cuda.h>']),
+  ('potential_plain','__global__ void occupancy_kernel(){}\nint main(){int g,b;return cudaOccupancyMaxPotentialBlockSize(&g,&b,(void*)occupancy_kernel,0,0);}', ['::ascify::cudaOccupancyMaxPotentialBlockSizeMaxThreads<1024>(&g,&b,(void*)occupancy_kernel,0,0)'], []),
+  ('potential_checked','__global__ void occupancy_kernel(){}\nint main(){int g,b;checkCudaErrors(cudaOccupancyMaxPotentialBlockSize(&g,&b,(void*)occupancy_kernel,0,0));}', ['ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(::ascify::cudaOccupancyMaxPotentialBlockSizeMaxThreads<1024>(&g,&b,(void*)occupancy_kernel,0,0))'], ['#include <helper_cuda.h>']),
   ('template_status_domain','struct S{int v;};\ntemplate<typename T> void alloc(T** p){checkCudaErrors(cudaMalloc((void**)p, 64));}\nint main(){S* s;alloc(&s);checkCudaErrors(cudaFree(s));}', ['ASCIFY_NVIDIA_SAMPLE_CHECK_CUDA_ERRORS(ascify::cudaMalloc((void**)p, 64))'], ['#include <helper_cuda.h>']),
   ('epoch_capability_fields','int main(){cudaDeviceProp p;cudaGetDeviceProperties(&p,0);return p.major<3||(p.major==3&&p.minor<5);}', ['ascify::cudaGetDeviceProperties(&p,0)'], []),
 ]:
@@ -91,6 +91,15 @@ for name, code, expected, absent in [
  ('sm_selector_mixed','int main(){int n=1;cudaDeviceGetAttribute(&n,'+cap+',0);return sizeof('+cap+');}', ['::ascify::'+cap,'sizeof('+cap+')'], []),
 ]:
  cases.append((name,'#include <cuda_runtime.h>\n'+code+'\n',expected,absent,False))
+# Preserve the original three source-valid but non-kernel inputs as refusals.
+# They tested a status domain while the old estimator ignored kernel identity.
+for name, code, checked in [
+ ('occupancy_checked','int main(){int n=0;checkCudaErrors(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&n,main,0,0));}',True),
+ ('potential_plain','int main(){int g,b;return cudaOccupancyMaxPotentialBlockSize(&g,&b,main,0,0);}',False),
+ ('potential_checked','int main(){int g,b;checkCudaErrors(cudaOccupancyMaxPotentialBlockSize(&g,&b,main,0,0));}',True),
+]:
+ cases.append(('invalid_host_kernel_'+name,'#include <cuda_runtime.h>\n'+
+  ('#include <helper_cuda.h>\n' if checked else '')+code+'\n',[],[],True))
 a.output.mkdir(parents=True,exist_ok=False)
 summary={'source_only':a.source_only,'binary_sha256':sha(a.binary),'clang_sha256':sha(clang),'cases':[],'passed':False}
 def save():(a.output/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
@@ -110,7 +119,7 @@ try:
    r=run(d,'conversion',[a.binary,cu,'--target-policy=dav-c310-vec','--simt-math=fast','--target-recipe=none','--default-preprocessor','--cuda-path='+str(cuda),'--clang-resource-directory='+str(resource),'--migration-receipt='+str(receipt),'-o',out,'--',*common]);row['conversion_rc']=r.returncode
    if refused:
     assert r.returncode>0 and not out.exists(),(name,r.stderr)
-    assert 'profiler header boundary' in r.stderr or 'Ascify cannot publish CUDA compatibility output' in r.stderr,(name,r.stderr)
+    assert 'profiler header boundary' in r.stderr or 'Ascify cannot publish CUDA compatibility output' in r.stderr or 'occupancy kernel-bound boundary' in r.stderr,(name,r.stderr)
    else:
     assert r.returncode==0,(name,r.stderr)
     text=out.read_text(); assert all(x in text for x in expected),(name,text,expected)
