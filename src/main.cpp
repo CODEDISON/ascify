@@ -514,8 +514,16 @@ bool ascifySingleSource(const std::string &srcPath,
   // Snapshot the canonical physical target, but keep the user's absolute
   // spelling as the parser path: resolving a source symlink before parsing
   // would change its native quoted-include parent directory.
+  std::string physicalParsePath = mainContextPath;
+  if (localHeaderContext == nullptr) {
+    std::error_code lexicalError;
+    const auto absolute = std::filesystem::absolute(
+        std::filesystem::path(srcPath), lexicalError);
+    if (lexicalError) return false;
+    physicalParsePath = absolute.string();
+  }
   SmallString<256> physicalTarget;
-  if (llvm::sys::fs::real_path(mainContextPath, physicalTarget)) return false;
+  if (llvm::sys::fs::real_path(physicalParsePath, physicalTarget)) return false;
   const auto physicalInput = ascify::HostCxxRootInputWitness::capture(
       physicalTarget.str().str());
   if (!physicalInput) {
@@ -523,14 +531,14 @@ bool ascifySingleSource(const std::string &srcPath,
                  << "cannot capture physical CUDA input: " << mainContextPath << "\n";
     return false;
   }
-  ct::RefactoringTool physicalTool(languageDatabase, mainContextPath);
-  auto &physicalEdits = llcompat::getReplacements(physicalTool, mainContextPath);
+  ct::RefactoringTool physicalTool(languageDatabase, physicalParsePath);
+  auto &physicalEdits = llcompat::getReplacements(physicalTool, physicalParsePath);
   ascify::FrontendCompatibilityConfig physicalCompatibility;
-  if (!appendArgumentsAdjusters(physicalTool, mainContextPath, ascify_exe_path,
+  if (!appendArgumentsAdjusters(physicalTool, physicalParsePath, ascify_exe_path,
                                 physicalCompatibility, false)) return false;
   bool observedPhysicalInput = false;
   PhysicalCudaFactory physicalFactory(&physicalEdits, localHeaderContext,
-      physicalCompatibility, *physicalInput, mainContextPath, observedPhysicalInput);
+      physicalCompatibility, *physicalInput, physicalParsePath, observedPhysicalInput);
   if (!physicalInput->matchesPhysical() || physicalTool.run(&physicalFactory) ||
       !observedPhysicalInput || !physicalInput->matchesPhysical()) return false;
   if (localHeaderContext != nullptr &&
@@ -971,6 +979,29 @@ int main(int argc, const char **argv) {
       continue;
     }
     receiptInput.resolvedInput = sSourceAbsPath;
+    // Closure ownership currently names canonical roots. Until it carries a
+    // distinct lexical parse-root identity, canonicalizing an aliased source
+    // would silently select its target directory's quoted headers.
+    if (OptLocalHeaders || OptLocalHeadersRecursive) {
+      std::error_code lexicalError;
+      const auto absolute = std::filesystem::absolute(
+          std::filesystem::path(src), lexicalError);
+      const auto lexical = absolute.lexically_normal().string();
+      const auto parent = lexicalError ? std::filesystem::path() :
+          std::filesystem::canonical(absolute.parent_path(), lexicalError);
+      if (lexicalError || lexical != sSourceAbsPath ||
+          parent != std::filesystem::path(sSourceAbsPath).parent_path()) {
+        llvm::errs() << sAscify << sError
+            << "local-header closure cannot preserve quoted-include lookup through an aliased root: "
+            << src << "\n";
+        receiptInput.status = ascify::MigrationReceiptStatus::Failed;
+        receiptInput.stage = ascify::MigrationReceiptStage::InputPreparation;
+        receiptInput.diagnosticSummary = "aliased local-header root has no lexical lookup proof";
+        if (migrationReceipt) migrationReceipt->addInputResult(std::move(receiptInput));
+        Result = 1;
+        continue;
+      }
+    }
     sourceFileName = sys::path::filename(sSourceAbsPath);
     if (dst.empty()) {
       if (Inplace) {
