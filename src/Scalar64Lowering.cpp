@@ -1,4 +1,5 @@
 #include "Scalar64Lowering.h"
+#include "CudaExecutionCoordinates.h"
 
 #include <map>
 #include <set>
@@ -401,6 +402,7 @@ class Proof {
     if (const auto* cast = dyn_cast<ImplicitCastExpr>(expression)) return pureInteger(cast->getSubExpr(), depth + 1);
     expression = expression->IgnoreParens();
     if (!expression->getType()->isIntegerType() || expression->getType()->isEnumeralType()) return false;
+    if (ProveCudaExecutionCoordinate(expression,context,sdk)) return true;
     if (isa<IntegerLiteral>(expression) || isa<CXXBoolLiteralExpr>(expression)) return true;
     if (const auto* ref = dyn_cast<DeclRefExpr>(expression)) {
       const auto* variable = dyn_cast<VarDecl>(ref->getDecl());

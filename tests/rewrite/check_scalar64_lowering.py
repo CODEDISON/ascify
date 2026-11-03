@@ -221,7 +221,7 @@ __device__ double move(double a){
 ''', prefix=CUDA + '#include <cooperative_groups/reduce.h>\n', cpu='''
 scalar64_test::reset();
 scalar64_expect(scalar64_raw(move(1.25)),scalar64_raw(40.0));
-if(scalar64_test::calls!=5)std::abort();
+if(scalar64_test::calls!=6)std::abort();
 ''')
     yield case('cg_double_up_still_refused', '''
 __device__ double move(double a){
