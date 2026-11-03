@@ -1,5 +1,6 @@
 #include "UniformBlockReduction.h"
 #include "FrontendCompatibility.h"
+#include "CudaExecutionCoordinates.h"
 
 #include <map>
 #include <cctype>
@@ -112,9 +113,10 @@ struct BodyInventory : RecursiveASTVisitor<BodyInventory> {
 class Proof {
  public:
   Proof(ASTContext& context, const FrontendCompatibilityConfig& profile,
-        UniformBlockReductionStats& stats, std::string& error, bool standard)
+        UniformBlockReductionStats& stats, std::string& error, bool standard,
+        const std::function<bool(SourceLocation)>& trustedSdk)
       : context(context), source(context.getSourceManager()), profile(profile),
-        stats(stats), error(error), standard(standard) {}
+        stats(stats), error(error), standard(standard), trustedSdk(trustedSdk) {}
 
   bool run() {
     Collector collector(*this);
@@ -691,6 +693,13 @@ class Proof {
     if (!collectives) return fail("no unconditional top-level reduction was proven");
     for (const auto* call : inventory.calls) {
       if (admittedCalls.count(call)) continue;
+      const auto parents=context.getParents(*call);
+      const auto* property=parents.size()==1 ? parents[0].get<PseudoObjectExpr>() : nullptr;
+      const auto coordinate=ProveCudaExecutionCoordinate(property,context,trustedSdk);
+      if (coordinate && coordinate->getter==call) {
+        admittedCalls.insert(call);
+        continue;
+      }
       const auto* callee = call->getDirectCallee();
       if (!callee) return fail("indirect calls are not admitted in a scratch kernel");
       if (const auto* member = dyn_cast<CXXMemberCallExpr>(call)) {
@@ -731,7 +740,7 @@ class Proof {
         participation.insert(call);
         continue;
       }
-      return fail("kernel calls an unproved helper that may alter participation");
+      return fail("kernel calls an unproved helper that may alter participation: "+callee->getQualifiedNameAsString());
     }
     for (const auto* loop : inventory.loops)
       if (!closedLoop(loop,participation,inventory)) return false;
@@ -857,15 +866,17 @@ class Proof {
   std::set<unsigned> guardedBodies;
   std::vector<SourceLocation> storageTypeLocations;
   std::set<const FunctionDecl*> rawFunctionRanges;
+  const std::function<bool(SourceLocation)>& trustedSdk;
 };
 }  // namespace
 
 bool ValidateUniformBlockReduction(
     clang::ASTContext& context, const FrontendCompatibilityConfig& profile,
-    UniformBlockReductionStats& stats, std::string& error, bool standardPreprocessing) {
+    UniformBlockReductionStats& stats, std::string& error, bool standardPreprocessing,
+    const std::function<bool(clang::SourceLocation)>& trustedSdk) {
   stats = {};
   error.clear();
   if (!profile.enabled()) return true;
-  return Proof(context, profile, stats, error, standardPreprocessing).run();
+  return Proof(context, profile, stats, error, standardPreprocessing,trustedSdk).run();
 }
 }  // namespace ascify

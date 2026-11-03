@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <functional>
 #include <vector>
 #include "clang/Basic/SourceLocation.h"
 
@@ -24,5 +25,6 @@ struct UniformBlockReductionStats {
 bool ValidateUniformBlockReduction(
     clang::ASTContext& context, const FrontendCompatibilityConfig& profile,
     UniformBlockReductionStats& stats, std::string& error,
-    bool standardPreprocessing);
+    bool standardPreprocessing,
+    const std::function<bool(clang::SourceLocation)>& trustedSdk);
 }  // namespace ascify

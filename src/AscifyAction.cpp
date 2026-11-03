@@ -15066,6 +15066,7 @@ void AscifyAction::ExecuteAction() {
     cudaRuntimeApiBoundaryFailed = true;
     return;
   }
+  std::map<unsigned, std::string> scalar64CommittedInsertions;
   if (scalar64Plan.used()) {
     ct::Replacements staged(*replacements);
     std::map<unsigned, ascify::Scalar64Edit> insertions;
@@ -15096,6 +15097,8 @@ void AscifyAction::ExecuteAction() {
       return;
     }
     *replacements = std::move(staged);
+    for (const auto& insertion : insertions)
+      scalar64CommittedInsertions.emplace(insertion.first, insertion.second.text);
     for (const auto& edit : edits) if (edit.length)
       SemanticRewriteRanges.push_back({SM.getMainFileID(), SM.getFileOffset(edit.location),
           SM.getFileOffset(edit.location) + edit.length});
@@ -15187,7 +15190,8 @@ void AscifyAction::ExecuteAction() {
   if (!ascify::ValidateUniformBlockReduction(
           getCompilerInstance().getASTContext(), frontendCompatibility,
           uniformReduction, uniformReductionError,
-          !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)) {
+          !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks,
+          scalar64Sdk)) {
     const auto diagnostic =
         getCompilerInstance().getDiagnostics().getCustomDiagID(
             clang::DiagnosticsEngine::Error,
@@ -15238,8 +15242,38 @@ void AscifyAction::ExecuteAction() {
       if (!uniformReductionError.empty())
         break;
       const ct::Replacement edit(SM, location, 0U, guard.text);
-      if (!llcompat::insertReplacement(staged, edit, &uniformReductionError))
+      const auto scalarWitness=scalar64CommittedInsertions.find(decomposed.second);
+      const std::string scalarInsertion=scalarWitness==scalar64CommittedInsertions.end()
+          ? std::string() : scalarWitness->second;
+      std::optional<ct::Replacement> knownScalar;
+      unsigned scalarMatches=0;
+      if (!scalarInsertion.empty())
+        for (const auto& existing : staged)
+          if (existing.getFilePath()==edit.getFilePath() &&
+              existing.getOffset()==edit.getOffset() && existing.getLength()==0 &&
+              existing.getReplacementText()==scalarInsertion) {
+            knownScalar=existing;
+            ++scalarMatches;
+          }
+      if (scalarMatches>1) {
+        uniformReductionError="template guard has ambiguous scalar insertion witness";
         break;
+      }
+      if (knownScalar) {
+        // Both proof-owned guards precede the first statement. Prefix the
+        // complete scalar insertion, which may also open that statement's
+        // arithmetic helper when the source has no whitespace after '{'.
+        ct::Replacements combined;
+        for (const auto& existing : staged) {
+          if (existing==*knownScalar) continue;
+          if (!llcompat::insertReplacement(combined,existing,&uniformReductionError)) break;
+        }
+        if (!uniformReductionError.empty() ||
+            !llcompat::insertReplacement(combined,
+                ct::Replacement(SM,location,0U,guard.text+scalarInsertion),
+                &uniformReductionError)) break;
+        staged=std::move(combined);
+      } else if (!llcompat::insertReplacement(staged,edit,&uniformReductionError)) break;
       guardRanges.push_back(
           {decomposed.first, decomposed.second - 1, decomposed.second});
     }
