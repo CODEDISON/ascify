@@ -49,6 +49,30 @@ sha256_file() {
   fi
 }
 
+# Physical parser resources and the product-owned exact authentication bytes
+# must move together. This catches same-length content drift as well as sizes.
+python3 - "$repo_root" <<'PY_INNER'
+import ast
+from pathlib import Path
+import re
+import sys
+root = Path(sys.argv[1])
+source = (root / 'src/FrontendCompatibility.cpp').read_text()
+profile = root / 'frontend_compat/ascify-admitted-v1'
+for name, filename in [('kAdmissionHeader', 'cooperative_groups.h'),
+                       ('kReductionHeader', 'cooperative_groups/reduce.h'),
+                       ('kHostMathHeader', 'host_math.h')]:
+    match = re.search(r'constexpr char ' + name + r'\[\] = R"ASCIFY\((.*?)\)ASCIFY";', source, re.S)
+    if not match or match.group(1).encode() != (profile / filename).read_bytes():
+        raise RuntimeError(name + ': physical/embedded profile bytes differ')
+match = re.search(r'constexpr char kProfileManifest\[\] =((?:\s*"(?:[^"\\]|\\.)*")+\s*);', source, re.S)
+if not match:
+    raise RuntimeError('embedded manifest missing')
+text = ''.join(ast.literal_eval(value) for value in re.findall(r'"(?:[^"\\]|\\.)*"', match.group(1)))
+if text.encode() != (profile / 'profile.manifest').read_bytes():
+    raise RuntimeError('physical/embedded manifest bytes differ')
+PY_INNER
+
 require_fixed 'class thread_block {' "$header"
 require_fixed 'static void sync();' "$header"
 require_fixed 'thread_block this_thread_block();' "$header"
@@ -67,7 +91,7 @@ require_fixed \
   'file=cooperative_groups.h;bytes=7153;sha256=5659d22211f4263794820af69d741adf51159642a043f903c8dd2fa8e3a22779' \
   "$manifest"
 require_fixed \
-  'file=cooperative_groups/reduce.h;bytes=1612;sha256=bc6f9130deaa55a786df70d127a118ecf57b1014dddbb0700a45ef05f597c928' \
+  'file=cooperative_groups/reduce.h;bytes=1808;sha256=f5c820f2e8799486ea218529c91faf6814478eef5c2acea850f39859d816558c' \
   "$manifest"
 require_fixed \
   'file=host_math.h;bytes=2594;sha256=3b87b69a619cff6333d8fb2728d6af31a90a28fd2073077084b81ba602d70e2f' \
@@ -78,7 +102,7 @@ if [ "$(sha256_file "$header")" != \
   exit 1
 fi
 if [ "$(sha256_file "$reduction")" != \
-    'bc6f9130deaa55a786df70d127a118ecf57b1014dddbb0700a45ef05f597c928' ]; then
+    'f5c820f2e8799486ea218529c91faf6814478eef5c2acea850f39859d816558c' ]; then
   echo "frontend reduction header SHA-256 mismatch" >&2
   exit 1
 fi
