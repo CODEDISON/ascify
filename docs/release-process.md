@@ -25,6 +25,10 @@ Documentation-only changes need repository checks and a diff confirming that
 code and fixtures are unchanged. Re-run relevant tests when commands, test
 entry points, or build configuration change.
 
+The [original vector-sample correctness record](validation/vector-cg-occupancy-20261103.md)
+provides a source-bound example with complete target compilation and actual NPU
+results. Its coverage and toolchain limits apply to that record.
+
 ## Check the package
 
 The installed layout separates public target interfaces from converter resources:

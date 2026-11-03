@@ -6,6 +6,10 @@ for supported domains and experimental paths.
 
 ## Unreleased
 
+- Revalidate the complete original CUDA Samples v13.0 cooperative-groups and
+  occupancy targets on one Ascify product. See the [correctness record](docs/validation/vector-cg-occupancy-20261103.md)
+  for the actual target, numeric checks and remaining coverage boundaries.
+
 - Preserve once-protected contextual providers across independent selected root
   siblings, with the same two-parse skipped-edge and strict joint proof.
 - Bind temporary discovery-root and original proof-root include edges through
