@@ -6204,6 +6204,16 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
   }
   outs() << "File included: " << file_name << "\n";
   auto &SM = getCompilerInstance().getSourceManager();
+  if (file_name=="stdio.h" && is_angled && !module && hash_loc.isFileID() &&
+      SM.isWrittenInMainFile(hash_loc) && filename_range.getBegin().isFileID() &&
+      filename_range.getEnd().isFileID() &&
+      includeToken.getIdentifierInfo() && includeToken.getIdentifierInfo()->getName()=="include") {
+    bool invalid=false;
+    const auto literal=clang::Lexer::getSourceText(filename_range,SM,
+        getCompilerInstance().getLangOpts(),&invalid);
+    if (!invalid && literal=="<stdio.h>")
+      uniformNativeStdioIncludes.emplace(SM.getFileOffset(hash_loc),resolved_file_name.str());
+  }
   // Preserve every real include lookup, including guarded/skipped children.
   // An input with a resource spelling cannot substitute a caller-owned file
   // and disappear from the later FileID inventory merely by being empty.
@@ -15187,11 +15197,61 @@ void AscifyAction::ExecuteAction() {
   }
   ascify::UniformBlockReductionStats uniformReduction;
   std::string uniformReductionError;
+  const auto uniformInputWitness = [&](ascify::UniformInputWitness kind,
+                                       clang::SourceLocation location,
+                                       const std::string& name) {
+    if (!location.isFileID() || !SM.isWrittenInMainFile(location)) return false;
+    auto* identifier=PP.getIdentifierInfo(name);
+    const auto definition=PP.getMacroDefinitionAtLoc(identifier,location);
+    if (kind==ascify::UniformInputWitness::LiteralIdentifier) return !definition;
+    if (kind==ascify::UniformInputWitness::SdkQualifier) {
+      const auto* macro=definition.getMacroInfo();
+      return (name=="__device__" || name=="__forceinline__") && macro &&
+          !macro->isFunctionLike() && !definition.isAmbiguous() &&
+          definition.getModuleMacros().empty() && !cudaAttributeControlModified &&
+          !deviceTemplateAttributeMacroConflict && scalar64Sdk(macro->getDefinitionLoc());
+    }
+    if (kind==ascify::UniformInputWitness::EmptyOuterGuard) {
+      if (definition || name!=findConventionalMainOuterGuard(getCompilerInstance()) ||
+          !hasCompleteMainOuterGuard(getCompilerInstance())) return false;
+      for (const auto& command : getCompilerInstance().getPreprocessorOpts().Macros)
+        if (llvm::StringRef(command.first).split('=').first==name) return false;
+      const auto* history=PP.getLocalMacroDirectiveHistory(identifier);
+      if (!history || history->getPrevious() || history->getKind()!=clang::MacroDirective::MD_Define ||
+          !history->getLocation().isFileID() || !SM.isWrittenInMainFile(history->getLocation())) return false;
+      const auto* macro=history->getMacroInfo();
+      return macro && !macro->isFunctionLike() && macro->getNumTokens()==0 &&
+          macro->getDefinitionLoc().isFileID() && SM.isWrittenInMainFile(macro->getDefinitionLoc());
+    }
+    if (kind==ascify::UniformInputWitness::NativeStdioInclude) {
+      const auto found=uniformNativeStdioIncludes.find(SM.getFileOffset(location));
+      if (name!="stdio.h" || found==uniformNativeStdioIncludes.end() ||
+          contextualCanonicalPath(found->second)!="/usr/include/stdio.h") return false;
+      for (const auto file : enteredSourceFileIds) {
+        const auto at=SM.getLocForStartOfFile(file);
+        const auto* entry=SM.getFileEntryForID(file);
+        if (entry && trustedSystemFileIds.count(file.getHashValue()) &&
+            SM.isInSystemHeader(at) && contextualCanonicalPath(SM.getFilename(at))=="/usr/include/stdio.h" &&
+            !SM.isFileOverridden(entry) && physicalSourceFileMatches(SM.getFilename(at),*entry,SM)) return true;
+      }
+      return false;
+    }
+    if (kind!=ascify::UniformInputWitness::InactiveArchGuard || name!="__CUDA_ARCH__" ||
+        definition || PP.getMacroDefinition(identifier) ||
+        getCompilerInstance().getLangOpts().CUDAIsDevice) return false;
+    for (const auto& command : getCompilerInstance().getPreprocessorOpts().Macros)
+      if (llvm::StringRef(command.first).split('=').first==name) return false;
+    for (const auto* history=PP.getLocalMacroDirectiveHistory(identifier);history;history=history->getPrevious()) {
+      const auto at=history->getLocation();
+      if (!at.isFileID() || !isOwnedCudaCompilerInput(SM.getFileID(at),getCompilerInstance())) return false;
+    }
+    return true;
+  };
   if (!ascify::ValidateUniformBlockReduction(
           getCompilerInstance().getASTContext(), frontendCompatibility,
           uniformReduction, uniformReductionError,
           !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks,
-          scalar64Sdk)) {
+          scalar64Sdk,uniformInputWitness)) {
     const auto diagnostic =
         getCompilerInstance().getDiagnostics().getCustomDiagID(
             clang::DiagnosticsEngine::Error,
@@ -15211,7 +15271,19 @@ void AscifyAction::ExecuteAction() {
         break;
       }
       const auto decomposed = SM.getDecomposedLoc(location);
-      if (decomposed.second == 0) {
+      if (guard.directive) {
+        clang::Token anchor;
+        const auto buffer=SM.getBufferData(decomposed.first);
+        const auto lineBegin=physicalLineBegin(buffer,decomposed.second);
+        if (clang::Lexer::getRawToken(location,anchor,SM,
+                getCompilerInstance().getLangOpts(),true) ||
+            !anchor.is(clang::tok::hash) ||
+            !buffer.slice(lineBegin,decomposed.second).trim().empty()) {
+          uniformReductionError="preprocessor guard has no physical directive anchor";
+          break;
+        }
+      }
+      if (decomposed.second == 0 && !guard.directive) {
         uniformReductionError = "template guard has no body brace anchor";
         break;
       }
@@ -15247,7 +15319,7 @@ void AscifyAction::ExecuteAction() {
           ? std::string() : scalarWitness->second;
       std::optional<ct::Replacement> knownScalar;
       unsigned scalarMatches=0;
-      if (!scalarInsertion.empty())
+      if (!guard.directive && !scalarInsertion.empty())
         for (const auto& existing : staged)
           if (existing.getFilePath()==edit.getFilePath() &&
               existing.getOffset()==edit.getOffset() && existing.getLength()==0 &&
@@ -15275,7 +15347,8 @@ void AscifyAction::ExecuteAction() {
         staged=std::move(combined);
       } else if (!llcompat::insertReplacement(staged,edit,&uniformReductionError)) break;
       guardRanges.push_back(
-          {decomposed.first, decomposed.second - 1, decomposed.second});
+          {decomposed.first, guard.directive ? decomposed.second : decomposed.second - 1,
+           guard.directive ? decomposed.second + 1 : decomposed.second});
     }
     if (!uniformReductionError.empty()) {
       const auto diagnostic =

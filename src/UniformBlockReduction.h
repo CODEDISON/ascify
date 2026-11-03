@@ -12,6 +12,11 @@ struct UniformBlockReductionGuard {
   clang::SourceLocation insertionLocation;
   clang::SourceRange kernelRange;
   std::string text;
+  bool directive = false;
+};
+enum class UniformInputWitness {
+  EmptyOuterGuard, NativeStdioInclude, InactiveArchGuard,
+  SdkQualifier, LiteralIdentifier
 };
 struct UniformBlockReductionStats {
   unsigned kernels = 0;
@@ -26,5 +31,7 @@ bool ValidateUniformBlockReduction(
     clang::ASTContext& context, const FrontendCompatibilityConfig& profile,
     UniformBlockReductionStats& stats, std::string& error,
     bool standardPreprocessing,
-    const std::function<bool(clang::SourceLocation)>& trustedSdk);
+    const std::function<bool(clang::SourceLocation)>& trustedSdk,
+    const std::function<bool(UniformInputWitness, clang::SourceLocation,
+                             const std::string&)>& inputWitness);
 }  // namespace ascify

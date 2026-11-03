@@ -114,9 +114,12 @@ class Proof {
  public:
   Proof(ASTContext& context, const FrontendCompatibilityConfig& profile,
         UniformBlockReductionStats& stats, std::string& error, bool standard,
-        const std::function<bool(SourceLocation)>& trustedSdk)
+        const std::function<bool(SourceLocation)>& trustedSdk,
+        const std::function<bool(UniformInputWitness, SourceLocation,
+                                 const std::string&)>& inputWitness)
       : context(context), source(context.getSourceManager()), profile(profile),
-        stats(stats), error(error), standard(standard), trustedSdk(trustedSdk) {}
+        stats(stats), error(error), standard(standard), trustedSdk(trustedSdk),
+        inputWitness(inputWitness) {}
 
   bool run() {
     Collector collector(*this);
@@ -178,6 +181,7 @@ class Proof {
       return true;
     }
     bool VisitFunctionDecl(FunctionDecl* function) {
+      proof.allFunctions.insert(function);
       if (!function->doesThisDeclarationHaveABody() || proof.system(function)) return true;
       BodyInventory inventory;
       inventory.TraverseStmt(function->getBody());
@@ -773,6 +777,147 @@ class Proof {
     return true;
   }
 
+  struct RawInputToken {
+    std::string text;
+    SourceLocation location;
+    bool startsLine = false;
+    bool hash = false;
+    bool identifier = false;
+  };
+
+  bool inactiveIntegerReduction(const std::vector<RawInputToken>& tokens,
+                                unsigned first, unsigned last) {
+    if (last-first!=32) return false;
+    const auto name=tokens[first+6].text;
+    const auto mask=tokens[first+13].text;
+    const auto value=tokens[first+16].text;
+    if (name==mask || name==value || mask==value || mask=="__reduce_add_sync" ||
+        value=="__reduce_add_sync" || context.Idents.get(name).getTokenID()!=tok::identifier ||
+        context.Idents.get(mask).getTokenID()!=tok::identifier ||
+        context.Idents.get(value).getTokenID()!=tok::identifier) return false;
+    const std::vector<std::string> expected={
+        "template","<",">","__device__","__forceinline__","int",name,"<","int",">",
+        "(","unsigned","int",mask,",","int",value,")","{",value,"=",
+        "__reduce_add_sync","(",mask,",",value,")",";","return",value,";","}"};
+    for (unsigned index=first;index<last;++index) {
+      const auto& token=tokens[index];
+      if (token.text!=expected[index-first]) return false;
+      if (token.identifier && !inputWitness(
+              token.text=="__device__" || token.text=="__forceinline__"
+                  ? UniformInputWitness::SdkQualifier : UniformInputWitness::LiteralIdentifier,
+              token.location,token.text)) return false;
+    }
+    const FunctionDecl* primary=nullptr;
+    bool sdkIntrinsic=false;
+    for (const auto* function : allFunctions) {
+      if (function->getQualifiedNameAsString()=="__reduce_add_sync")
+        for (const auto* declaration : function->redecls())
+          if (!trustedSdk(declaration->getLocation())) return false;
+      if (function->getQualifiedNameAsString()=="__reduce_add_sync" &&
+          function->hasAttr<CUDADeviceAttr>() && function->getNumParams()==2 &&
+          context.hasSameType(function->getReturnType(),context.UnsignedIntTy) &&
+          context.hasSameType(function->getParamDecl(0)->getType(),context.UnsignedIntTy) &&
+          context.hasSameType(function->getParamDecl(1)->getType(),context.UnsignedIntTy)) {
+        bool trusted=true;
+        for (const auto* declaration : function->redecls())
+          trusted=trusted && trustedSdk(declaration->getLocation());
+        sdkIntrinsic=sdkIntrinsic || trusted;
+      }
+      const auto* family=function->getDescribedFunctionTemplate();
+      if (!family || function->getNameAsString()!=name ||
+          !function->getDeclContext()->isTranslationUnit() ||
+          !function->hasAttr<CUDADeviceAttr>() || !function->hasBody() ||
+          function->getNumParams()!=2 || family->getTemplateParameters()->size()!=1 ||
+          !function->getLocation().isFileID() ||
+          !source.isWrittenInMainFile(function->getLocation()) ||
+          admittedFunctions.count(function) || kernels.count(function) || patterns.count(function)) continue;
+      const auto* parameter=dyn_cast<TemplateTypeParmDecl>(family->getTemplateParameters()->getParam(0));
+      const auto* returned=function->getReturnType()->getAs<TemplateTypeParmType>();
+      if (!parameter || parameter->isParameterPack() || parameter->hasDefaultArgument() ||
+          !returned || returned->getDecl()!=parameter ||
+          !context.hasSameType(function->getParamDecl(0)->getType(),context.UnsignedIntTy) ||
+          !context.hasSameType(function->getParamDecl(1)->getType(),function->getReturnType())) continue;
+      if (primary && primary->getCanonicalDecl()!=function->getCanonicalDecl()) return false;
+      primary=function;
+    }
+    return primary && sdkIntrinsic;
+  }
+
+  bool proveDirectives(llvm::StringRef buffer, std::set<unsigned>& admitted) {
+    const auto start=source.getLocForStartOfFile(source.getMainFileID());
+    Lexer lexer(start,context.getLangOpts(),buffer.begin(),buffer.begin(),buffer.end());
+    std::vector<RawInputToken> tokens;
+    Token token;
+    while (!lexer.LexFromRawLexer(token)) {
+      if (token.is(tok::comment)) continue;
+      bool invalid=false;
+      const auto spelling=Lexer::getSpelling(token,source,context.getLangOpts(),&invalid);
+      if (invalid || token.is(tok::unknown)) return fail("scratch raw token cannot be authenticated");
+      if (spelling=="_Pragma" || spelling=="__pragma")
+        return fail("scratch raw macro-stack or generated pragma is outside the proof");
+      tokens.push_back({spelling,token.getLocation(),token.isAtStartOfLine(),
+                        token.is(tok::hash),token.isAnyIdentifier()});
+    }
+    struct Directive { unsigned first, last; std::vector<std::string> words; };
+    std::vector<Directive> directives;
+    for (unsigned index=0;index<tokens.size();++index) {
+      if (!tokens[index].hash || !tokens[index].startsLine) continue;
+      unsigned end=index+1;
+      while (end<tokens.size() && !tokens[end].startsLine) ++end;
+      std::vector<std::string> words;
+      for (unsigned cursor=index;cursor<end;++cursor) words.push_back(tokens[cursor].text);
+      const auto beginOffset=source.getFileOffset(tokens[index].location);
+      const auto lineEnd=buffer.find('\n',beginOffset);
+      const auto line=buffer.slice(beginOffset,lineEnd==llvm::StringRef::npos?buffer.size():lineEnd);
+      if (line.contains('\\') || line.contains("??"))
+        return fail("scratch directives require unspliced physical source tokens");
+      directives.push_back({index,end,std::move(words)});
+    }
+    std::set<unsigned> accepted;
+    if (!directives.empty() && directives.front().words.size()==3 &&
+        directives.front().words[1]=="ifndef") {
+      const auto& first=directives.front();
+      const auto& last=directives.back();
+      const auto name=first.words[2];
+      if (directives.size()<3 || first.first!=0 || first.last!=3 ||
+          directives[1].first!=3 ||
+          directives[1].words!=std::vector<std::string>{"#","define",name} ||
+          last.words!=std::vector<std::string>{"#","endif"} || last.last!=tokens.size() ||
+          !inputWitness(UniformInputWitness::EmptyOuterGuard,tokens[first.first+2].location,name))
+        return fail("scratch outer guard has no complete sole-definition input witness");
+      accepted.insert(0);accepted.insert(1);accepted.insert(directives.size()-1);
+    }
+    bool archSeen=false;
+    for (unsigned index=0;index<directives.size();++index) {
+      if (accepted.count(index)) continue;
+      const auto& directive=directives[index];
+      std::string compact;
+      for (const auto& word : directive.words) compact+=word;
+      if (compact=="#include<cooperative_groups.h>" ||
+          compact=="#include<cooperative_groups/reduce.h>") continue;
+      if (compact=="#include<stdio.h>" && inputWitness(
+              UniformInputWitness::NativeStdioInclude,tokens[directive.first].location,"stdio.h")) {
+        accepted.insert(index);continue;
+      }
+      if (!archSeen && directive.words==std::vector<std::string>{"#","if","__CUDA_ARCH__",">=","800"} &&
+          index+1<directives.size() && !accepted.count(index+1) &&
+          directives[index+1].words==std::vector<std::string>{"#","endif"} &&
+          inputWitness(UniformInputWitness::InactiveArchGuard,tokens[directive.first+2].location,"__CUDA_ARCH__") &&
+          inactiveIntegerReduction(tokens,directive.last,directives[index+1].first)) {
+        archSeen=true;
+        accepted.insert(index);accepted.insert(index+1);
+        const auto location=tokens[directive.first].location;
+        stats.guards.push_back({location,{location,location},
+            "#if defined(__CUDA_ARCH__)\n#error \"Ascify inactive integer reduction requires undefined __CUDA_ARCH__\"\n#endif\n",true});
+        continue;
+      }
+      return fail("scratch raw directive or inactive specialization lacks a closed input witness");
+    }
+    for (const auto index : accepted)
+      admitted.insert(source.getFileOffset(tokens[directives[index].first].location));
+    return true;
+  }
+
   bool auditRawTypes() {
     std::set<unsigned> storageTokens;
     for (const auto location : storageTypeLocations) {
@@ -795,6 +940,8 @@ class Proof {
     const auto buffer = source.getBufferData(source.getMainFileID(), &invalid);
     if (invalid) return fail("cannot inspect raw scratch source");
     const auto begin = source.getLocForStartOfFile(source.getMainFileID());
+    std::set<unsigned> admittedDirectives;
+    if (!kernels.empty() && !proveDirectives(buffer, admittedDirectives)) return false;
     Lexer lexer(begin, context.getLangOpts(), buffer.begin(), buffer.begin(), buffer.end());
     Token token;
     while (!lexer.LexFromRawLexer(token)) {
@@ -807,7 +954,8 @@ class Proof {
           for (const char character : line)
             if (!std::isspace(static_cast<unsigned char>(character))) compact += character;
           if (compact != "#include<cooperative_groups.h>" &&
-              compact != "#include<cooperative_groups/reduce.h>")
+              compact != "#include<cooperative_groups/reduce.h>" &&
+              !admittedDirectives.count(offset))
             return fail("scratch TU admits only its two authenticated direct includes; conditional or other directives are outside the proof");
         }
         for (const auto* function : rawFunctionRanges) {
@@ -867,16 +1015,22 @@ class Proof {
   std::vector<SourceLocation> storageTypeLocations;
   std::set<const FunctionDecl*> rawFunctionRanges;
   const std::function<bool(SourceLocation)>& trustedSdk;
+  const std::function<bool(UniformInputWitness, SourceLocation,
+                           const std::string&)>& inputWitness;
+  std::set<const FunctionDecl*> allFunctions;
 };
 }  // namespace
 
 bool ValidateUniformBlockReduction(
     clang::ASTContext& context, const FrontendCompatibilityConfig& profile,
     UniformBlockReductionStats& stats, std::string& error, bool standardPreprocessing,
-    const std::function<bool(clang::SourceLocation)>& trustedSdk) {
+    const std::function<bool(clang::SourceLocation)>& trustedSdk,
+    const std::function<bool(UniformInputWitness, clang::SourceLocation,
+                             const std::string&)>& inputWitness) {
   stats = {};
   error.clear();
   if (!profile.enabled()) return true;
-  return Proof(context, profile, stats, error, standardPreprocessing,trustedSdk).run();
+  return Proof(context, profile, stats, error, standardPreprocessing,
+               trustedSdk,inputWitness).run();
 }
 }  // namespace ascify
