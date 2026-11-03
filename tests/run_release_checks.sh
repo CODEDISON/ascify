@@ -395,6 +395,11 @@ run_check "uniform block reduction whole-TU admission and publication boundaries
     --binary "$ASCIFY_BINARY" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+run_check "versioned uniform binary64, loops, shared conversion and raw input boundaries" \
+  "$python" -B "$repo_root/tests/frontend_compat/check_uniform_extended_domain.py" \
+    --binary "$ASCIFY_BINARY" --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" --clang "${CLANG:-clang++}" \
+    --evidence-dir "$work_dir/uniform_extended"
 run_check "complete-warp static16 and erased-group source/publication boundaries" \
   "$python" -B "$repo_root/tests/frontend_compat/check_fullwarp_groups.py" \
     --binary "$ASCIFY_BINARY" --cuda-path "$ASCIFY_CUDA_PATH" \

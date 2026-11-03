@@ -48,7 +48,8 @@ def main():
         "nominated_inline_namespace": (original.replace(anchor, anchor + "\nnamespace provider { inline namespace empty {} }\nnamespace importer { using namespace provider::empty; }"), False, marker, []),
         "macro_namespace_import": (original.replace(anchor, anchor + "\nnamespace empty_provider {}\n#define EMPTY_IMPORT using namespace empty_provider;\nnamespace importer { EMPTY_IMPORT }"), False, marker, []),
         "adl_namespace_reopen": (original.replace(anchor, anchor + "\nnamespace cooperative_groups { template<class T, unsigned N, class P> __device__ T forward_sum(T value, thread_block_tile<N, P>&) { return value + T(1); } }"), False, "source declarations in cooperative_groups", []),
-        "future_double_instantiation": (original + "\ntemplate __global__ void uniform_sum<double, 128, 64>(const double*, double*);\n", False, "scratch kernel parameters must be scalar int/float or their pointers", []),
+        # v2: exact binary64 plus and scratch storage are now an admitted domain.
+        "future_double_instantiation": (original + "\ntemplate __global__ void uniform_sum<double, 128, 64>(const double*, double*);\n", True, "", []),
         "future_long_instantiation": (original + "\ntemplate __global__ void uniform_sum<long, 128, 64>(const long*, long*);\n", False, "Ascify cooperative plus supports int, float and exact binary64 double", []),
         "future_ascify_namespace_import": (original.replace(anchor, anchor + "\nnamespace ascify {}\nnamespace importer { using namespace ascify; }"), False, "input owns the top-level name 'ascify'", []),
         "future_facade_namespace_import": (original.replace(anchor, anchor + "\nnamespace ascify_cg {}\nnamespace importer { using namespace ascify_cg; }"), False, "source declarations in cooperative_groups", []),
@@ -114,7 +115,8 @@ def main():
                 require(result.returncode == 0 and output.is_file(), name + ": positive failed\n" + result.stderr)
                 require(output.read_text().count("static_assert(::ascify_cg::uniform_scalar_domain<T>::value") == 1,
                         name + ": future scalar guard missing/duplicated")
-                require("instantiations=6" in result.stderr, name + ": concrete instantiation proof missing")
+                expected = 7 if name == "future_double_instantiation" else 6
+                require(f"instantiations={expected}" in result.stderr, name + ": concrete instantiation proof missing")
             else:
                 require(result.returncode != 0 and not output.exists(), name + ": unsafe output was published")
                 require(reason in result.stderr, name + ": did not reach intended proof gate\n" + result.stderr)
