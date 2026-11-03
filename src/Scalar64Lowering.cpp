@@ -2,6 +2,7 @@
 #include "CudaExecutionCoordinates.h"
 
 #include <map>
+#include <algorithm>
 #include <set>
 #include <cstdint>
 #include <utility>
@@ -137,6 +138,7 @@ class Proof {
   std::map<unsigned, std::string> prefixes, suffixes;
   std::map<unsigned, Scalar64Edit> tokens;
   std::set<unsigned> editedOperators;
+  mutable std::map<const NonTypeTemplateParmDecl*,bool> integerArgumentCache;
 
   bool fail(SourceLocation location, const std::string& text) {
     if (error.empty()) { badLocation = location; error = text; }
@@ -397,12 +399,106 @@ class Proof {
     }
     return true;
   }
+  bool integerArgument(const TemplateArgumentLoc& written,
+                       const TemplateArgument& actual) const {
+    if (actual.getKind()!=TemplateArgument::Integral || actual.getAsIntegral().isNegative() ||
+        actual.getAsIntegral().getActiveBits()>64) return false;
+    const Expr* expression=nullptr;
+    if (written.getArgument().getKind()==TemplateArgument::Expression)
+      expression=written.getSourceExpression();
+    else if (written.getArgument().getKind()==TemplateArgument::Integral)
+      expression=written.getSourceIntegralExpression();
+    // A template constant wrapper or its builtin integral promotion retains
+    // the actual written integer literal. No generic EvaluateAsInt fallback.
+    while (expression) {
+      if (!literal(expression->getBeginLoc()) || !literal(expression->getEndLoc())) return false;
+      if (const auto* constant=dyn_cast<ConstantExpr>(expression)) expression=constant->getSubExpr();
+      else if (const auto* cast=dyn_cast<ImplicitCastExpr>(expression)) {
+        if (cast->getCastKind()!=CK_IntegralCast && cast->getCastKind()!=CK_NoOp) return false;
+        if (!cast->getType()->isBuiltinType() || !cast->getType()->isIntegerType() ||
+            !cast->getSubExpr()->getType()->isBuiltinType() ||
+            !cast->getSubExpr()->getType()->isIntegerType()) return false;
+        expression=cast->getSubExpr();
+      } else break;
+    }
+    const auto* value=dyn_cast_or_null<IntegerLiteral>(expression);
+    if (!value || value->getValue().getActiveBits()>64 || value->HasSideEffects(context)) return false;
+    Token token;
+    if (Lexer::getRawToken(value->getLocation(),token,source,context.getLangOpts(),true) ||
+        !token.is(tok::numeric_constant) || token.getLocation()!=value->getLocation()) return false;
+    return value->getValue().getZExtValue()==actual.getAsIntegral().getZExtValue();
+  }
+  bool closedIntegerLeaf(const Expr* expression) const {
+    const auto* substitution=dyn_cast<SubstNonTypeTemplateParmExpr>(expression);
+    const auto* reference=dyn_cast<DeclRefExpr>(expression);
+    const auto* parameter=substitution ? substitution->getParameter() :
+        reference ? dyn_cast<NonTypeTemplateParmDecl>(reference->getDecl()) : nullptr;
+    if (!parameter || !parameter->getIdentifier() || parameter->isParameterPack() ||
+        parameter->hasDefaultArgument() || parameter->hasAttrs() ||
+        !parameter->getType()->isBuiltinType() || !parameter->getType()->isIntegerType() ||
+        parameter->getType().isVolatileQualified() || !literal(parameter->getLocation()) ||
+        !literal(expression->getBeginLoc()) || !literal(expression->getEndLoc())) return false;
+    const FunctionTemplateDecl* primary=nullptr;
+    const auto index=parameter->getIndex();
+    for (const auto& family:parameters) {
+      const auto* list=family.first->getTemplateParameters();
+      if (index<list->size() && list->getParam(index)==parameter) primary=family.first;
+    }
+    if (!primary) return false;
+    const FunctionDecl* owner=nullptr;
+    for (const auto& entry:inventory.expressions)
+      if (std::find(entry.second.begin(),entry.second.end(),expression)!=entry.second.end()) {
+        if (family(entry.first)!=primary || (owner && owner->getCanonicalDecl()!=entry.first->getCanonicalDecl())) return false;
+        owner=entry.first;
+      }
+    if (!owner) return false;
+    Token name;
+    if (Lexer::getRawToken(expression->getBeginLoc(),name,source,context.getLangOpts(),true) ||
+        Lexer::getSpelling(name,source,context.getLangOpts())!=parameter->getName()) return false;
+    if (substitution) {
+      const auto* associated=substitution->getAssociatedDecl();
+      const auto* function=dyn_cast<FunctionDecl>(associated);
+      if (substitution->getIndex()!=index || substitution->getPackIndex() ||
+          (associated!=primary && associated!=primary->getTemplatedDecl() &&
+           (!function || family(function)!=primary))) return false;
+      const auto* args=owner->getTemplateSpecializationArgs();
+      const auto* replacement=dyn_cast<IntegerLiteral>(substitution->getReplacement()->IgnoreParenImpCasts());
+      if (!args || index>=args->size() || args->get(index).getKind()!=TemplateArgument::Integral ||
+          args->get(index).getAsIntegral().isNegative() || args->get(index).getAsIntegral().getActiveBits()>64 ||
+          !replacement || replacement->getValue().getActiveBits()>64 ||
+          replacement->getValue().getZExtValue()!=args->get(index).getAsIntegral().getZExtValue()) return false;
+    }
+    const auto cached=integerArgumentCache.find(parameter);
+    if (cached!=integerArgumentCache.end()) return cached->second;
+    std::set<const FunctionDecl*> witnessed;
+    for (const auto* use:inventory.references) {
+      const auto* instance=dyn_cast<FunctionDecl>(use->getDecl());
+      if (family(instance)!=primary) continue;
+      const auto* args=instance->getTemplateSpecializationArgs();
+      if (!inventory.directCallees.count(use) || !use->hasExplicitTemplateArgs() ||
+          index>=use->getNumTemplateArgs() || !args || index>=args->size() ||
+          !integerArgument(use->getTemplateArgs()[index],args->get(index)))
+        return integerArgumentCache[parameter]=false;
+      witnessed.insert(instance->getCanonicalDecl());
+    }
+    for (const auto* instance:primary->specializations()) {
+      if (witnessed.count(instance->getCanonicalDecl())) continue;
+      const auto* written=instance->getTemplateSpecializationArgsAsWritten();
+      const auto* args=instance->getTemplateSpecializationArgs();
+      if (!written || index>=written->NumTemplateArgs || !args || index>=args->size() ||
+          !integerArgument(written->arguments()[index],args->get(index)))
+        return integerArgumentCache[parameter]=false;
+      witnessed.insert(instance->getCanonicalDecl());
+    }
+    return integerArgumentCache[parameter]=!witnessed.empty();
+  }
   bool pureInteger(const Expr* expression, unsigned depth = 0) const {
     if (!expression || depth > 32 || expression->getType().isVolatileQualified()) return false;
     if (const auto* cast = dyn_cast<ImplicitCastExpr>(expression)) return pureInteger(cast->getSubExpr(), depth + 1);
     expression = expression->IgnoreParens();
     if (!expression->getType()->isIntegerType() || expression->getType()->isEnumeralType()) return false;
     if (ProveCudaExecutionCoordinate(expression,context,sdk)) return true;
+    if (closedIntegerLeaf(expression)) return true;
     if (isa<IntegerLiteral>(expression) || isa<CXXBoolLiteralExpr>(expression)) return true;
     if (const auto* ref = dyn_cast<DeclRefExpr>(expression)) {
       const auto* variable = dyn_cast<VarDecl>(ref->getDecl());
