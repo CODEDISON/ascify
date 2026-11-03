@@ -238,6 +238,15 @@ run_check "closed scalar64 transport and binary64 add AST/CPU contracts" \
     --cxx "${CXX:-c++}" \
     --evidence-dir "$work_dir/scalar64_lowering"
 
+run_check "closed CG forwarding and unselected lookup inventory boundaries" \
+  "$python" -B "$rewrite_dir/check_scalar64_reduce_lookup.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang++}" \
+    --cxx "${CXX:-c++}" \
+    --evidence-dir "$work_dir/scalar64_reduce_lookup"
+
 run_check "pure masked accumulation AST contracts and old fallback boundaries" \
   "$python" -B "$rewrite_dir/check_masked_accumulation_lowering.py" \
     --binary "$ASCIFY_BINARY" \
