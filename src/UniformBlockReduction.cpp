@@ -75,7 +75,8 @@ bool integerArgument(QualType type, unsigned index, unsigned& output) {
 }
 bool scalar(QualType type, ASTContext& context) {
   return context.hasSameUnqualifiedType(type, context.IntTy) ||
-         context.hasSameUnqualifiedType(type, context.FloatTy);
+         context.hasSameUnqualifiedType(type, context.FloatTy) ||
+         context.hasSameUnqualifiedType(type, context.DoubleTy);
 }
 
 struct BodyInventory : RecursiveASTVisitor<BodyInventory> {
@@ -83,6 +84,7 @@ struct BodyInventory : RecursiveASTVisitor<BodyInventory> {
   std::vector<const DeclRefExpr*> references;
   std::vector<const CallExpr*> calls;
   std::vector<const CXXConstructExpr*> constructions;
+  std::vector<const Stmt*> loops;
   bool forbiddenExit = false;
   bool VisitVarDecl(VarDecl* variable) { variables.push_back(variable); return true; }
   bool VisitDeclRefExpr(DeclRefExpr* expression) { references.push_back(expression); return true; }
@@ -96,8 +98,8 @@ struct BodyInventory : RecursiveASTVisitor<BodyInventory> {
   bool VisitLambdaExpr(LambdaExpr*) { forbiddenExit = true; return true; }
   bool VisitCXXNewExpr(CXXNewExpr*) { forbiddenExit = true; return true; }
   bool VisitCXXDeleteExpr(CXXDeleteExpr*) { forbiddenExit = true; return true; }
-  bool VisitForStmt(ForStmt*) { forbiddenExit = true; return true; }
-  bool VisitWhileStmt(WhileStmt*) { forbiddenExit = true; return true; }
+  bool VisitForStmt(ForStmt* loop) { loops.push_back(loop); return true; }
+  bool VisitWhileStmt(WhileStmt* loop) { loops.push_back(loop); return true; }
   bool VisitDoStmt(DoStmt*) { forbiddenExit = true; return true; }
   bool VisitCXXForRangeStmt(CXXForRangeStmt*) { forbiddenExit = true; return true; }
   bool VisitIfStmt(IfStmt* statement) {
@@ -397,6 +399,175 @@ class Proof {
     return true;
   }
 
+  // A zero-state source wrapper may expose CUDA's dynamically sized shared
+  // array. Prove the actual selected conversion; a same-sized user class or
+  // a constructor with a side effect never obtains this exception.
+  bool sharedPointerConversion(const CallExpr* call,
+                               const std::vector<const VarDecl*>& variables,
+                               std::set<const CXXConstructExpr*>& temporaries) {
+    const auto* member = dyn_cast<CXXMemberCallExpr>(call);
+    const auto* conversion = member ? dyn_cast_or_null<CXXConversionDecl>(call->getDirectCallee()) : nullptr;
+    const auto* function = conversion ? conversion->getDefinition() : nullptr;
+    const auto* record = conversion ? conversion->getParent()->getDefinition() : nullptr;
+    if (!function || !record || !cleanLocation(function) || !cleanLocation(record) ||
+        !conversion->hasAttr<CUDADeviceAttr>() || conversion->hasAttr<CUDAHostAttr>() ||
+        conversion->isVirtual() || conversion->isVolatile() || conversion->isConstexpr() ||
+        conversion->getRefQualifier() != RQ_None || conversion->getNumParams() != 0 ||
+        call->getNumArgs() != 0 || record->isUnion() || record->getNumBases() ||
+        !record->field_empty() || record->hasAttrs() || !record->isStandardLayout() ||
+        !record->isTriviallyCopyable() || !record->hasTrivialDefaultConstructor() ||
+        !record->hasTrivialDestructor()) return false;
+    for (const auto* attr : function->attrs()) if (!isa<CUDADeviceAttr>(attr)) return false;
+    const auto pointer = conversion->getConversionType();
+    if (!pointer->isPointerType() || !scalar(pointer->getPointeeType(), context) ||
+        pointer->getPointeeType().isVolatileQualified() ||
+        pointer->getPointeeType().isConstQualified() != conversion->isConst() ||
+        !context.hasSameType(pointer, call->getType())) return false;
+    unsigned conversions = 0;
+    for (const auto* decl : record->decls()) {
+      if (const auto* method = dyn_cast<CXXMethodDecl>(decl)) {
+        if (method->isImplicit()) continue;
+        if (!isa<CXXConversionDecl>(method)) return false;
+        ++conversions;
+      } else if (!isa<CXXRecordDecl>(decl)) return false;
+    }
+    if (conversions != 2) return false;
+    const auto* object = dyn_cast_or_null<CXXConstructExpr>(plain(member->getImplicitObjectArgument()));
+    if (!object || object->getNumArgs() != 0 || object->getConstructor()->getParent() != record ||
+        !object->getConstructor()->isTrivial()) return false;
+    const auto* body = dyn_cast_or_null<CompoundStmt>(function->getBody());
+    if (!body || body->size() != 2) return false;
+    auto statement = body->body_begin();
+    const auto* declaration = dyn_cast<DeclStmt>(*statement++);
+    const auto* storage = declaration && declaration->isSingleDecl() ?
+        dyn_cast<VarDecl>(declaration->getSingleDecl()) : nullptr;
+    const auto* result = dyn_cast<ReturnStmt>(*statement);
+    const auto* cast = result ? dyn_cast_or_null<CStyleCastExpr>(plain(result->getRetValue())) : nullptr;
+    const auto* array = storage ? context.getAsIncompleteArrayType(storage->getType()) : nullptr;
+    if (!storage || !array || !storage->hasAttr<CUDASharedAttr>() ||
+        storage->getStorageClass() != SC_Extern || storage->hasInit() || !cleanLocation(storage) ||
+        !cast || !context.hasSameType(cast->getType(), pointer) ||
+        !(cast->getCastKind() == CK_BitCast || cast->getCastKind() == CK_NoOp) ||
+        !use(cast->getSubExpr(), storage)) return false;
+    for (const auto* attr : storage->attrs()) if (!isa<CUDASharedAttr>(attr)) return false;
+    const bool binary64 = context.hasSameUnqualifiedType(pointer->getPointeeType(), context.DoubleTy);
+    if (!context.hasSameType(array->getElementType(), binary64 ? context.DoubleTy : context.IntTy)) return false;
+    // Constructor and conversion share one temporary lifetime in the actual
+    // local pointer initializer. The pointer is never an object-state escape.
+    bool initializer = false;
+    for (const auto* variable : variables) {
+      if (!variable->isLocalVarDecl() || !variable->hasInit() ||
+          !context.hasSameType(variable->getType(), pointer)) continue;
+      if (plain(variable->getInit()) == call) { initializer = true; break; }
+    }
+    if (!initializer) return false;
+    temporaries.insert(object);
+    admittedCalls.insert(call);
+    rawFunctionRanges.insert(function);
+    return true;
+  }
+
+  // Preserve the source grid-stride/induction loop outside every collective.
+  // This is a statement/side-effect closure, not a promise that an originally
+  // nonterminating or out-of-bounds CUDA execution becomes valid on the NPU.
+  bool closedLoop(const Stmt* loop, const std::set<const CallExpr*>& participation,
+                  const BodyInventory& kernelInventory) {
+    const Expr *condition = nullptr, *increment = nullptr;
+    const Stmt* body = nullptr;
+    const VarDecl* induction = nullptr;
+    const VarDecl* stride = nullptr;
+    const VarDecl* bound = nullptr;
+    if (const auto* value = dyn_cast<WhileStmt>(loop)) {
+      condition = value->getCond(); body = value->getBody();
+      const auto* compound = dyn_cast<CompoundStmt>(body);
+      const auto* step = compound && !compound->body_empty() ?
+          dyn_cast<BinaryOperator>(compound->body_back()) : nullptr;
+      const auto* left = step ? reference(step->getLHS()) : nullptr;
+      const auto* right = step ? reference(step->getRHS()) : nullptr;
+      induction = left ? dyn_cast<VarDecl>(left->getDecl()) : nullptr;
+      stride = right ? dyn_cast<VarDecl>(right->getDecl()) : nullptr;
+      if (!step || step->getOpcode() != BO_AddAssign || !induction || !stride ||
+          induction == stride || !stride->isLocalVarDecl() || !stride->hasInit() ||
+          !stride->getType()->isUnsignedIntegerType() || stride->getType().isVolatileQualified())
+        return fail("scratch loop requires a closed unsigned grid-stride increment");
+      increment = step;
+    } else if (const auto* value = dyn_cast<ForStmt>(loop)) {
+      condition = value->getCond(); body = value->getBody(); increment = value->getInc();
+      const auto* declaration = dyn_cast_or_null<DeclStmt>(value->getInit());
+      induction = declaration && declaration->isSingleDecl() ?
+          dyn_cast<VarDecl>(declaration->getSingleDecl()) : nullptr;
+      const auto* step = dyn_cast_or_null<UnaryOperator>(plain(increment));
+      Expr::EvalResult start;
+      if (!induction || !induction->hasInit() || !induction->getInit()->EvaluateAsInt(start, context) ||
+          start.Val.getInt() != 0 || !step || !step->isIncrementOp() ||
+          !use(step->getSubExpr(), induction))
+        return fail("scratch for-loop requires one zero-based builtin induction");
+    } else return fail("scratch loop kind is not admitted");
+    const auto* compare = dyn_cast_or_null<BinaryOperator>(plain(condition));
+    if (!induction || !induction->isLocalVarDecl() || induction->getType().isVolatileQualified() ||
+        !induction->getType()->isIntegerType() || context.getTypeSize(induction->getType()) != 32 ||
+        !compare || compare->getOpcode() != BO_LT || !use(compare->getLHS(), induction) ||
+        !compare->getRHS()->getType()->isIntegerType())
+      return fail("scratch loop condition must compare its builtin induction with an effect-free bound");
+    const auto* boundReference = reference(compare->getRHS());
+    bound = boundReference ? dyn_cast<VarDecl>(boundReference->getDecl()) : nullptr;
+    if (bound && (!bound->getType()->isBuiltinType() ||
+                  !bound->getType()->isIntegerType() || bound->getType()->isAtomicType() ||
+                  bound->getType().isVolatileQualified()))
+      return fail("scratch loop bound holder must be a non-reference builtin integer");
+    const auto* query = dyn_cast_or_null<CallExpr>(plain(compare->getRHS()));
+    Expr::EvalResult constant;
+    const bool knownBound = compare->getRHS()->EvaluateAsInt(constant,context) &&
+        !constant.Val.getInt().isNegative() && constant.Val.getInt().ule(1024);
+    const bool staticQuery = query && admittedCalls.count(query) && query->getNumArgs()==0 &&
+        query->getDirectCallee() && query->getDirectCallee()->getName()=="meta_group_size";
+    if ((!bound || bound==induction || bound->getType().isVolatileQualified() ||
+         (!isa<ParmVarDecl>(bound) && !bound->isLocalVarDecl())) && !knownBound && !staticQuery)
+      return fail("scratch loop bound requires an invariant builtin variable or static group-size query");
+    if (!staticQuery && compare->getRHS()->HasSideEffects(context))
+      return fail("scratch loop bound has an unproved side effect");
+    // An alias can be formed before the loop and written through inside it.
+    // Inspect every use of its induction/stride/bound holder in the kernel,
+    // including declarations of references and pointer/address observations.
+    for (const auto* ref : kernelInventory.references) {
+      if (ref->getDecl()!=induction && ref->getDecl()!=stride && ref->getDecl()!=bound) continue;
+      const Expr* at=ref;
+      for (;;) {
+        const auto parents=context.getParents(*at);
+        if (parents.size()!=1) return fail("scratch loop holder has an ambiguous alias use");
+        if (const auto* paren=parents[0].get<ParenExpr>()) { at=paren; continue; }
+        if (const auto* read=parents[0].get<ImplicitCastExpr>())
+          if (read->getCastKind()==CK_LValueToRValue) break;
+        if (const auto* write=parents[0].get<BinaryOperator>())
+          if (write->isAssignmentOp() && write->getLHS()==at) break;
+        if (const auto* write=parents[0].get<UnaryOperator>())
+          if (write->isIncrementDecrementOp() && write->getSubExpr()==at) break;
+        return fail("scratch loop induction/stride/bound cannot form an alias or address escape");
+      }
+    }
+    BodyInventory inside; inside.TraverseStmt(const_cast<Stmt*>(body));
+    for (const auto* call : inside.calls)
+      if (participation.count(call)) return fail("scratch loop cannot contain a collective or block synchronization");
+    class Mutations : public RecursiveASTVisitor<Mutations> {
+     public:
+      const VarDecl *induction, *stride, *bound; const Expr* increment; bool unsafe = false;
+      Mutations(const VarDecl* i, const VarDecl* s, const VarDecl* b, const Expr* e):induction(i),stride(s),bound(b),increment(e) {}
+      bool VisitBinaryOperator(BinaryOperator* value) {
+        const auto* ref = reference(value->getLHS());
+        if (value->isAssignmentOp() && ref && (ref->getDecl()==induction || ref->getDecl()==stride || ref->getDecl()==bound) && value!=increment) unsafe=true;
+        return true;
+      }
+      bool VisitUnaryOperator(UnaryOperator* value) {
+        const auto* ref = reference(value->getSubExpr());
+        if (ref && (ref->getDecl()==induction || ref->getDecl()==stride || ref->getDecl()==bound) &&
+            (value->getOpcode()==UO_AddrOf || value->isIncrementDecrementOp()) && value!=increment) unsafe=true;
+        return true;
+      }
+    } mutations(induction,stride,bound,increment);
+    mutations.TraverseStmt(const_cast<Stmt*>(body));
+    return !mutations.unsafe || fail("scratch loop induction/stride can be mutated or escape");
+  }
+
   bool proveKernel(const FunctionDecl* kernel) {
     if (!cleanLocation(kernel)) return fail("scratch kernel must be a literal main-file definition");
     const auto* body = dyn_cast<CompoundStmt>(kernel->getBody());
@@ -407,8 +578,8 @@ class Proof {
     for (const auto* parameter : kernel->parameters()) {
       auto type = parameter->getType();
       if (type->isPointerType()) type = type->getPointeeType();
-      if (!(type->isIntegerType() || context.hasSameUnqualifiedType(type, context.FloatTy)))
-        return fail("scratch kernel parameters must be scalar int/float or their pointers");
+      if (!(type->isIntegerType() || scalar(type,context)))
+        return fail("scratch kernel parameters must be builtin integer/int/float/double or their pointers");
     }
     if (const auto* primary = kernel->getPrimaryTemplate()) {
       const auto* parameters = primary->getTemplateParameters();
@@ -435,12 +606,12 @@ class Proof {
         stats.guards.push_back({insertion,
             pattern->getSourceRange(),
             "\n  static_assert(::ascify_cg::uniform_scalar_domain<" + type->getNameAsString() +
-            ">::value, \"Ascify uniform reduction kernel admits int and float only\");\n"});
+            ">::value, \"Ascify uniform reduction kernel admits int, float and exact double only\");\n"});
       }
     }
     BodyInventory inventory;
     inventory.TraverseStmt(const_cast<CompoundStmt*>(body));
-    if (inventory.forbiddenExit) return fail("kernel contains a loop, early exit, asm, lambda, or allocation");
+    if (inventory.forbiddenExit) return fail("kernel contains an early exit, unsupported loop, asm, lambda, or allocation");
     const VarDecl *storage = nullptr, *block = nullptr, *tile = nullptr;
     for (const auto* variable : inventory.variables) {
       const Role kind = role(variable->getType());
@@ -470,9 +641,14 @@ class Proof {
         if (!trustedLocation(declaration->getLocation()))
           return fail("scratch projection type has an untrusted redeclaration");
     }
+    std::set<const CXXConstructExpr*> pointerTemporaries;
+    for (const auto* call : inventory.calls)
+      if (isa_and_nonnull<CXXConversionDecl>(call->getDirectCallee()))
+        sharedPointerConversion(call,inventory.variables,pointerTemporaries);
     for (const auto* constructor : inventory.constructions)
-      if (role(constructor->getType()) == Role::None ||
-          !trustedFunction(constructor->getConstructor()))
+      if (!pointerTemporaries.count(constructor) &&
+          (role(constructor->getType()) == Role::None ||
+           !trustedFunction(constructor->getConstructor())))
         return fail("kernel has an unproved constructor or temporary lifetime");
     if (const auto* constructor = dyn_cast_or_null<CXXConstructExpr>(plain(storage->getInit())))
       if (constructor->getNumArgs() != 0) return fail("scratch storage must be default constructed");
@@ -491,6 +667,7 @@ class Proof {
       return fail("block and tile must derive directly from the unique scratch");
     admittedCalls.insert(blockInit);
     admittedCalls.insert(tileInit);
+    std::set<const CallExpr*> participation;
     unsigned collectives = 0;
     for (const auto* statement : body->body()) {
       const auto* assignment = dyn_cast<BinaryOperator>(statement);
@@ -507,6 +684,7 @@ class Proof {
           !pureForwarder(call->getDirectCallee()) || !use(call->getArg(1), tile))
         return fail("collective requires a pure unique forwarder and local scalar assignment");
       admittedCalls.insert(call);
+      participation.insert(call);
       ++collectives;
     }
     if (!collectives) return fail("no unconditional top-level reduction was proven");
@@ -526,6 +704,7 @@ class Proof {
             return fail("scratch group uses an unproved member operation");
           admittedReferences.insert(object);
           admittedCalls.insert(call);
+          if (isBlock && name=="sync") participation.insert(call);
           continue;
         }
       }
@@ -542,15 +721,19 @@ class Proof {
             return fail("scratch group uses an unproved static member");
           admittedReferences.insert(object);
           admittedCalls.insert(call);
+          if (isBlock && name=="sync") participation.insert(call);
           continue;
         }
       }
       if (owned(callee, "sync") && call->getNumArgs() == 1 && use(call->getArg(0), block)) {
         admittedCalls.insert(call);
+        participation.insert(call);
         continue;
       }
       return fail("kernel calls an unproved helper that may alter participation");
     }
+    for (const auto* loop : inventory.loops)
+      if (!closedLoop(loop,participation,inventory)) return false;
     for (const auto* ref : inventory.references)
       if (related(ref->getType()) && !admittedReferences.count(ref))
         return fail("scratch group escapes, is reassigned, or is used in a divergent collective");
