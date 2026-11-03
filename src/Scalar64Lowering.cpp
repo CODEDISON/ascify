@@ -120,6 +120,7 @@ class Proof {
   const std::function<bool(SourceLocation)>& owned;
   const std::function<bool(SourceLocation)>& sdk;
   const std::function<bool(const FunctionDecl*)>& shuffle;
+  const std::function<bool(const FunctionDecl*)>& reduce;
   const std::function<bool(llvm::StringRef, SourceLocation)>& macroFree;
   Scalar64Plan& plan;
   SourceLocation& badLocation;
@@ -129,6 +130,8 @@ class Proof {
   std::map<const FunctionDecl*, std::set<const FunctionDecl*>> edges;
   std::map<const FunctionTemplateDecl*, const TemplateTypeParmDecl*> parameters;
   std::set<const FunctionTemplateDecl*> arithmeticFamilies;
+  std::map<const FunctionTemplateDecl*, const TemplateTypeParmDecl*> reduceGroups;
+  std::map<const FunctionDecl*, std::set<const CallExpr*>> exactReductionCalls;
   std::map<unsigned, std::vector<Operation>> sites;
   std::map<unsigned, std::string> prefixes, suffixes;
   std::map<unsigned, Scalar64Edit> tokens;
@@ -157,6 +160,95 @@ class Proof {
     const auto name = callee->getName();
     return name == "__shfl_sync" || name == "__shfl_down_sync" ||
            name == "shfl" || name == "shfl_down";
+  }
+  bool reductionGroup(QualType type) const {
+    if (type.isNull() || type.isVolatileQualified() || type->isReferenceType()) return false;
+    type = type.getUnqualifiedType();
+    const auto* record = type->getAsCXXRecordDecl();
+    const auto* item = dyn_cast_or_null<ClassTemplateSpecializationDecl>(record);
+    if (!item || item->getSpecializationKind() == TSK_ExplicitSpecialization ||
+        item->getTemplateArgs().size() != 2 || !record->getDefinition()) return false;
+    for (const auto* d : record->redecls()) if (!sdk(source.getSpellingLoc(d->getLocation()))) return false;
+    for (const auto* d : item->getSpecializedTemplate()->redecls())
+      if (!sdk(source.getSpellingLoc(d->getLocation()))) return false;
+    const auto& args=item->getTemplateArgs();
+    if (args[0].getKind()!=TemplateArgument::Integral ||
+        args[0].getAsIntegral().isNegative() || args[0].getAsIntegral().getActiveBits()>16) return false;
+    const auto size=args[0].getAsIntegral().getZExtValue();
+    const auto name=item->getSpecializedTemplate()->getQualifiedNameAsString();
+    if (name=="cooperative_groups::thread_block_tile") {
+      if (size!=32 || args[1].getKind()!=TemplateArgument::Type) return false;
+      const auto parent=args[1].getAsType();
+      if (parent->isVoidType()) return true;
+      const auto* block=parent->getAsCXXRecordDecl();
+      if (!block || block->getQualifiedNameAsString()!="cooperative_groups::thread_block") return false;
+      for (const auto* d : block->redecls()) if (!sdk(source.getSpellingLoc(d->getLocation()))) return false;
+      return true;
+    }
+    if (name!="cooperative_groups::scratch_thread_block_tile" ||
+        !(size==32 || size==64 || size==128 || size==256 || size==512) ||
+        args[1].getKind()!=TemplateArgument::Integral || args[1].getAsIntegral().isNegative() ||
+        args[1].getAsIntegral().getActiveBits()>16) return false;
+    const auto block=args[1].getAsIntegral().getZExtValue();
+    return block>=32 && block<=1024 && block%size==0;
+  }
+  bool exactReduction(const CallExpr* call) const {
+    const auto* callee=call ? call->getDirectCallee() : nullptr;
+    if (!callee || !reduce(callee) || call->getNumArgs()!=3 ||
+        !addType(call->getType(),context) || !reductionGroup(call->getArg(0)->getType())) return false;
+    const auto* group=dyn_cast<DeclRefExpr>(plain(call->getArg(0)));
+    const auto* variable=group ? dyn_cast<VarDecl>(group->getDecl()) : nullptr;
+    if (!variable || (!isa<ParmVarDecl>(variable) && !variable->isLocalVarDecl()) ||
+        call->getArg(0)->HasSideEffects(context) ||
+        !context.hasSameUnqualifiedType(call->getArg(1)->getType(),call->getType())) return false;
+    const auto* operation=dyn_cast<CXXConstructExpr>(plain(call->getArg(2)));
+    return operation && operation->getNumArgs()==0 &&
+        context.hasSameUnqualifiedType(operation->getType(),callee->getParamDecl(2)->getType()) &&
+        sdk(source.getSpellingLoc(operation->getConstructor()->getLocation()));
+  }
+  bool reduceForwarderPattern(const FunctionTemplateDecl* primary,
+                              const TemplateTypeParmDecl*& group) const {
+    const auto* params=primary->getTemplateParameters();
+    const auto* f=primary->getTemplatedDecl();
+    if (params->size()!=2 || f->getNumParams()!=2 || f->hasAttr<CUDAGlobalAttr>() ||
+        !f->hasAttr<CUDADeviceAttr>() || !literal(f->getLocation())) return false;
+    for (const auto* d : f->redecls()) {
+      if (!literal(d->getLocation())) return false;
+      for (const auto* a : d->attrs()) if (!isa<CUDADeviceAttr>(a)) return false;
+      for (const auto* p : d->parameters()) if (p->hasAttrs()) return false;
+    }
+    for (const auto* d : primary->redecls()) if (d->hasAttrs()) return false;
+    for (const auto* p : *params) if (p->hasAttrs()) return false;
+    group=dyn_cast<TemplateTypeParmDecl>(params->getParam(1));
+    if (!group || !group->getIdentifier() || group->isParameterPack() ||
+        group->hasDefaultArgument() || group->hasAttrs()) return false;
+    const auto* first=f->getReturnType()->getAs<TemplateTypeParmType>();
+    const auto* scalar=f->getParamDecl(0)->getType()->getAs<TemplateTypeParmType>();
+    const auto second=f->getParamDecl(1)->getType();
+    const auto* pointee=second->isLValueReferenceType() ?
+        second->getPointeeType()->getAs<TemplateTypeParmType>() : nullptr;
+    if (!first || !scalar || !pointee || first->getIndex()!=0 || scalar->getIndex()!=0 ||
+        pointee->getDecl()!=group || second->getPointeeType().isConstQualified()) return false;
+    const auto* body=dyn_cast_or_null<CompoundStmt>(f->getBody());
+    if (!body || body->size()!=1) return false;
+    const auto* ret=dyn_cast<ReturnStmt>(*body->body_begin());
+    const auto* call=ret ? dyn_cast_or_null<CallExpr>(plain(ret->getRetValue())) : nullptr;
+    if (!call || call->getNumArgs()!=3 || !literal(call->getExprLoc())) return false;
+    const auto* a=dyn_cast<DeclRefExpr>(plain(call->getArg(0)));
+    const auto* b=dyn_cast<DeclRefExpr>(plain(call->getArg(1)));
+    if (!a || !b || a->getDecl()!=f->getParamDecl(1) || b->getDecl()!=f->getParamDecl(0)) return false;
+    const auto* lookup=dyn_cast<UnresolvedLookupExpr>(plain(call->getCallee()));
+    if (!lookup || !lookup->getName().getAsIdentifierInfo() ||
+        lookup->getName().getAsIdentifierInfo()->getName()!="reduce") return false;
+    unsigned candidates=0;
+    for (const auto* d : lookup->decls()) {
+      const auto* t=dyn_cast<FunctionTemplateDecl>(d);
+      if (!t || !reduce(t->getTemplatedDecl())) return false;
+      ++candidates;
+    }
+    // Every concrete specialization below must select exactly the trusted
+    // plus<T> overload. The written pattern retains no other statements.
+    return candidates!=0;
   }
   bool wideShuffle(const CallExpr* call) const {
     return isShuffle(call) && wideType(call->getType(), context);
@@ -235,7 +327,10 @@ class Proof {
     if (!parameter || !parameter->getIdentifier() || parameter->isParameterPack() ||
         parameter->hasDefaultArgument())
       return fail(function->getLocation(), "scalar64 requires one named closed builtin type parameter");
+    const TemplateTypeParmDecl* reduceGroup=nullptr;
+    const bool cgForwarder=reduceForwarderPattern(primary,reduceGroup);
     for (unsigned index = 1; index < list->size(); ++index) {
+      if (cgForwarder && index==1) continue;
       const auto* value = dyn_cast<NonTypeTemplateParmDecl>(list->getParam(index));
       if (!value || value->isParameterPack() || value->hasDefaultArgument() ||
           !value->getType()->isBuiltinType() || !value->getType()->isIntegerType())
@@ -245,7 +340,8 @@ class Proof {
         !signatureType(function->getReturnType(), parameter))
       return fail(function->getLocation(), "scalar64 template redeclaration/return type is not closed");
     for (const auto* formal : function->parameters())
-      if (formal->hasDefaultArg() || !signatureType(formal->getType(), parameter))
+      if (formal->hasDefaultArg() || (!signatureType(formal->getType(), parameter) &&
+          !(cgForwarder && formal==function->getParamDecl(1))))
         return fail(formal->getLocation(), "scalar64 signature contains a class/conversion/default argument");
     unsigned concrete = 0;
     const bool math = arithmeticFamilies.count(primary) != 0;
@@ -259,7 +355,16 @@ class Proof {
       if (!(math ? addType(type, context) : transportType(type, context)))
         return fail(instance->getLocation(), "scalar64 template has an unproved builtin dtype instance");
       for (unsigned index = 1; index < args->size(); ++index)
-        if (args->get(index).getKind() != TemplateArgument::Integral)
+        if (cgForwarder && index==1) {
+          if (args->get(index).getKind()!=TemplateArgument::Type ||
+              !reductionGroup(args->get(index).getAsType()))
+            return fail(instance->getLocation(), "CG reduce forwarder has an unproved group instance");
+          const auto* body=dyn_cast_or_null<CompoundStmt>(instance->getBody());
+          const auto* ret=body && body->size()==1 ? dyn_cast<ReturnStmt>(*body->body_begin()) : nullptr;
+          const auto* call=ret ? dyn_cast_or_null<CallExpr>(plain(ret->getRetValue())) : nullptr;
+          if (!call || !exactReduction(call))
+            return fail(instance->getLocation(), "CG reduce forwarder has an unproved concrete reduce call");
+        } else if (args->get(index).getKind() != TemplateArgument::Integral)
           return fail(instance->getLocation(), "scalar64 template has an unresolved NTTP instance");
       ++concrete;
     }
@@ -283,6 +388,7 @@ class Proof {
     }
     parameters[primary] = parameter;
     plan.scalarParameters.insert(parameter);
+    if (cgForwarder) { reduceGroups[primary]=reduceGroup; plan.reduceGroupParameters.insert(reduceGroup); }
     if (const auto* spelling = function->getTypeSourceInfo()) {
       const auto location = spelling->getTypeLoc();
       if (!location.getAs<FunctionProtoTypeLoc>().isNull())
@@ -395,7 +501,7 @@ class Proof {
         bool fp64 = doubleType(call->getType(), context);
         for (const auto* argument : call->arguments()) fp64 |= doubleType(argument->getType(), context);
         const auto* callee = call->getDirectCallee();
-        if (fp64 && !isShuffle(call) &&
+        if (fp64 && !isShuffle(call) && !exactReduction(call) &&
             (!callee || !input(callee) || !callee->hasBody() ||
              !routes.count(callee->getCanonicalDecl())))
           return fail(call->getExprLoc(), "scalar64 route calls an unproved binary64 operation/conversion");
@@ -501,10 +607,11 @@ class Proof {
   Proof(ASTContext& context, const std::function<bool(SourceLocation)>& owned,
         const std::function<bool(SourceLocation)>& sdk,
         const std::function<bool(const FunctionDecl*)>& shuffle,
+        const std::function<bool(const FunctionDecl*)>& reduce,
         const std::function<bool(llvm::StringRef, SourceLocation)>& macroFree,
         Scalar64Plan& plan, SourceLocation& location, std::string& error)
       : context(context), source(context.getSourceManager()), owned(owned), sdk(sdk),
-        shuffle(shuffle), macroFree(macroFree), plan(plan), badLocation(location), error(error) {}
+        shuffle(shuffle), reduce(reduce), macroFree(macroFree), plan(plan), badLocation(location), error(error) {}
 
   bool run(bool standard) {
     inventory.TraverseDecl(context.getTranslationUnitDecl());
@@ -539,6 +646,11 @@ class Proof {
       if (!callee || (!callee->hasBody() && !sdk(source.getSpellingLoc(callee->getLocation()))))
         opaque.insert(item.owner->getCanonicalDecl());
       if (wideShuffle(item.expression)) routes.insert(item.owner->getCanonicalDecl());
+      if (exactReduction(item.expression) && doubleType(item.expression->getType(),context)) {
+        routes.insert(item.owner->getCanonicalDecl()); mathRoutes.insert(item.owner->getCanonicalDecl());
+        if (const auto* primary=family(item.owner)) arithmeticFamilies.insert(primary);
+        exactReductionCalls[item.owner->getCanonicalDecl()].insert(item.expression);
+      }
     }
     // Merely including an SDK/Sample utility must not activate its unused
     // overloads. Main-file device definitions and explicit emitted instances
@@ -568,6 +680,10 @@ class Proof {
       if (reachable.count(item.owner->getCanonicalDecl()))
         return fail(item.expression->getOperatorLoc(),
                     "atomic/complex/vector binary64 +/+= is outside the scalar64 scalar domain");
+    for (const auto& entry : exactReductionCalls) if (routes.count(entry.first))
+      for (const auto* call : entry.second) {
+        ++plan.reductions; plan.scalarExpressions.insert(call);
+      }
     if (routes.empty()) return true;
     if (!standard) return fail({}, "scalar64 requires --default-preprocessor");
     bool changed = true;
@@ -646,6 +762,13 @@ class Proof {
       const std::string wide = " || __is_same("+name+",unsigned int) || ((sizeof("+name+")==8) && (__is_same("+name+",long) || __is_same("+name+",unsigned long) || __is_same("+name+",long long) || __is_same("+name+",unsigned long long)))";
       plan.edits.push_back({insertion, 0, "\n  static_assert("+domain+(math ? "" : wide)+", \"Ascify scalar64 requires the proven closed builtin dtype domain\");\n"});
       ++plan.guards;
+      const auto group=reduceGroups.find(entry.first);
+      if (group!=reduceGroups.end()) {
+        const auto groupName=group->second->getNameAsString();
+        if (!injectedTokens(insertion,groupName)) return false;
+        plan.edits.push_back({insertion,0,"\n  static_assert(::ascify_cg::uniform_reduce_group_domain<"+groupName+">::value, \"Ascify exact CG reduce requires the proved group domain\");\n"});
+        ++plan.guards;
+      }
     }
     const auto base = source.getLocForStartOfFile(source.getMainFileID());
     for (const auto& prefix : prefixes) plan.edits.push_back({base.getLocWithOffset(prefix.first), 0, prefix.second});
@@ -709,7 +832,8 @@ class Proof {
 bool ProvesScalar64Type(const Scalar64Plan& plan, QualType type) {
   if (type.isNull()) return false;
   if (const auto* parameter = type->getAs<TemplateTypeParmType>())
-    return plan.scalarParameters.count(parameter->getDecl()) != 0;
+    return plan.scalarParameters.count(parameter->getDecl()) != 0 ||
+        plan.reduceGroupParameters.count(parameter->getDecl()) != 0;
   if (const auto* pointer = type->getAs<PointerType>()) return ProvesScalar64Type(plan, pointer->getPointeeType());
   if (const auto* reference = type->getAs<ReferenceType>()) return ProvesScalar64Type(plan, reference->getPointeeType());
   if (const auto* array = dyn_cast<ArrayType>(type.getTypePtr())) return ProvesScalar64Type(plan, array->getElementType());
@@ -720,11 +844,12 @@ bool ProveScalar64Lowering(ASTContext& context,
     const std::function<bool(SourceLocation)>& ownedInput,
     const std::function<bool(SourceLocation)>& trustedSdk,
     const std::function<bool(const FunctionDecl*)>& trustedShuffle,
+    const std::function<bool(const FunctionDecl*)>& trustedReduce,
     const std::function<bool(llvm::StringRef, SourceLocation)>& macroFree,
     bool standardPreprocessing, Scalar64Plan& output,
     SourceLocation& errorLocation, std::string& error) {
   Scalar64Plan staged;
-  if (!Proof(context, ownedInput, trustedSdk, trustedShuffle, macroFree,
+  if (!Proof(context, ownedInput, trustedSdk, trustedShuffle, trustedReduce, macroFree,
              staged, errorLocation, error).run(standardPreprocessing)) return false;
   output = std::move(staged);
   return true;

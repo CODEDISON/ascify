@@ -14685,11 +14685,53 @@ void AscifyAction::ExecuteAction() {
         context.hasSameUnqualifiedType(function->getParamDecl(1)->getType(),
             name == "shfl" ? context.IntTy : context.UnsignedIntTy);
   };
+  // Exact product-owned CG plus-reduction declarations are arithmetic leaves.
+  // Their bodies live in the target facade and use the integer binary64 RNE
+  // helper. This never authenticates a caller overload by spelling alone.
+  const auto scalar64Reduce = [&](const clang::FunctionDecl* function) {
+    if (!function || !function->hasAttr<clang::CUDADeviceAttr>() ||
+        function->getQualifiedNameAsString()!="cooperative_groups::reduce" ||
+        function->getNumParams()!=3 || function->isVariadic() || function->hasBody()) return false;
+    auto& context=getCompilerInstance().getASTContext();
+    for (const auto* declaration : function->redecls()) {
+      const auto at=SM.getSpellingLoc(declaration->getLocation());
+      if (!at.isFileID()) return false;
+      const auto file=SM.getFileID(at);
+      if (!verifiedFrontendCgEntryFileIds.count(file.getHashValue()) ||
+          macroAlteredFrontendCgFileIds.count(file.getHashValue()) ||
+          !verifiedFrontendCgFile(file,getCompilerInstance(),frontendCompatibility) ||
+          contextualCanonicalPath(SM.getFilename(at))!=
+              frontendCompatibility.canonicalRoot+"/cooperative_groups/reduce.h") return false;
+    }
+    const auto value=function->getParamDecl(1)->getType();
+    if (!function->getReturnType()->isDependentType() &&
+        !context.hasSameUnqualifiedType(value,function->getReturnType())) return false;
+    const auto parent=function->getParamDecl(0)->getType();
+    if (!parent->isLValueReferenceType() || !parent->getPointeeType().isConstQualified()) return false;
+    const auto operation=function->getParamDecl(2)->getType();
+    const auto* record=operation->getAsCXXRecordDecl();
+    if (record) {
+      const auto* spec=llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(record);
+      if (!spec || spec->getSpecializedTemplate()->getQualifiedNameAsString()!="cooperative_groups::plus" ||
+          spec->getTemplateArgs().size()!=1 ||
+          spec->getTemplateArgs()[0].getKind()!=clang::TemplateArgument::Type ||
+          !context.hasSameUnqualifiedType(spec->getTemplateArgs()[0].getAsType(),value)) return false;
+      for (const auto* declaration : record->redecls())
+        if (!scalar64Sdk(declaration->getLocation())) return false;
+      return true;
+    }
+    const auto* spec=operation->getAs<clang::TemplateSpecializationType>();
+    const auto* declaration=spec ? spec->getTemplateName().getAsTemplateDecl() : nullptr;
+    return declaration && declaration->getQualifiedNameAsString()=="cooperative_groups::plus" &&
+        scalar64Sdk(declaration->getLocation()) && spec->template_arguments().size()==1 &&
+        spec->template_arguments()[0].getKind()==clang::TemplateArgument::Type &&
+        context.hasSameUnqualifiedType(spec->template_arguments()[0].getAsType(),value);
+  };
   std::string scalar64Error;
   clang::SourceLocation scalar64ErrorLocation;
   if (!ascify::ProveScalar64Lowering(getCompilerInstance().getASTContext(),
           [&](clang::SourceLocation location) { return ownedPreservedMaxLocation(location); },
-          scalar64Sdk, scalar64Shuffle,
+          scalar64Sdk, scalar64Shuffle, scalar64Reduce,
           [&](llvm::StringRef name, clang::SourceLocation location) {
             return !PP.getMacroDefinitionAtLoc(PP.getIdentifierInfo(name), location);
           }, !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks,
@@ -15062,7 +15104,8 @@ void AscifyAction::ExecuteAction() {
     llvm::errs() << "Ascify scalar64 v1: additions=" << scalar64Plan.additions
                  << ", assignments=" << scalar64Plan.assignments
                  << ", transports=" << scalar64Plan.transports
-                 << ", closed_template_guards=" << scalar64Plan.guards << "\n";
+                 << ", closed_template_guards=" << scalar64Plan.guards
+                 << ", exact_cg_reductions=" << scalar64Plan.reductions << "\n";
   }
   std::string vec3AbiError;
   clang::SourceLocation vec3AbiLocation;
