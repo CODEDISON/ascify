@@ -40,6 +40,8 @@ THE SOFTWARE.
 #endif
 #include "clang/Driver/Tool.h"
 #include "clang/Frontend/TextDiagnosticPrinter.h"
+#include "clang/Frontend/CompilerInstance.h"
+#include "clang/Basic/SourceManager.h"
 #if LLVM_VERSION_MAJOR >= 16
 #include "llvm/TargetParser/Host.h"
 #else
@@ -268,6 +270,82 @@ bool appendArgumentsAdjusters(
   return true;
 }
 
+#if LLVM_VERSION_MAJOR >= 13
+namespace {
+// Parse the physical CUDA input at its own path. This preserves native quoted
+// include lookup without adding a global -iquote directory. The snapshot is
+// only an immutable byte/UID witness here: it is never passed to AscifyAction
+// as Host C++ root, profiler, SDK or governed-virtual-input authority.
+class PhysicalCudaAction final : public AscifyAction {
+  const ascify::HostCxxRootInputWitness &input;
+  const std::string &parsePath;
+  bool &observed;
+  bool validated = false;
+
+  bool matches() {
+    auto &ci = getCompilerInstance();
+    auto &sm = ci.getSourceManager();
+    const auto file = sm.getMainFileID();
+    const auto *entry = sm.getFileEntryForID(file);
+    bool invalid = false;
+    const auto bytes = sm.getBufferData(file, &invalid);
+    llvm::sys::fs::UniqueID physical, parsedPathIdentity;
+    return ci.getLangOpts().CUDA && entry && !invalid &&
+        !sm.isFileOverridden(entry) &&
+        !llvm::sys::fs::getUniqueID(input.path(), physical) &&
+        !llvm::sys::fs::getUniqueID(parsePath, parsedPathIdentity) &&
+        parsedPathIdentity == physical &&
+        physical == entry->getUniqueID() &&
+        sm.getFilename(sm.getLocForStartOfFile(file)) == parsePath &&
+        input.matchesParsed(input.path(), bytes, entry->getSize());
+  }
+  void reject() {
+    auto &diagnostics = getCompilerInstance().getDiagnostics();
+    const auto id = diagnostics.getCustomDiagID(clang::DiagnosticsEngine::Error,
+        "ordinary CUDA input changed or is not the original physical source");
+    diagnostics.Report(id);
+  }
+ protected:
+  void ExecuteAction() override {
+    if (!matches()) { reject(); return; }
+    validated = true;
+    AscifyAction::ExecuteAction();
+    observed = matches();
+    if (!observed) reject();
+  }
+  void EndSourceFileAction() override {
+    if (validated) AscifyAction::EndSourceFileAction();
+  }
+ public:
+  PhysicalCudaAction(ct::Replacements *edits, LocalHeaderRewriteContext *context,
+      const ascify::FrontendCompatibilityConfig &compatibility,
+      const ascify::HostCxxRootInputWitness &snapshot,
+      const std::string &originalPath, bool &parsed)
+      : AscifyAction(edits, context, compatibility), input(snapshot),
+        parsePath(originalPath), observed(parsed) {}
+};
+class PhysicalCudaFactory final : public ct::FrontendActionFactory {
+  ct::Replacements *edits;
+  LocalHeaderRewriteContext *context;
+  const ascify::FrontendCompatibilityConfig &compatibility;
+  const ascify::HostCxxRootInputWitness &input;
+  const std::string &parsePath;
+  bool &observed;
+ public:
+  PhysicalCudaFactory(ct::Replacements *r, LocalHeaderRewriteContext *c,
+      const ascify::FrontendCompatibilityConfig &f,
+      const ascify::HostCxxRootInputWitness &i, const std::string &originalPath,
+      bool &parsed)
+      : edits(r), context(c), compatibility(f), input(i),
+        parsePath(originalPath), observed(parsed) {}
+  std::unique_ptr<clang::FrontendAction> create() override {
+    return std::make_unique<PhysicalCudaAction>(edits, context, compatibility,
+                                               input, parsePath, observed);
+  }
+};
+} // namespace
+#endif
+
 bool ascifySingleSource(const std::string &srcPath,
                                const std::string &dstPath,
                                const ct::CompilationDatabase *compDB,
@@ -428,6 +506,61 @@ bool ascifySingleSource(const std::string &srcPath,
     return !out.has_error() &&
         (!physicalPolicyHeaderInput || physicalPolicyHeaderInput->matchesPhysical());
   }
+#if LLVM_VERSION_MAJOR >= 13
+  // A physical parse can be read-only: run(), then apply edits to the frozen
+  // bytes and write only the caller's existing output/staging destination.
+  // Unlike runAndSave(), parsing cannot rewrite the original source/headers.
+  // An explicit --inplace destination is still honored after validation.
+  // Snapshot the canonical physical target, but keep the user's absolute
+  // spelling as the parser path: resolving a source symlink before parsing
+  // would change its native quoted-include parent directory.
+  SmallString<256> physicalTarget;
+  if (llvm::sys::fs::real_path(mainContextPath, physicalTarget)) return false;
+  const auto physicalInput = ascify::HostCxxRootInputWitness::capture(
+      physicalTarget.str().str());
+  if (!physicalInput) {
+    llvm::errs() << sAscify << sError
+                 << "cannot capture physical CUDA input: " << mainContextPath << "\n";
+    return false;
+  }
+  ct::RefactoringTool physicalTool(languageDatabase, mainContextPath);
+  auto &physicalEdits = llcompat::getReplacements(physicalTool, mainContextPath);
+  ascify::FrontendCompatibilityConfig physicalCompatibility;
+  if (!appendArgumentsAdjusters(physicalTool, mainContextPath, ascify_exe_path,
+                                physicalCompatibility, false)) return false;
+  bool observedPhysicalInput = false;
+  PhysicalCudaFactory physicalFactory(&physicalEdits, localHeaderContext,
+      physicalCompatibility, *physicalInput, mainContextPath, observedPhysicalInput);
+  if (!physicalInput->matchesPhysical() || physicalTool.run(&physicalFactory) ||
+      !observedPhysicalInput || !physicalInput->matchesPhysical()) return false;
+  if (localHeaderContext != nullptr &&
+      localHeaderContext->deferredInheritedHelperDiscovery) return true;
+  auto physicalOutput = ct::applyAllReplacements(physicalInput->bytes(), physicalEdits);
+  if (!physicalOutput) {
+    llvm::errs() << sAscify << sError
+                 << llvm::toString(physicalOutput.takeError()) << "\n";
+    return false;
+  }
+  if (SaveTemps || preserveTemp) {
+    SmallString<128> retained;
+    const auto retainedError = llvm::sys::fs::createTemporaryFile(
+        llvm::sys::path::filename(srcPath), "ascify", retained);
+    if (retainedError) return false;
+    std::error_code retainedWriteError;
+    llvm::raw_fd_ostream retainedOut(retained, retainedWriteError);
+    if (retainedWriteError) return false;
+    retainedOut << *physicalOutput;
+    retainedOut.close();
+    if (retainedOut.has_error()) return false;
+  }
+  if (dstPath.empty()) return true;
+  std::error_code physicalWriteError;
+  llvm::raw_fd_ostream physicalOut(dstPath, physicalWriteError);
+  if (physicalWriteError) return false;
+  physicalOut << *physicalOutput;
+  physicalOut.close();
+  return !physicalOut.has_error();
+#endif
   std::error_code EC;
   SmallString<128> tmpFile;
   StringRef srcFileName = sys::path::filename(srcPath);
