@@ -32,6 +32,8 @@ struct Scalar64Plan {
   // or address-taking exception is granted.
   std::set<const void*> scalarSignatureTypeLocs;
   unsigned additions = 0, assignments = 0, transports = 0, guards = 0, reductions = 0;
+  // One physical pure helper statement, shared by all proved dtype instances.
+  unsigned maskedAccumulations = 0;
   bool used() const { return additions || assignments || transports || reductions; }
 };
 

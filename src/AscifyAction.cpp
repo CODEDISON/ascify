@@ -774,12 +774,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 91859)
+  if (contents.size() != 93993)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "1b6861e2e04b5da04b058bef0cbb0be52519efddf5f3239f712addd01be23385");
+      "d1ad59c649ffcb5a5b46693fb4116a241775c37c45069c0e41756cc387f76fee");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -806,12 +806,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 91859)
+  if (invalidBuffer || contents.size() != 93993)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "1b6861e2e04b5da04b058bef0cbb0be52519efddf5f3239f712addd01be23385");
+      "d1ad59c649ffcb5a5b46693fb4116a241775c37c45069c0e41756cc387f76fee");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -15233,7 +15233,8 @@ void AscifyAction::ExecuteAction() {
                  << ", assignments=" << scalar64Plan.assignments
                  << ", transports=" << scalar64Plan.transports
                  << ", closed_template_guards=" << scalar64Plan.guards
-                 << ", exact_cg_reductions=" << scalar64Plan.reductions << "\n";
+                 << ", exact_cg_reductions=" << scalar64Plan.reductions
+                 << ", masked_accumulations=" << scalar64Plan.maskedAccumulations << "\n";
   }
   std::string vec3AbiError;
   clang::SourceLocation vec3AbiLocation;

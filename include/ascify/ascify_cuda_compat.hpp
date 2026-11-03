@@ -106,6 +106,50 @@ __aicore__ ASCIFY_FORCEINLINE unsigned int cuda_lane_id() {
   return (threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z)) & 31u;
 }
 
+namespace detail {
+#if defined(ASCIFY_SCALAR64_VERIFIED_TARGET)
+// A separate source contract for a proved, discarded add/down-shuffle step.
+// CUDA defines an out-of-width source as this lane, but does not define a
+// read from an inactive source inside that width. Complete only the latter
+// case by omitting its addition; never change the ordinary shuffle interface.
+__aicore__ ASCIFY_FORCEINLINE bool masked_accumulation_source_present(
+    uint32_t mask, unsigned int delta) {
+  const unsigned int lane = ::ascify::cuda_lane_id();
+  // Short circuit before either an overflowing addition or a shift by32.
+  return delta >= 32U || delta >= 32U - lane ||
+         (mask & (uint32_t(1) << (lane + delta))) != 0;
+}
+
+__aicore__ ASCIFY_FORCEINLINE unsigned int masked_accumulation_delta(
+    uint32_t mask, unsigned int delta) {
+  require_converged_warp_mask(mask);
+  // All participating lanes still shuffle. A missing neighbor selects this
+  // lane's valid register instead; the outer operation then discards it.
+  // Large deltas select self without corrupting native packed control bits.
+  return delta >= 32U || !masked_accumulation_source_present(mask, delta)
+      ? 0U : delta;
+}
+
+template<class T>
+__aicore__ ASCIFY_FORCEINLINE void scalar_masked_add_assign_rne(
+    T& left, T right, uint32_t mask, unsigned int original_delta) {
+  static_assert(scalar_add_type<T>::value && !std::is_volatile<T>::value,
+                "masked accumulation requires a nonvolatile int/float/double");
+  require_converged_warp_mask(mask);
+  // Keep defined self additions and the original rounding order. Skipping
+  // absent neighbors also avoids introducing synthetic +0 for an all--0 sum.
+  if (masked_accumulation_source_present(mask, original_delta))
+    scalar_add_assign_rne<T>(left, right);
+}
+#else
+// This new contract does not inherit support on an unverified header family
+// or architecture from the older generic shuffle overloads.
+unsigned int masked_accumulation_delta(uint32_t, unsigned int) = delete;
+template<class T>
+void scalar_masked_add_assign_rne(T&, T, uint32_t, unsigned int) = delete;
+#endif
+} // namespace detail
+
 // Internal target for the exact unsigned quad-byte SAD accumulate instruction.
 // Extract by value, independently of host byte order. Each difference is at
 // most 255; unsigned accumulation preserves the low 32 bits, including carry.

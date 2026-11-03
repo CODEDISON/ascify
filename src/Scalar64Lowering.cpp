@@ -641,6 +641,139 @@ class Proof {
     if (const auto* loop = parents[0].get<WhileStmt>()) return loop->getBody() == operation;
     return false;
   }
+  // This is a source-contract completion for one closed helper shape, rather
+  // than a new rule for arbitrary additions, shuffles or sparse reductions.
+  // The entire body has one local induction variable and no alias/escape,
+  // call, write or observation besides the authenticated shuffle below.
+  bool maskedLiteral(const Expr* expression, uint64_t expected) const {
+    const auto* value=dyn_cast_or_null<IntegerLiteral>(plain(expression));
+    return value && literal(expression->getBeginLoc()) && literal(expression->getEndLoc()) &&
+        literal(value->getLocation()) &&
+        value->getValue().getActiveBits()<=64 && value->getValue().getZExtValue()==expected;
+  }
+  bool maskedRef(const Expr* expression, const VarDecl* variable) const {
+    if (!expression || !literal(expression->getBeginLoc()) ||
+        !literal(expression->getEndLoc())) return false;
+    const auto* reference=dyn_cast<DeclRefExpr>(plain(expression));
+    return reference && literal(reference->getLocation()) && reference->getDecl()==variable &&
+        !variable->getType().isVolatileQualified() && !variable->getType()->isReferenceType() &&
+        !variable->getType()->isAtomicType() && !variable->hasAttrs();
+  }
+  bool maskedWarpSize(const Expr* expression, bool ownedRead=false) const {
+    if (ownedRead && (!expression || !literal(expression->getBeginLoc()) ||
+        !literal(expression->getEndLoc()))) return false;
+    const auto* reference=dyn_cast_or_null<DeclRefExpr>(plain(expression));
+    if (ownedRead && (!reference || !literal(reference->getLocation()))) return false;
+    const auto* variable=reference ? dyn_cast<VarDecl>(reference->getDecl()) : nullptr;
+    if (!variable || !variable->getIdentifier() || variable->getName()!="warpSize" ||
+        !variable->getDeclContext()->isTranslationUnit() ||
+        !context.hasSameUnqualifiedType(variable->getType(),context.IntTy) ||
+        !variable->getType().isConstQualified() || variable->getType().isVolatileQualified() ||
+        !variable->hasAttr<CUDADeviceAttr>()) return false;
+    for (const auto* declaration:variable->redecls())
+      if (!sdk(source.getSpellingLoc(declaration->getLocation()))) return false;
+    const auto* value=dyn_cast_or_null<IntegerLiteral>(plain(variable->getInit()));
+    return value && value->getValue()==32 && sdk(source.getSpellingLoc(value->getLocation()));
+  }
+  bool maskedDown(const FunctionDecl* function) const {
+    if (!function || !function->getIdentifier() || function->getName()!="__shfl_down_sync") return false;
+    for (const auto* declaration:function->redecls()) if (!shuffle(declaration)) return false;
+    return true;
+  }
+  bool maskedBodyTokens(const CompoundStmt* body) const {
+    if (!body || !literal(body->getLBracLoc()) || !literal(body->getRBracLoc())) return false;
+    auto cursor=body->getLBracLoc();
+    const auto end=Lexer::getLocForEndOfToken(body->getRBracLoc(),0,source,context.getLangOpts());
+    if (!literal(end)) return false;
+    while (source.getFileOffset(cursor)<source.getFileOffset(end)) {
+      Token token;
+      if (Lexer::getRawToken(cursor,token,source,context.getLangOpts(),true) ||
+          !literal(token.getLocation()) || token.needsCleaning() ||
+          token.is(tok::hash) || token.is(tok::hashhash)) return false;
+      if ((token.is(tok::identifier) || token.is(tok::raw_identifier)) &&
+          !macroFree(Lexer::getSpelling(token,source,context.getLangOpts()),token.getLocation())) return false;
+      const auto next=Lexer::getLocForEndOfToken(token.getLocation(),0,source,context.getLangOpts());
+      if (!literal(next) || source.getFileOffset(next)<=source.getFileOffset(cursor) ||
+          source.getFileOffset(next)>source.getFileOffset(end)) return false;
+      cursor=next;
+    }
+    return true;
+  }
+  bool maskedHelper(const Operation& occurrence, const CallExpr*& call) const {
+    const auto* function=occurrence.owner;
+    const auto* primary=family(function);
+    const auto* operation=occurrence.expression;
+    if (!primary || primary->getTemplateParameters()->size()!=1 ||
+        function->getNumParams()!=2 || function->hasAttr<CUDAGlobalAttr>() ||
+        operation->getOpcode()!=BO_AddAssign || !statement(operation)) return false;
+    const auto* mask=function->getParamDecl(0);
+    const auto* value=function->getParamDecl(1);
+    if (!context.hasSameUnqualifiedType(mask->getType(),context.UnsignedIntTy) ||
+        mask->getType().isConstQualified() || mask->getType().isVolatileQualified() ||
+        value->getType().isConstQualified() || value->getType().isVolatileQualified() ||
+        value->getType()->isReferenceType() || function->getReturnType()->isReferenceType() ||
+        !context.hasSameUnqualifiedType(function->getReturnType(),value->getType()) ||
+        !maskedRef(operation->getLHS(),value)) return false;
+    const auto* body=dyn_cast_or_null<CompoundStmt>(function->getBody());
+    if (!body || body->size()!=2 || !maskedBodyTokens(body)) return false;
+    const auto* loop=dyn_cast<ForStmt>(*body->body_begin());
+    const auto* result=dyn_cast<ReturnStmt>(*(body->body_begin()+1));
+    if (!loop || !literal(loop->getForLoc()) || !literal(loop->getLParenLoc()) ||
+        !literal(loop->getRParenLoc()) || !result || !literal(result->getReturnLoc()) ||
+        !maskedRef(result->getRetValue(),value) || loop->getConditionVariable()) return false;
+    const auto* loopBody=dyn_cast<CompoundStmt>(loop->getBody());
+    if (!(loop->getBody()==operation || (loopBody && loopBody->size()==1 &&
+          *loopBody->body_begin()==operation))) return false;
+    if (loopBody && (!literal(loopBody->getLBracLoc()) || !literal(loopBody->getRBracLoc()))) return false;
+    const auto* init=dyn_cast_or_null<DeclStmt>(loop->getInit());
+    const auto* delta=init && init->isSingleDecl() ? dyn_cast<VarDecl>(init->getSingleDecl()) : nullptr;
+    if (!delta || !literal(init->getBeginLoc()) || !literal(init->getEndLoc()) ||
+        !literal(delta->getLocation()) || !delta->isLocalVarDecl() || !delta->getIdentifier() || delta->hasAttrs() ||
+        delta->getStorageClass()!=SC_None || delta->getTLSKind()!=VarDecl::TLS_None ||
+        delta->getType().isConstQualified() || delta->getType().isVolatileQualified() ||
+        !context.hasSameType(delta->getType(),context.IntTy)) return false;
+    const auto* start=dyn_cast_or_null<BinaryOperator>(plain(delta->getInit()));
+    if (!start || start->getOpcode()!=BO_Div || !maskedWarpSize(start->getLHS(),true) ||
+        !maskedLiteral(start->getRHS(),2) || !literal(start->getBeginLoc()) ||
+        !literal(start->getOperatorLoc())) return false;
+    const auto* condition=dyn_cast_or_null<BinaryOperator>(plain(loop->getCond()));
+    const auto* increment=dyn_cast_or_null<BinaryOperator>(plain(loop->getInc()));
+    if (!condition || condition->getOpcode()!=BO_GT || !maskedRef(condition->getLHS(),delta) ||
+        !maskedLiteral(condition->getRHS(),0) || !literal(condition->getOperatorLoc()) ||
+        !increment || !literal(increment->getOperatorLoc()) || !maskedRef(increment->getLHS(),delta) ||
+        !((increment->getOpcode()==BO_DivAssign && maskedLiteral(increment->getRHS(),2)) ||
+          (increment->getOpcode()==BO_ShrAssign && maskedLiteral(increment->getRHS(),1)))) return false;
+    call=dyn_cast<CallExpr>(plain(operation->getRHS()));
+    if (!call || isa<CXXMemberCallExpr>(call) || call->getNumArgs()<3 || call->getNumArgs()>4 ||
+        !maskedRef(call->getArg(0),mask) || !maskedRef(call->getArg(1),value) ||
+        !maskedRef(call->getArg(2),delta)) return false;
+    if (call->getType()->isDependentType()) {
+      const auto* lookup=dyn_cast<UnresolvedLookupExpr>(plain(call->getCallee()));
+      if (!lookup || !lookup->getName().getAsIdentifierInfo() ||
+          !literal(lookup->getNameLoc()) ||
+          lookup->getName().getAsIdentifierInfo()->getName()!="__shfl_down_sync") return false;
+      unsigned count=0;
+      for (const auto* declaration:lookup->decls()) {
+        if (const auto* shadow=dyn_cast<UsingShadowDecl>(declaration)) declaration=shadow->getTargetDecl();
+        const auto* callee=dyn_cast<FunctionDecl>(declaration);
+        if (!maskedDown(callee)) return false;
+        ++count;
+      }
+      if (!count) return false;
+    } else {
+      const auto* callee=call->getDirectCallee();
+      if (!literal(plain(call->getCallee())->getExprLoc()) || !maskedDown(callee) || !addType(call->getType(),context) ||
+          !context.hasSameUnqualifiedType(call->getType(),value->getType())) return false;
+    }
+    if (call->getNumArgs()==4) {
+      const auto* width=call->getArg(3);
+      if (const auto* argument=dyn_cast<CXXDefaultArgExpr>(width)) {
+        if (call->getType()->isDependentType() || !maskedWarpSize(argument->getExpr()) ||
+            !sdk(source.getExpansionLoc(argument->getExpr()->getExprLoc()))) return false;
+      } else if (!maskedLiteral(width,32)) return false;
+    }
+    return literal(call->getBeginLoc()) && literal(call->getEndLoc());
+  }
   bool injectedTokens(SourceLocation location, const std::string& typeName) {
     for (const auto* name : {"ascify", "detail", "scalar_add_rne", "scalar_add_assign_rne",
                             "static_assert", "__is_same", "sizeof", "int", "float", "double", "long", "unsigned"})
@@ -692,10 +825,39 @@ class Proof {
     }
     if (!observedDouble) return true;
     if (!injectedTokens(op, typeName)) return false;
+    const CallExpr* maskedCall=nullptr;
+    const bool masked=assignment && dependent && maskedHelper(*selected,maskedCall);
+    if (masked) {
+      for (const auto& occurrence:occurrences) {
+        const CallExpr* concrete=nullptr;
+        if (!maskedHelper(occurrence,concrete))
+          return fail(op,"masked accumulation helper differs across concrete scalar instances");
+      }
+      for (const auto* name:{"scalar_masked_add_assign_rne","masked_accumulation_delta",
+                            "masked_accumulation_source_present"})
+        if (!macroFree(name,op)) return fail(op,"input macro changes masked accumulation token");
+    }
     const unsigned first = source.getFileOffset(begin), last = source.getFileOffset(end);
     const unsigned offset = source.getFileOffset(op);
-    prefixes[first] += "::ascify::detail::" + std::string(assignment ? "scalar_add_assign_rne" : "scalar_add_rne") + "<" + typeName + ">(";
-    suffixes[last] += ")";
+    prefixes[first] += "::ascify::detail::" + std::string(masked ? "scalar_masked_add_assign_rne" :
+        assignment ? "scalar_add_assign_rne" : "scalar_add_rne") + "<" + typeName + ">(";
+    if (masked) {
+      bool invalid=false;
+      const auto mask=Lexer::getSourceText(CharSourceRange::getTokenRange(maskedCall->getArg(0)->getSourceRange()),
+          source,context.getLangOpts(),&invalid).str();
+      if (invalid) return fail(op,"masked accumulation mask source range is not proven");
+      const auto* delta=maskedCall->getArg(2);
+      const auto text=Lexer::getSourceText(CharSourceRange::getTokenRange(delta->getSourceRange()),
+          source,context.getLangOpts(),&invalid).str();
+      const auto deltaEnd=Lexer::getLocForEndOfToken(delta->getEndLoc(),0,source,context.getLangOpts());
+      if (invalid || !literal(deltaEnd)) return fail(op,"masked accumulation delta source range is not proven");
+      // Preserve the original metadata for the outer predicate. The inner
+      // expression alone receives the safe delta, without replacing its call.
+      suffixes[last] += ", "+mask+", "+text+")";
+      prefixes[source.getFileOffset(delta->getBeginLoc())] += "::ascify::detail::masked_accumulation_delta("+mask+", ";
+      suffixes[source.getFileOffset(deltaEnd)] += ")";
+      ++plan.maskedAccumulations;
+    } else suffixes[last] += ")";
     tokens[offset] = {op, assignment ? 2U : 1U, ","};
     editedOperators.insert(op.getRawEncoding());
     if (assignment) ++plan.assignments; else ++plan.additions;

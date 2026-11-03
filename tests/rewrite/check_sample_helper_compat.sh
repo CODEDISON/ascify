@@ -111,7 +111,7 @@ require_fixed 'auditRawPublishedCompatTokensInFile' "$action_cpp"
 require_fixed 'isAscifyCudaCompatReservedMacro' "$action_cpp"
 require_fixed 'isAscifyCudaCompatPublishedMacro' "$action_cpp"
 require_fixed 'RuntimeLock' "$compat_identifiers"
-require_fixed '1b6861e2e04b5da04b058bef0cbb0be52519efddf5f3239f712addd01be23385' \
+require_fixed 'd1ad59c649ffcb5a5b46693fb4116a241775c37c45069c0e41756cc387f76fee' \
   "$action_cpp"
 require_fixed '#include <helper_string.h>' "$action_cpp"
 require_fixed 'surface retained' "$action_cpp"
@@ -127,14 +127,14 @@ require_fixed '#expression, __FILE__, __LINE__' "$compat_header"
 forbid_fixed 'gpuGetMaxGflopsDeviceId' "$compat_header"
 
 # Frozen target helper and Runtime header bytes must share one identity.
-[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 91859 ]
+[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 93993 ]
 if command -v sha256sum >/dev/null 2>&1; then
   compat_header_sha=$(sha256sum "$compat_header" | awk '{print $1}')
 else
   compat_header_sha=$(shasum -a 256 "$compat_header" | awk '{print $1}')
 fi
 [ "$compat_header_sha" = \
-  1b6861e2e04b5da04b058bef0cbb0be52519efddf5f3239f712addd01be23385 ]
+  d1ad59c649ffcb5a5b46693fb4116a241775c37c45069c0e41756cc387f76fee ]
 
 official_helper_functions="$fixtures/nvidia_samples/Common/helper_functions.h"
 [ "$(wc -c <"$official_helper_functions" | tr -d ' ')" -eq 2358 ]
