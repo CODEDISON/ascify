@@ -3,10 +3,12 @@
 #include <functional>
 #include <optional>
 #include <set>
+#include <string>
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/Basic/Builtins.h"
 #include "llvm/Support/Path.h"
 
 namespace ascify {
@@ -65,16 +67,48 @@ inline std::optional<CudaExecutionCoordinate> ProveCudaExecutionCoordinate(
   if (!record || record->getQualifiedNameAsString()!="__cuda_builtin_"+name.str()+"_t" ||
       method->getParent()->getCanonicalDecl()!=record->getCanonicalDecl()) return {};
   auto& source=context.getSourceManager();
-  const auto physical=[&](SourceLocation location) {
+  const auto sdkLocation=[&](SourceLocation location) {
     const auto expanded=source.getExpansionLoc(location);
-    return trusted(source.getSpellingLoc(location)) && trusted(expanded) &&
-        source.isInSystemHeader(expanded) &&
+    return trusted(source.getSpellingLoc(location)) && trusted(expanded) && source.isInSystemHeader(expanded);
+  };
+  const auto resource=[&](SourceLocation location) {
+    const auto expanded=source.getExpansionLoc(location);
+    return sdkLocation(location) &&
         llvm::sys::path::filename(source.getFilename(expanded))=="__clang_cuda_builtin_vars.h";
   };
-  for (const auto* d:variable->redecls()) if (!physical(d->getLocation())) return {};
-  for (const auto* d:record->redecls()) if (!physical(d->getLocation())) return {};
-  for (const auto* d:method->redecls()) if (!physical(d->getLocation())) return {};
-  if (!physical(property->getPropertyDecl()->getLocation())) return {};
+  // CUDA's SDK may forward-declare blockDim/threadIdx through curand using
+  // Clang's temporary dim3 aliases. Every redeclaration must remain real SDK.
+  for (const auto* d:variable->redecls()) if (!sdkLocation(d->getLocation())) return {};
+  for (const auto* d:record->redecls()) if (!resource(d->getLocation())) return {};
+  if (!resource(property->getPropertyDecl()->getLocation())) return {};
+  const char* intrinsicRegister=nullptr;
+  switch (builtin) {
+    case CudaExecutionCoordinate::Builtin::ThreadIndex: intrinsicRegister="tid_"; break;
+    case CudaExecutionCoordinate::Builtin::BlockIndex: intrinsicRegister="ctaid_"; break;
+    case CudaExecutionCoordinate::Builtin::BlockExtent: intrinsicRegister="ntid_"; break;
+    case CudaExecutionCoordinate::Builtin::GridExtent: intrinsicRegister="nctaid_"; break;
+  }
+  const std::string intrinsicName=std::string("__nvvm_read_ptx_sreg_")+intrinsicRegister+axis.str();
+  const auto* definition=method->getDefinition();
+  const auto* body=definition ? dyn_cast_or_null<CompoundStmt>(definition->getBody()) : nullptr;
+  const auto* ret=body && body->size()==1 ? dyn_cast<ReturnStmt>(*body->body_begin()) : nullptr;
+  const auto* intrinsic=ret ? dyn_cast<CallExpr>(ret->getRetValue()->IgnoreParenImpCasts()) : nullptr;
+  const auto* callee=intrinsic ? intrinsic->getDirectCallee() : nullptr;
+  if (!callee || intrinsic->getNumArgs()!=0 || callee->getNumParams()!=0 || callee->isVariadic() ||
+      !intrinsic->getType()->isSpecificBuiltinType(BuiltinType::UInt) ||
+      !callee->getReturnType()->isSpecificBuiltinType(BuiltinType::UInt) || !callee->getBuiltinID() ||
+      callee->getName()!=intrinsicName || context.BuiltinInfo.getName(callee->getBuiltinID())!=intrinsicName) return {};
+  for (const auto* d:callee->redecls()) if (!resource(d->getLocation())) return {};
+  for (const auto* d:method->redecls()) {
+    if (resource(d->getLocation())) continue;
+    // ## generates the getter identifier in Clang's scratch buffer. Admit
+    // that token only after proving the actual single builtin-return body;
+    // the physical expansion still belongs to the owned resource header.
+    const auto location=d->getLocation(), expanded=source.getExpansionLoc(location);
+    if (!location.isMacroID() || !source.isWrittenInScratchSpace(source.getSpellingLoc(location)) ||
+        !trusted(expanded) || !source.isInSystemHeader(expanded) ||
+        llvm::sys::path::filename(source.getFilename(expanded))!="__clang_cuda_builtin_vars.h") return {};
+  }
   return CudaExecutionCoordinate{builtin,axis.front(),expression,call};
 }
 } // namespace ascify
