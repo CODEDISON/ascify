@@ -92,11 +92,22 @@ inline std::optional<CudaExecutionCoordinate> ProveCudaExecutionCoordinate(
   const auto* definition=method->getDefinition();
   const auto* body=definition ? dyn_cast_or_null<CompoundStmt>(definition->getBody()) : nullptr;
   const auto* ret=body && body->size()==1 ? dyn_cast<ReturnStmt>(*body->body_begin()) : nullptr;
-  const auto* intrinsic=ret ? dyn_cast<CallExpr>(ret->getRetValue()->IgnoreParenImpCasts()) : nullptr;
+  const Expr* result=ret ? ret->getRetValue()->IgnoreParens() : nullptr;
+  bool convertedInt=false;
+  if (const auto* cast=dyn_cast_or_null<ImplicitCastExpr>(result)) {
+    // Clang's actual NVVM sreg builtin returns signed int. The SDK getter
+    // converts its 32 raw bits to uint, preserving the CUDA coordinate value.
+    if (cast->getCastKind()!=CK_IntegralCast ||
+        !cast->getType()->isSpecificBuiltinType(BuiltinType::UInt) ||
+        !cast->getSubExpr()->getType()->isSpecificBuiltinType(BuiltinType::Int)) return {};
+    convertedInt=true; result=cast->getSubExpr()->IgnoreParens();
+  }
+  const auto* intrinsic=dyn_cast_or_null<CallExpr>(result);
   const auto* callee=intrinsic ? intrinsic->getDirectCallee() : nullptr;
   if (!callee || intrinsic->getNumArgs()!=0 || callee->getNumParams()!=0 || callee->isVariadic() ||
-      !intrinsic->getType()->isSpecificBuiltinType(BuiltinType::UInt) ||
-      !callee->getReturnType()->isSpecificBuiltinType(BuiltinType::UInt) || !callee->getBuiltinID() ||
+      !intrinsic->getType()->isSpecificBuiltinType(convertedInt ? BuiltinType::Int : BuiltinType::UInt) ||
+      !callee->getReturnType()->isSpecificBuiltinType(convertedInt ? BuiltinType::Int : BuiltinType::UInt) ||
+      context.getTypeSize(context.IntTy)!=32 || context.getTypeSize(context.UnsignedIntTy)!=32 || !callee->getBuiltinID() ||
       callee->getName()!=intrinsicName || context.BuiltinInfo.getName(callee->getBuiltinID())!=intrinsicName) return {};
   for (const auto* d:callee->redecls()) if (!resource(d->getLocation())) return {};
   for (const auto* d:method->redecls()) {
