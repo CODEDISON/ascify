@@ -31,7 +31,7 @@ struct Barrier {
 };
 struct Warp {
   Barrier barrier{32};
-  std::array<uint32_t, 32> values{};
+  std::array<uint64_t, 32> values{};
 };
 thread_local unsigned rank, block_size;
 thread_local Warp* warp;
@@ -51,21 +51,28 @@ template <typename T> T down(T value, unsigned delta, unsigned width) {
 
 #define __SIMT_DEVICE_FUNCTIONS_DECL__
 #define __ubuf__
-namespace ascify { namespace detail {
-inline void reject_device_contract() { std::abort(); }
-} }
+#define ASCIFY_HAS_LEGACY_COOPERATIVE_GROUPS 1
+#define __NPU_ARCH__ 3510
+#define ASCENDC_CPU_DEBUG 1
+unsigned asc_activemask() { return UINT32_MAX; }
+unsigned asc_ballot(int predicate) { return predicate ? UINT32_MAX : 0; }
+template <typename T> T asc_shfl_down(T value, unsigned delta, int width) {
+  return model::down(value, delta, unsigned(width));
+}
+template <typename T> T asc_shfl_up(T, unsigned, int);
+template <typename T> T asc_shfl(T, int, int);
+#include <ascify/scalar64_compat.hpp>
 namespace ascify_cg {
 struct thread_block {
   static unsigned thread_rank() { return model::rank; }
   static unsigned size() { return model::block_size; }
   static void sync() { model::block_barrier->wait(); }
 };
-template <typename T> struct plus { T operator()(T a, T b) const { return a + b; } };
+template <unsigned, typename = void> class thread_block_tile;
+template <typename T> struct plus {
+  T operator()(T a, T b) const { return ::ascify::detail::scalar_add_rne<T>(a,b); }
+};
 }  // namespace ascify_cg
-unsigned asc_activemask() { return UINT32_MAX; }
-template <typename T> T asc_shfl_down(T value, unsigned delta, unsigned width) {
-  return model::down(value, delta, width);
-}
 #include <ascify/uniform_block_reduction_compat.hpp>
 
 static uint32_t bits(float value) {
@@ -91,6 +98,28 @@ static float float_input(unsigned rank, unsigned round) {
   return cancel[rank % 8] + float(round * (rank / 32 + 1));
 }
 
+static uint64_t bits(double value) {
+  uint64_t output;
+  std::memcpy(&output, &value, sizeof(output));
+  return output;
+}
+static double double_tree(std::array<double, 32> input, unsigned leaves = 32) {
+  for (unsigned stride = leaves / 2; stride; stride /= 2)
+    for (unsigned i = 0; i < stride; ++i) {
+      volatile double rounded = input[i] + input[i + stride];
+      input[i] = rounded;
+    }
+  return input[0];
+}
+static double double_input(unsigned rank, unsigned round) {
+  if (round == 0) return -0.0;
+  const double cancel[] = {9007199254740992., 1., -9007199254740992.,
+                           0.25, -0., 0., -2., 0.125};
+  if (round == 1) return cancel[rank % 8];
+  if (round == 2) return (rank % 3 == 0 ? -1.0 : 1.0) * 1e250;
+  return rank % 4 == 0 ? 0x1p-1074 : -0x1p-1073;
+}
+
 template <unsigned BlockSize, unsigned Group> static void run() {
   constexpr unsigned rounds = 4;
   ascify_cg::block_tile_memory<BlockSize> scratch{};
@@ -98,6 +127,7 @@ template <unsigned BlockSize, unsigned Group> static void run() {
   model::Warp warps[BlockSize / 32];
   std::vector<int> integer_results(BlockSize * rounds);
   std::vector<float> float_results(BlockSize * rounds);
+  std::vector<double> double_results(BlockSize * rounds);
   std::vector<unsigned> ranks(BlockSize), group_ranks(BlockSize), group_sizes(BlockSize);
   std::vector<std::thread> threads;
   for (unsigned rank = 0; rank < BlockSize; ++rank) threads.emplace_back([&, rank] {
@@ -117,6 +147,8 @@ template <unsigned BlockSize, unsigned Group> static void run() {
           ascify_cg::reduce(tile, integer_input(rank, round), ascify_cg::plus<int>());
       float_results[round * BlockSize + rank] =
           ascify_cg::reduce(tile, float_input(rank, round), ascify_cg::plus<float>());
+      double_results[round * BlockSize + rank] =
+          ascify_cg::reduce(tile, double_input(rank, round), ascify_cg::plus<double>());
     }
   });
   for (auto& thread : threads) thread.join();
@@ -127,21 +159,27 @@ template <unsigned BlockSize, unsigned Group> static void run() {
       int64_t integer_sum = 0;
       double real_sum = 0;
       std::array<float, 32> partials{};
+      std::array<double, 32> double_partials{};
       for (unsigned warp = 0; warp < Group / 32; ++warp) {
         std::array<float, 32> values{};
+        std::array<double, 32> double_values{};
         for (unsigned lane = 0; lane < 32; ++lane) {
           const unsigned rank = group * Group + warp * 32 + lane;
           integer_sum += integer_input(rank, round);
           values[lane] = float_input(rank, round);
+          double_values[lane] = double_input(rank, round);
           real_sum += double(values[lane]);
         }
         partials[warp] = tree(values);
+        double_partials[warp] = double_tree(double_values);
       }
       const float expected = tree(partials, Group / 32);
+      const double double_expected = double_tree(double_partials, Group / 32);
       max_error = std::fmax(max_error, std::fabs(double(expected) - real_sum));
       for (unsigned lane = 0; lane < Group; ++lane) {
         const unsigned rank = group * Group + lane;
         errors += integer_results[round * BlockSize + rank] != integer_sum;
+        errors += bits(double_results[round * BlockSize + rank]) != bits(double_expected);
         const float actual = float_results[round * BlockSize + rank];
         errors += std::isnan(expected) ? !std::isnan(actual) : bits(actual) != bits(expected);
         errors += ranks[rank] != lane || group_ranks[rank] != group ||
@@ -150,7 +188,7 @@ template <unsigned BlockSize, unsigned Group> static void run() {
     }
   }
   std::printf("uniform host B=%u G=%u rounds=%u scalar_results=%u max_double_error=%.9g errors=%u\n",
-              BlockSize, Group, rounds, 2 * BlockSize * rounds, max_error, errors);
+              BlockSize, Group, rounds, 3 * BlockSize * rounds, max_error, errors);
   assert(errors == 0);
 }
 int main() {
@@ -158,4 +196,6 @@ int main() {
   run<128, 32>();
   run<128, 64>();
   run<128, 128>();
+  run<96, 32>();
+  run<192, 64>();
 }

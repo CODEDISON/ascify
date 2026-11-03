@@ -774,12 +774,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 91859)
+  if (contents.size() != 93993)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "1b6861e2e04b5da04b058bef0cbb0be52519efddf5f3239f712addd01be23385");
+      "d1ad59c649ffcb5a5b46693fb4116a241775c37c45069c0e41756cc387f76fee");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -806,12 +806,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 91859)
+  if (invalidBuffer || contents.size() != 93993)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "1b6861e2e04b5da04b058bef0cbb0be52519efddf5f3239f712addd01be23385");
+      "d1ad59c649ffcb5a5b46693fb4116a241775c37c45069c0e41756cc387f76fee");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -6254,6 +6254,16 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
   }
   outs() << "File included: " << file_name << "\n";
   auto &SM = getCompilerInstance().getSourceManager();
+  if (file_name=="stdio.h" && is_angled && !module && hash_loc.isFileID() &&
+      SM.isWrittenInMainFile(hash_loc) && filename_range.getBegin().isFileID() &&
+      filename_range.getEnd().isFileID() &&
+      includeToken.getIdentifierInfo() && includeToken.getIdentifierInfo()->getName()=="include") {
+    bool invalid=false;
+    const auto literal=clang::Lexer::getSourceText(filename_range,SM,
+        getCompilerInstance().getLangOpts(),&invalid);
+    if (!invalid && literal=="<stdio.h>")
+      uniformNativeStdioIncludes.emplace(SM.getFileOffset(hash_loc),resolved_file_name.str());
+  }
   // Preserve every real include lookup, including guarded/skipped children.
   // An input with a resource spelling cannot substitute a caller-owned file
   // and disappear from the later FileID inventory merely by being empty.
@@ -14800,11 +14810,53 @@ void AscifyAction::ExecuteAction() {
         context.hasSameUnqualifiedType(function->getParamDecl(1)->getType(),
             name == "shfl" ? context.IntTy : context.UnsignedIntTy);
   };
+  // Exact product-owned CG plus-reduction declarations are arithmetic leaves.
+  // Their bodies live in the target facade and use the integer binary64 RNE
+  // helper. This never authenticates a caller overload by spelling alone.
+  const auto scalar64Reduce = [&](const clang::FunctionDecl* function) {
+    if (!function || !function->hasAttr<clang::CUDADeviceAttr>() ||
+        function->getQualifiedNameAsString()!="cooperative_groups::reduce" ||
+        function->getNumParams()!=3 || function->isVariadic() || function->hasBody()) return false;
+    auto& context=getCompilerInstance().getASTContext();
+    for (const auto* declaration : function->redecls()) {
+      const auto at=SM.getSpellingLoc(declaration->getLocation());
+      if (!at.isFileID()) return false;
+      const auto file=SM.getFileID(at);
+      if (!verifiedFrontendCgEntryFileIds.count(file.getHashValue()) ||
+          macroAlteredFrontendCgFileIds.count(file.getHashValue()) ||
+          !verifiedFrontendCgFile(file,getCompilerInstance(),frontendCompatibility) ||
+          contextualCanonicalPath(SM.getFilename(at))!=
+              frontendCompatibility.canonicalRoot+"/cooperative_groups/reduce.h") return false;
+    }
+    const auto value=function->getParamDecl(1)->getType();
+    if (!function->getReturnType()->isDependentType() &&
+        !context.hasSameUnqualifiedType(value,function->getReturnType())) return false;
+    const auto parent=function->getParamDecl(0)->getType();
+    if (!parent->isLValueReferenceType() || !parent->getPointeeType().isConstQualified()) return false;
+    const auto operation=function->getParamDecl(2)->getType();
+    const auto* record=operation->getAsCXXRecordDecl();
+    if (record) {
+      const auto* spec=llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(record);
+      if (!spec || spec->getSpecializedTemplate()->getQualifiedNameAsString()!="cooperative_groups::plus" ||
+          spec->getTemplateArgs().size()!=1 ||
+          spec->getTemplateArgs()[0].getKind()!=clang::TemplateArgument::Type ||
+          !context.hasSameUnqualifiedType(spec->getTemplateArgs()[0].getAsType(),value)) return false;
+      for (const auto* declaration : record->redecls())
+        if (!scalar64Sdk(declaration->getLocation())) return false;
+      return true;
+    }
+    const auto* spec=operation->getAs<clang::TemplateSpecializationType>();
+    const auto* declaration=spec ? spec->getTemplateName().getAsTemplateDecl() : nullptr;
+    return declaration && declaration->getQualifiedNameAsString()=="cooperative_groups::plus" &&
+        scalar64Sdk(declaration->getLocation()) && spec->template_arguments().size()==1 &&
+        spec->template_arguments()[0].getKind()==clang::TemplateArgument::Type &&
+        context.hasSameUnqualifiedType(spec->template_arguments()[0].getAsType(),value);
+  };
   std::string scalar64Error;
   clang::SourceLocation scalar64ErrorLocation;
   if (!ascify::ProveScalar64Lowering(getCompilerInstance().getASTContext(),
           [&](clang::SourceLocation location) { return ownedPreservedMaxLocation(location); },
-          scalar64Sdk, scalar64Shuffle,
+          scalar64Sdk, scalar64Shuffle, scalar64Reduce,
           [&](llvm::StringRef name, clang::SourceLocation location) {
             return !PP.getMacroDefinitionAtLoc(PP.getIdentifierInfo(name), location);
           }, !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks,
@@ -15139,6 +15191,7 @@ void AscifyAction::ExecuteAction() {
     cudaRuntimeApiBoundaryFailed = true;
     return;
   }
+  std::map<unsigned, std::string> scalar64CommittedInsertions;
   if (scalar64Plan.used()) {
     ct::Replacements staged(*replacements);
     std::map<unsigned, ascify::Scalar64Edit> insertions;
@@ -15169,6 +15222,8 @@ void AscifyAction::ExecuteAction() {
       return;
     }
     *replacements = std::move(staged);
+    for (const auto& insertion : insertions)
+      scalar64CommittedInsertions.emplace(insertion.first, insertion.second.text);
     for (const auto& edit : edits) if (edit.length)
       SemanticRewriteRanges.push_back({SM.getMainFileID(), SM.getFileOffset(edit.location),
           SM.getFileOffset(edit.location) + edit.length});
@@ -15177,7 +15232,9 @@ void AscifyAction::ExecuteAction() {
     llvm::errs() << "Ascify scalar64 v1: additions=" << scalar64Plan.additions
                  << ", assignments=" << scalar64Plan.assignments
                  << ", transports=" << scalar64Plan.transports
-                 << ", closed_template_guards=" << scalar64Plan.guards << "\n";
+                 << ", closed_template_guards=" << scalar64Plan.guards
+                 << ", exact_cg_reductions=" << scalar64Plan.reductions
+                 << ", masked_accumulations=" << scalar64Plan.maskedAccumulations << "\n";
   }
   std::string vec3AbiError;
   clang::SourceLocation vec3AbiLocation;
@@ -15256,10 +15313,61 @@ void AscifyAction::ExecuteAction() {
   }
   ascify::UniformBlockReductionStats uniformReduction;
   std::string uniformReductionError;
+  const auto uniformInputWitness = [&](ascify::UniformInputWitness kind,
+                                       clang::SourceLocation location,
+                                       const std::string& name) {
+    if (!location.isFileID() || !SM.isWrittenInMainFile(location)) return false;
+    auto* identifier=PP.getIdentifierInfo(name);
+    const auto definition=PP.getMacroDefinitionAtLoc(identifier,location);
+    if (kind==ascify::UniformInputWitness::LiteralIdentifier) return !definition;
+    if (kind==ascify::UniformInputWitness::SdkQualifier) {
+      const auto* macro=definition.getMacroInfo();
+      return (name=="__device__" || name=="__forceinline__") && macro &&
+          !macro->isFunctionLike() && !definition.isAmbiguous() &&
+          definition.getModuleMacros().empty() && !cudaAttributeControlModified &&
+          !deviceTemplateAttributeMacroConflict && scalar64Sdk(macro->getDefinitionLoc());
+    }
+    if (kind==ascify::UniformInputWitness::EmptyOuterGuard) {
+      if (definition || name!=findConventionalMainOuterGuard(getCompilerInstance()) ||
+          !hasCompleteMainOuterGuard(getCompilerInstance())) return false;
+      for (const auto& command : getCompilerInstance().getPreprocessorOpts().Macros)
+        if (llvm::StringRef(command.first).split('=').first==name) return false;
+      const auto* history=PP.getLocalMacroDirectiveHistory(identifier);
+      if (!history || history->getPrevious() || history->getKind()!=clang::MacroDirective::MD_Define ||
+          !history->getLocation().isFileID() || !SM.isWrittenInMainFile(history->getLocation())) return false;
+      const auto* macro=history->getMacroInfo();
+      return macro && !macro->isFunctionLike() && macro->getNumTokens()==0 &&
+          macro->getDefinitionLoc().isFileID() && SM.isWrittenInMainFile(macro->getDefinitionLoc());
+    }
+    if (kind==ascify::UniformInputWitness::NativeStdioInclude) {
+      const auto found=uniformNativeStdioIncludes.find(SM.getFileOffset(location));
+      if (name!="stdio.h" || found==uniformNativeStdioIncludes.end() ||
+          contextualCanonicalPath(found->second)!="/usr/include/stdio.h") return false;
+      for (const auto file : enteredSourceFileIds) {
+        const auto at=SM.getLocForStartOfFile(file);
+        const auto* entry=SM.getFileEntryForID(file);
+        if (entry && trustedSystemFileIds.count(file.getHashValue()) &&
+            SM.isInSystemHeader(at) && contextualCanonicalPath(SM.getFilename(at))=="/usr/include/stdio.h" &&
+            !SM.isFileOverridden(entry) && physicalSourceFileMatches(SM.getFilename(at),*entry,SM)) return true;
+      }
+      return false;
+    }
+    if (kind!=ascify::UniformInputWitness::InactiveArchGuard || name!="__CUDA_ARCH__" ||
+        definition || PP.getMacroDefinition(identifier) ||
+        getCompilerInstance().getLangOpts().CUDAIsDevice) return false;
+    for (const auto& command : getCompilerInstance().getPreprocessorOpts().Macros)
+      if (llvm::StringRef(command.first).split('=').first==name) return false;
+    for (const auto* history=PP.getLocalMacroDirectiveHistory(identifier);history;history=history->getPrevious()) {
+      const auto at=history->getLocation();
+      if (!at.isFileID() || !isOwnedCudaCompilerInput(SM.getFileID(at),getCompilerInstance())) return false;
+    }
+    return true;
+  };
   if (!ascify::ValidateUniformBlockReduction(
           getCompilerInstance().getASTContext(), frontendCompatibility,
           uniformReduction, uniformReductionError,
-          !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)) {
+          !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks,
+          scalar64Sdk,uniformInputWitness)) {
     const auto diagnostic =
         getCompilerInstance().getDiagnostics().getCustomDiagID(
             clang::DiagnosticsEngine::Error,
@@ -15279,7 +15387,19 @@ void AscifyAction::ExecuteAction() {
         break;
       }
       const auto decomposed = SM.getDecomposedLoc(location);
-      if (decomposed.second == 0) {
+      if (guard.directive) {
+        clang::Token anchor;
+        const auto buffer=SM.getBufferData(decomposed.first);
+        const auto lineBegin=physicalLineBegin(buffer,decomposed.second);
+        if (clang::Lexer::getRawToken(location,anchor,SM,
+                getCompilerInstance().getLangOpts(),true) ||
+            !anchor.is(clang::tok::hash) ||
+            !buffer.slice(lineBegin,decomposed.second).trim().empty()) {
+          uniformReductionError="preprocessor guard has no physical directive anchor";
+          break;
+        }
+      }
+      if (decomposed.second == 0 && !guard.directive) {
         uniformReductionError = "template guard has no body brace anchor";
         break;
       }
@@ -15310,10 +15430,41 @@ void AscifyAction::ExecuteAction() {
       if (!uniformReductionError.empty())
         break;
       const ct::Replacement edit(SM, location, 0U, guard.text);
-      if (!llcompat::insertReplacement(staged, edit, &uniformReductionError))
+      const auto scalarWitness=scalar64CommittedInsertions.find(decomposed.second);
+      const std::string scalarInsertion=scalarWitness==scalar64CommittedInsertions.end()
+          ? std::string() : scalarWitness->second;
+      std::optional<ct::Replacement> knownScalar;
+      unsigned scalarMatches=0;
+      if (!guard.directive && !scalarInsertion.empty())
+        for (const auto& existing : staged)
+          if (existing.getFilePath()==edit.getFilePath() &&
+              existing.getOffset()==edit.getOffset() && existing.getLength()==0 &&
+              existing.getReplacementText()==scalarInsertion) {
+            knownScalar=existing;
+            ++scalarMatches;
+          }
+      if (scalarMatches>1) {
+        uniformReductionError="template guard has ambiguous scalar insertion witness";
         break;
+      }
+      if (knownScalar) {
+        // Both proof-owned guards precede the first statement. Prefix the
+        // complete scalar insertion, which may also open that statement's
+        // arithmetic helper when the source has no whitespace after '{'.
+        ct::Replacements combined;
+        for (const auto& existing : staged) {
+          if (existing==*knownScalar) continue;
+          if (!llcompat::insertReplacement(combined,existing,&uniformReductionError)) break;
+        }
+        if (!uniformReductionError.empty() ||
+            !llcompat::insertReplacement(combined,
+                ct::Replacement(SM,location,0U,guard.text+scalarInsertion),
+                &uniformReductionError)) break;
+        staged=std::move(combined);
+      } else if (!llcompat::insertReplacement(staged,edit,&uniformReductionError)) break;
       guardRanges.push_back(
-          {decomposed.first, decomposed.second - 1, decomposed.second});
+          {decomposed.first, guard.directive ? decomposed.second : decomposed.second - 1,
+           guard.directive ? decomposed.second + 1 : decomposed.second});
     }
     if (!uniformReductionError.empty()) {
       const auto diagnostic =

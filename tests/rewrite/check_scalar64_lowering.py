@@ -213,12 +213,16 @@ __device__ double move(double a){return project::__shfl_down_sync(0xffffffffu,a,
                flags=['--no-lower-device-double-params'])
     yield case('consteval_function', '__device__ consteval double pair(double a,double b){return a+b;}\n',
                accepted=False, standard='c++20')
-    yield case('cg_double_plus_still_refused', '''
+    yield case('cg_double_plus_exact', '''
 __device__ double move(double a){
   auto tile=cooperative_groups::tiled_partition<32>(cooperative_groups::this_thread_block());
   return cooperative_groups::reduce(tile,a,cooperative_groups::plus<double>());
 }
-''', accepted=False, prefix=CUDA + '#include <cooperative_groups/reduce.h>\n')
+''', prefix=CUDA + '#include <cooperative_groups/reduce.h>\n', cpu='''
+scalar64_test::reset();
+scalar64_expect(scalar64_raw(move(1.25)),scalar64_raw(40.0));
+if(scalar64_test::calls!=6)std::abort();
+''')
     yield case('cg_double_up_still_refused', '''
 __device__ double move(double a){
   auto tile=cooperative_groups::tiled_partition<32>(cooperative_groups::this_thread_block());
@@ -226,7 +230,8 @@ __device__ double move(double a){
 }
 ''', accepted=False, prefix=CUDA + '#include <cooperative_groups.h>\n')
 
-    # Keep the original57 fixtures/expectations above intact. These cases
+    # Keep the original57 fixture domains above; cg_double_plus_exact is the
+    # intentional newly admitted exact reduction boundary. These cases
     # exercise the builtin wrapped-double refusal and its nonactivation scope.
     wrapped_refusals = [
         ('atomic_typedef_assign', 'using D=double; using A=_Atomic(D);\n__device__ void step(A* a,D b){*a+=b;}\n'),
@@ -382,7 +387,7 @@ scalar64_expect(scalar64_raw(host_pair(scalar64_from_raw<double>(t.left),scalar6
         # not text matching or a substitute implementation.
         for label, body in [
             ('pod', 'struct P{uint64_t x;};void f(){(void)ascify::detail::scalar64_to_bits(P{});}'),
-            ('plus', 'void f(){(void)ascify_cg::plus<double>();}'),
+            ('plus', 'void f(){(void)ascify_cg::plus<long double>();}'),
             ('up', 'void f(){auto t=ascify_cg::tiled_partition<32>(ascify_cg::this_thread_block());(void)t.shfl_up(1.0,1);}'),
             ('xor', 'void f(){auto t=ascify_cg::tiled_partition<32>(ascify_cg::this_thread_block());(void)t.shfl_xor(1.0,1);}'),
             ('unverified_target', 'void f(){(void)ascify::detail::scalar_add_rne<double>(1.0,1.0);}'),

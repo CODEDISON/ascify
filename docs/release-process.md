@@ -29,6 +29,10 @@ The [original vector-sample correctness record](validation/vector-cg-occupancy-2
 provides a source-bound example with complete target compilation and actual NPU
 results. Its coverage and toolchain limits apply to that record.
 
+The [complete original reduction record](validation/reduction-20261103.md)
+adds45 same-product NPU configurations with actual-input/output evidence. Its
+accepted scope and historical coverage remain distinct from the earlier record.
+
 ## Check the package
 
 The installed layout separates public target interfaces from converter resources:

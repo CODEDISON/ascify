@@ -6,6 +6,11 @@ for supported domains and experimental paths.
 
 ## Unreleased
 
+- Validate the complete original CUDA Samples v13.0 `reduction` target across
+  int/float/double and45 original configurations, with unchanged16M inputs,
+  original numerical predicates and independent actual-input checks. See the
+  [validation record](docs/validation/reduction-20261103.md).
+
 - Revalidate the complete original CUDA Samples v13.0 cooperative-groups and
   occupancy targets on one Ascify product. See the [correctness record](docs/validation/vector-cg-occupancy-20261103.md)
   for the actual target, numeric checks and remaining coverage boundaries.

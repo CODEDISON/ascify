@@ -37,3 +37,6 @@ build/install commands and the distinction between host checks, conversion,
 target builds and device correctness. This publication adds this summary to the
 tested source; it does not describe a new device run under the documentation
 commit.
+
+The later [reduction record](reduction-20261103.md) adds one accepted name on a
+separate product. The15/38 count above remains this earlier record's snapshot.

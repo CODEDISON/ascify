@@ -350,7 +350,7 @@ do not provide those operations.
 | Thread-block synchronization | The exact block operation uses a real block barrier; generic group synchronization is not substituted with a block barrier |
 | Ordinary tiles | Size 32, partitioned from a thread block; preserve typed/erased metadata and rank/size signatures; member/free synchronization requires all 32 lanes at the same call; typed and erased tiles share this restriction |
 | Register shuffles | Exact int32, uint32, and float types; `uint4` XOR shuffle transfers all four 32-bit components |
-| Tile reduction | `plus<int>` and `plus<float>` across 32 participating lanes; a down-shuffle tree followed by broadcast gives every lane the same result bits |
+| Tile reduction | `plus<int>`, `plus<float>` and exact `plus<double>` across 32 participating lanes; a down-shuffle tree followed by broadcast gives every lane the same result bits. Double uses the integer binary64 RNE backend. |
 | Legacy masked ballot/down-shuffle | Every active lane supplies the same mask, equal to the complete currently active cohort; partial down-shuffle supports int32/uint32/float and widths 1, 2, 4, 8, 16, 32 |
 
 Masked operations do not implement CUDA's rendezvous for lanes arriving from
@@ -381,29 +381,57 @@ See [frontend-profile checks](../tests/frontend_compat/check_frontend_compat.sh)
 
 ## Uniform block scratch reduction
 
-This experimental adapter requires target compilation and device validation
-before use. It does not enable generic multi-warp tiles.
+This bounded adapter passed the [complete original reduction validation](validation/reduction-20261103.md).
+Other inputs still require target compilation and device validation. It does
+not enable generic multi-warp tiles.
 
 The narrow C++17 form uses one shared `block_tile_memory<B>`, an `auto` block,
 an `auto` tile, and one verified forwarding template for typed reduction.
 Standard preprocessing and a whole-translation-unit proof are mandatory because
 the parser projects these uses into different internal types. Source cannot
 observe or specialize those types, introduce conflicting ADL/overloads or
-namespace declarations, or let scratch escape. Loops, conditional participation,
-early returns, indirect calls, unproved helpers, and unproved constructors are
+namespace declarations, or let scratch escape. A closed grid-stride or zero-based
+builtin induction loop may remain outside every collective and block barrier.
+Its induction, stride and invariant bound cannot form aliases or be mutated by
+the body beyond the canonical step; preformed pointer/reference aliases and
+reference-typed bounds are refused. This preserves source loops and their
+arithmetic/nontermination preconditions. Conditional participation, early
+returns, indirect calls, unproved helpers, and unproved constructors remain
 rejected. All template instances and future scalar instantiations remain guarded.
 
-The adapter admits int32/float32, block capacities 32..1024 in complete warps,
+The adapter admits int32/float32 and exact binary64 double, block capacities
+32..1024 in complete warps,
 and tile sizes 32, 64, 128, 256, or 512 that exactly divide the block. Actual block
 size is checked. Three complete-block barriers protect publication of warp
 partials, result reads, and scratch reuse; all block threads must follow the
 same reduction sequence. The second reduction stage uses only real partials,
 without padding with positive zero, to preserve all-negative-zero inputs.
 Every lane receives its tile's same stored result. Floating-point ordering and
-signed-overflow limits still apply.
+signed-overflow limits still apply. Double partials/results use separate volatile
+uint64 slots; the declared arrays total `B` payload bytes for block capacity
+`B`. Actual target layout, dynamic shared memory and total compiler resources
+require independent verification.
+
+A bounded empty shared-pointer wrapper may retain its selected conversion to
+`extern __shared__ int[]` for int/float or a separate double array for double.
+The proof checks the actual constructor/conversion and const interface; it does
+not exempt an entire class or an unselected method from the existing audits.
+Target compilation must independently validate the resulting `__ubuf__`
+address spaces, alignment, dynamic launch bytes and total resource use.
+
+Raw preprocessing additionally permits a complete, sole empty outer guard,
+one directly resolved native `/usr/include/stdio.h`, and one exact inactive
+`__CUDA_ARCH__ >= 800` integer specialization with its SDK and AST witnesses.
+The source condition is retained. An inserted target `#error` rejects a target
+compilation that defines `__CUDA_ARCH__`; caller controls, other alternatives
+and hidden scratch references remain refused. See the
+[decision record](decisions/002-bounded-binary64-cg-reduction.md).
 
 The [AST gate](../tests/frontend_compat/check_uniform_block_reduction.py) covers
-accepted inputs and unsafe mutations. The
+accepted inputs and unsafe mutations. The versioned
+[extended matrix](../tests/frontend_compat/check_uniform_extended_domain.py)
+adds 47 source-syntax-checked cases (12 admitted, 35 refused), including loop,
+shared conversion, raw control and atomic-publication boundaries. The
 [host adapter model](../tests/rewrite/uniform_block_reduction_host_test.cpp) checks
 all-lane results, reuse, and special values. These checks do not replace the
 separate [device probe](../tests/rewrite/uniform_block_reduction_probe.cce).

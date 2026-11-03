@@ -25,12 +25,16 @@ struct Scalar64Plan {
   std::vector<Scalar64Edit> edits;
   std::set<const clang::Expr*> scalarExpressions;
   std::set<const clang::TemplateTypeParmDecl*> scalarParameters;
+  // Only the second parameter of a proved one-return CG reduce forwarder.
+  std::set<const clang::TemplateTypeParmDecl*> reduceGroupParameters;
   // The outer FunctionProto TypeLoc of a proved declaration only. Its return
   // and parameter TypeLocs are still traversed; no function-type/trait domain
   // or address-taking exception is granted.
   std::set<const void*> scalarSignatureTypeLocs;
-  unsigned additions = 0, assignments = 0, transports = 0, guards = 0;
-  bool used() const { return additions || assignments || transports; }
+  unsigned additions = 0, assignments = 0, transports = 0, guards = 0, reductions = 0;
+  // One physical pure helper statement, shared by all proved dtype instances.
+  unsigned maskedAccumulations = 0;
+  bool used() const { return additions || assignments || transports || reductions; }
 };
 
 // These callbacks reuse the converter's physical input/SDK/profile proofs.
@@ -40,6 +44,7 @@ bool ProveScalar64Lowering(
     const std::function<bool(clang::SourceLocation)>& ownedInput,
     const std::function<bool(clang::SourceLocation)>& trustedSdk,
     const std::function<bool(const clang::FunctionDecl*)>& trustedShuffle,
+    const std::function<bool(const clang::FunctionDecl*)>& trustedReduce,
     const std::function<bool(llvm::StringRef, clang::SourceLocation)>& macroFree,
     bool standardPreprocessing, Scalar64Plan& plan,
     clang::SourceLocation& errorLocation, std::string& error);

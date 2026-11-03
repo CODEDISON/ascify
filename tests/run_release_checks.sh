@@ -41,6 +41,8 @@ run_check "partial device properties and warp vote contracts" \
   sh "$rewrite_dir/check_device_properties.sh"
 run_check "converged partial-mask ballot and shuffle contracts" \
   bash "$rewrite_dir/check_masked_warp_compat.sh"
+run_check "masked accumulation defined results and independent prefix sums" \
+  sh "$rewrite_dir/check_masked_accumulation_compat.sh"
 run_check "registered symbol copy argument and error contracts" \
   bash "$rewrite_dir/check_symbol_compat.sh"
 run_check "private device copy representation and size contracts" \
@@ -236,6 +238,14 @@ run_check "closed scalar64 transport and binary64 add AST/CPU contracts" \
     --cxx "${CXX:-c++}" \
     --evidence-dir "$work_dir/scalar64_lowering"
 
+run_check "pure masked accumulation AST contracts and old fallback boundaries" \
+  "$python" -B "$rewrite_dir/check_masked_accumulation_lowering.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang++}" \
+    --evidence-dir "$work_dir/masked_accumulation_lowering"
+
 run_check "CUDA ffs argument conversion and overload boundaries" \
   "$python" -B "$rewrite_dir/check_ffs_conversion.py" \
     --binary "$ASCIFY_BINARY" \
@@ -405,6 +415,11 @@ run_check "uniform block reduction whole-TU admission and publication boundaries
     --binary "$ASCIFY_BINARY" \
     --cuda-path "$ASCIFY_CUDA_PATH" \
     --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY"
+run_check "versioned uniform binary64, loops, shared conversion and raw input boundaries" \
+  "$python" -B "$repo_root/tests/frontend_compat/check_uniform_extended_domain.py" \
+    --binary "$ASCIFY_BINARY" --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" --clang "${CLANG:-clang++}" \
+    --evidence-dir "$work_dir/uniform_extended"
 run_check "complete-warp static16 and erased-group source/publication boundaries" \
   "$python" -B "$repo_root/tests/frontend_compat/check_fullwarp_groups.py" \
     --binary "$ASCIFY_BINARY" --cuda-path "$ASCIFY_CUDA_PATH" \

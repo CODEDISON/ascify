@@ -226,15 +226,19 @@ __SIMT_DEVICE_FUNCTIONS_DECL__ inline void sync(const thread_group& group) {
 }
 
 template <typename T> struct plus {
-  static_assert(std::is_same<T, int>::value || std::is_same<T, float>::value,
-                "Ascify cooperative plus supports only int and float");
-  __SIMT_DEVICE_FUNCTIONS_DECL__ T operator()(T left, T right) const { return left + right; }
+  static_assert(std::is_same<T, int>::value || std::is_same<T, float>::value ||
+                std::is_same<T, double>::value,
+                "Ascify cooperative plus supports int, float and exact binary64 double");
+  __SIMT_DEVICE_FUNCTIONS_DECL__ T operator()(T left, T right) const {
+    return ::ascify::detail::scalar_add_rne<T>(left, right);
+  }
 };
 
 template <unsigned int Size, typename ParentT, typename T>
 __SIMT_DEVICE_FUNCTIONS_DECL__ inline
  typename std::enable_if<Size == 32 && (std::is_same<T, int>::value ||
-                                     std::is_same<T, float>::value), T>::type
+                                     std::is_same<T, float>::value ||
+                                     std::is_same<T, double>::value), T>::type
 reduce(const thread_block_tile<Size, ParentT>& group, T value, plus<T> operation) {
   // A complete tile must execute this register collective together. In
   // particular, do not substitute a block barrier when another warp diverges.
