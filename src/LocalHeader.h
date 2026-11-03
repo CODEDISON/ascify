@@ -58,6 +58,8 @@ struct LocalHeaderInputEvidence {
   // Ordered literal pragma events include their full payload. Clang annotation
   // tokens alone do not expose e.g. the count of an unroll directive.
   std::string pragmaSha256;
+  // Plain current-driver metadata; no AST node or producer-granted capability.
+  std::string dynamicWarpSdkTuple;
   bool hasPhysicalLineDirective = false;
   bool ordinaryPhysicalInput = false;
   // Discovery may parse a temporary root copy. Bind its actual main buffer,

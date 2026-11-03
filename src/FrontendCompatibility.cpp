@@ -161,6 +161,39 @@ template <unsigned Size, unsigned BlockSize> struct scratch_thread_block_tile {
 template <unsigned Size, unsigned BlockSize>
 ASCIFY_FRONTEND_COMPAT_DEVICE_ scratch_thread_block_tile<Size, BlockSize>
 tiled_partition(const scratch_thread_block<BlockSize>& parent);
+
+// Opaque parsing values for a separately authenticated register-only group
+// contract. Mandatory whole-TU proof must reject all unproved operations,
+// representation observations, aliases, copies and escapes before publication.
+class grid_group {
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ grid_group();
+ public:
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned long long thread_rank();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned long long size();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ bool is_valid() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync() const;
+};
+ASCIFY_FRONTEND_COMPAT_DEVICE_ grid_group this_grid();
+class coalesced_group {
+ protected:
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ coalesced_group();
+ public:
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned size() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned num_threads() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned thread_rank() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned meta_group_rank() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned meta_group_size() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync() const;
+  template<class T> ASCIFY_FRONTEND_COMPAT_DEVICE_ T shfl(T,int) const;
+};
+ASCIFY_FRONTEND_COMPAT_DEVICE_ coalesced_group coalesced_threads();
+template<unsigned Size,class Parent> ASCIFY_FRONTEND_COMPAT_DEVICE_
+coalesced_group binary_partition(const thread_block_tile<Size,Parent>&,bool);
+ASCIFY_FRONTEND_COMPAT_DEVICE_ coalesced_group binary_partition(const coalesced_group&,bool);
+template<class Label> ASCIFY_FRONTEND_COMPAT_DEVICE_
+coalesced_group labeled_partition(const coalesced_group&,Label);
+template<class Label,unsigned Size,class Parent> ASCIFY_FRONTEND_COMPAT_DEVICE_
+coalesced_group labeled_partition(const thread_block_tile<Size,Parent>&,Label);
 }  // namespace cooperative_groups
 #undef ASCIFY_FRONTEND_COMPAT_DEVICE_
 #endif
@@ -197,6 +230,14 @@ typename std::enable_if<std::is_same<T, int>::value ||
                         std::is_same<T, float>::value ||
                         std::is_same<T, double>::value, T>::type
 reduce(const scratch_thread_block_tile<Size, BlockSize>& group, T value, plus<T> operation);
+
+// These declarations provide inventory for the mandatory exact int/owned
+// plus-or-max gate. They grant neither a generic functor nor a sync capability.
+template<class T> struct greater {
+  ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_ T operator()(T,T) const;
+};
+template<class Op> ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_
+int reduce(const coalesced_group&,int,Op);
 }  // namespace cooperative_groups
 #undef ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_
 #endif
@@ -272,13 +313,13 @@ inline int max(A a, B b) {
 constexpr char kProfileManifest[] =
     "schema=ascify.frontend-compat-profile.v1\n"
     "profile=ascify-admitted-v1\n"
-    "file=cooperative_groups.h;bytes=7153;sha256=5659d22211f4263794820af69d741adf51159642a043f903c8dd2fa8e3a22779\n"
-    "file=cooperative_groups/reduce.h;bytes=1808;sha256=f5c820f2e8799486ea218529c91faf6814478eef5c2acea850f39859d816558c\n"
+    "file=cooperative_groups.h;bytes=8893;sha256=428a45c2107e823d08d837fb10c0e0742ba361bfe8de4db78b4cdf8de4d05aa4\n"
+    "file=cooperative_groups/reduce.h;bytes=2167;sha256=5229c9dc3f909da824339a588eaab8f38f8804eb39ac35025766df06e0c38165\n"
     "file=host_math.h;bytes=2594;sha256=3b87b69a619cff6333d8fb2728d6af31a90a28fd2073077084b81ba602d70e2f\n";
 
-static_assert(sizeof(kAdmissionHeader) - 1 == 7153,
+static_assert(sizeof(kAdmissionHeader) - 1 == 8893,
               "admission header identity drifted");
-static_assert(sizeof(kReductionHeader) - 1 == 1808,
+static_assert(sizeof(kReductionHeader) - 1 == 2167,
               "reduction header identity drifted");
 static_assert(sizeof(kHostMathHeader) - 1 == 2594,
               "host math header identity drifted");
@@ -293,8 +334,8 @@ struct RequiredProfileFile {
 
 constexpr RequiredProfileFile kRequiredProfileFiles[] = {
     {"profile.manifest", 393, kProfileManifest},
-    {"cooperative_groups.h", 7153, kAdmissionHeader},
-    {"cooperative_groups/reduce.h", 1808, kReductionHeader},
+    {"cooperative_groups.h", 8893, kAdmissionHeader},
+    {"cooperative_groups/reduce.h", 2167, kReductionHeader},
     {"host_math.h", 2594, kHostMathHeader},
 };
 
@@ -509,6 +550,33 @@ CooperativeGroupsIncludeKind classifyCooperativeGroupsInclude(
 }  // namespace
 
 namespace ascify {
+
+bool ResolveDynamicWarpGroupsBackend(const FrontendCompatibilityConfig& config,
+                                    std::string& path, std::string& error) {
+  static int anchor;
+  std::error_code ec;
+  const fs::path executable=fs::canonical(
+      llvm::sys::fs::getMainExecutable(nullptr,&anchor),ec);
+  if(ec||!config.enabled()) { error="dynamic backend has no physical product"; return false; }
+  const auto installedProfile=(executable.parent_path()/
+      ASCIFY_FRONTEND_COMPAT_INSTALL_FROM_BINDIR/config.profile).lexically_normal();
+  fs::path candidate;
+  if(installedProfile==fs::path(config.canonicalRoot))
+    candidate=(executable.parent_path()/ASCIFY_COMPAT_INCLUDE_INSTALL_FROM_BINDIR/
+               "ascify/dynamic_warp_groups_compat.hpp").lexically_normal();
+  else {
+    const auto build=fs::canonical(fs::path(ASCIFY_FRONTEND_COMPAT_BUILD_DIR),ec);
+    if(ec||executable.parent_path()!=build||
+        fs::path(config.canonicalRoot)!=fs::path(ASCIFY_FRONTEND_COMPAT_SOURCE_DIR)/config.profile) {
+      error="dynamic backend does not belong to the selected physical product"; return false;
+    }
+    candidate=fs::path(ASCIFY_COMPAT_INCLUDE_SOURCE_DIR)/"ascify/dynamic_warp_groups_compat.hpp";
+  }
+  if(!regularFileWithoutSymlink(candidate)||fs::canonical(candidate,ec)!=candidate||ec) {
+    error="dynamic backend has an unproved physical path"; return false;
+  }
+  path=pathString(candidate);return true;
+}
 
 bool IsVerifiedFrontendHostMathInput(
     const FrontendCompatibilityConfig& config,

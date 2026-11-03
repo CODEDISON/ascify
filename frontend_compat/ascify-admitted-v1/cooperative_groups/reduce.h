@@ -29,6 +29,14 @@ typename std::enable_if<std::is_same<T, int>::value ||
                         std::is_same<T, float>::value ||
                         std::is_same<T, double>::value, T>::type
 reduce(const scratch_thread_block_tile<Size, BlockSize>& group, T value, plus<T> operation);
+
+// These declarations provide inventory for the mandatory exact int/owned
+// plus-or-max gate. They grant neither a generic functor nor a sync capability.
+template<class T> struct greater {
+  ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_ T operator()(T,T) const;
+};
+template<class Op> ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_
+int reduce(const coalesced_group&,int,Op);
 }  // namespace cooperative_groups
 #undef ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_
 #endif

@@ -79,7 +79,7 @@ require_fixed 'thread_block this_thread_block();' "$header"
 require_fixed 'inline void sync(const thread_block& group)' "$header"
 require_fixed 'group.sync();' "$header"
 for forbidden in \
-  'coalesced_group' 'ballot' \
+  'ballot' \
   '__shared__' 'dynamic_shared' 'nv/target'; do
   forbid_fixed "$forbidden" "$header"
 done
@@ -88,21 +88,21 @@ require_fixed \
 require_fixed 'schema=ascify.frontend-compat-profile.v1' "$manifest"
 require_fixed 'profile=ascify-admitted-v1' "$manifest"
 require_fixed \
-  'file=cooperative_groups.h;bytes=7153;sha256=5659d22211f4263794820af69d741adf51159642a043f903c8dd2fa8e3a22779' \
+  'file=cooperative_groups.h;bytes=8893;sha256=428a45c2107e823d08d837fb10c0e0742ba361bfe8de4db78b4cdf8de4d05aa4' \
   "$manifest"
 require_fixed \
-  'file=cooperative_groups/reduce.h;bytes=1808;sha256=f5c820f2e8799486ea218529c91faf6814478eef5c2acea850f39859d816558c' \
+  'file=cooperative_groups/reduce.h;bytes=2167;sha256=5229c9dc3f909da824339a588eaab8f38f8804eb39ac35025766df06e0c38165' \
   "$manifest"
 require_fixed \
   'file=host_math.h;bytes=2594;sha256=3b87b69a619cff6333d8fb2728d6af31a90a28fd2073077084b81ba602d70e2f' \
   "$manifest"
 if [ "$(sha256_file "$header")" != \
-    '5659d22211f4263794820af69d741adf51159642a043f903c8dd2fa8e3a22779' ]; then
+    '428a45c2107e823d08d837fb10c0e0742ba361bfe8de4db78b4cdf8de4d05aa4' ]; then
   echo "frontend admission header SHA-256 mismatch" >&2
   exit 1
 fi
 if [ "$(sha256_file "$reduction")" != \
-    'f5c820f2e8799486ea218529c91faf6814478eef5c2acea850f39859d816558c' ]; then
+    '5229c9dc3f909da824339a588eaab8f38f8804eb39ac35025766df06e0c38165' ]; then
   echo "frontend reduction header SHA-256 mismatch" >&2
   exit 1
 fi

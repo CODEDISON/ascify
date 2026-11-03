@@ -246,6 +246,14 @@ run_check "pure masked accumulation AST contracts and old fallback boundaries" \
     --clang "${CLANG:-clang++}" \
     --evidence-dir "$work_dir/masked_accumulation_lowering"
 
+run_check "dynamic register-group current-CI source and atomic refusal boundaries" \
+  "$python" -B "$rewrite_dir/check_dynamic_warp_groups.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang++}" \
+    --evidence-dir "$work_dir/dynamic_warp_groups"
+
 run_check "CUDA ffs argument conversion and overload boundaries" \
   "$python" -B "$rewrite_dir/check_ffs_conversion.py" \
     --binary "$ASCIFY_BINARY" \
