@@ -2,9 +2,10 @@
 #include <functional>
 #include <set>
 #include <string>
+#include <vector>
 #include "clang/Basic/SourceLocation.h"
 #include "llvm/ADT/StringRef.h"
-namespace clang { class ASTContext; class Decl; class CallExpr; class Expr; class NamespaceAliasDecl; }
+namespace clang { class ASTContext; class Decl; class CallExpr; class Expr; class FunctionDecl; class NamespaceAliasDecl; }
 namespace ascify {
 struct DynamicWarpGroupStats {
   unsigned values=0, factories=0, reductions=0, shuffles=0, coordinateQueries=0;
@@ -18,6 +19,7 @@ struct DynamicWarpGroupStats {
   std::set<const clang::CallExpr*> approvedCalls;
   std::set<const void*> sourceTypeLocations;
   std::set<const clang::NamespaceAliasDecl*> namespaceAliases;
+  std::set<const clang::FunctionDecl*> localFactoryFunctions;
   bool used() const { return values!=0 || factories!=0; }
 };
 // Current-CompilerInstance witnesses only. The source transaction must also
@@ -29,5 +31,16 @@ bool ProveDynamicWarpGroups(
     const std::function<bool(const clang::Decl*)>& ownedCgDecl,
     const std::function<bool(llvm::StringRef,clang::SourceLocation)>& macroFree,
     bool standardDavC310Vec, DynamicWarpGroupStats& output,
+    clang::SourceLocation& errorLocation, std::string& error);
+// A separate, restrictive consumer of this CI's completed dynamic-group proof.
+// Only naturally packed pointer64-prefix + unsigned-int32-tail signatures are
+// eligible. No AST expression/body/type is exempted by this output.
+bool ProveDynamicKernelAbiTails(
+    clang::ASTContext&, const DynamicWarpGroupStats&,
+    const std::function<bool(clang::SourceLocation)>& ownedSource,
+    const std::function<bool(clang::SourceLocation)>& callerSource,
+    const std::function<bool(llvm::StringRef,clang::SourceLocation)>& macroFree,
+    const std::function<bool(const clang::CallExpr*)>& provenOccupancyCall,
+    std::vector<clang::SourceLocation>& insertions,
     clang::SourceLocation& errorLocation, std::string& error);
 }

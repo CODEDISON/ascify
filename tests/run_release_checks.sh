@@ -263,6 +263,14 @@ run_check "dynamic register-group current-CI source and atomic refusal boundarie
     --clang "${CLANG:-clang++}" \
     --evidence-dir "$work_dir/dynamic_warp_groups"
 
+run_check "dynamic-kernel single tail-hole ABI completion and atomic refusal boundaries" \
+  "$python" -B "$rewrite_dir/check_dynamic_kernel_abi_tail.py" \
+    --binary "$ASCIFY_BINARY" \
+    --cuda-path "$ASCIFY_CUDA_PATH" \
+    --resource-dir "$ASCIFY_CLANG_RESOURCE_DIRECTORY" \
+    --clang "${CLANG:-clang++}" \
+    --evidence-dir "$work_dir/dynamic_kernel_abi_tail"
+
 run_check "CUDA ffs argument conversion and overload boundaries" \
   "$python" -B "$rewrite_dir/check_ffs_conversion.py" \
     --binary "$ASCIFY_BINARY" \

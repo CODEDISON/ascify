@@ -135,6 +135,10 @@ class Inventory:public RecursiveASTVisitor<Inventory> {
   std::vector<const NamedDecl*> declarations;
   std::vector<Invocation> calls;
   std::vector<TypeUse> types;
+  std::vector<std::pair<const FunctionDecl*,const Expr*>> signatureObservers;
+  std::vector<const AsmStmt*> assemblies;
+  std::vector<const FileScopeAsmDecl*> fileAssemblies;
+  std::vector<std::pair<const NamedDecl*,SourceLocation>> templateDeclarations;
   std::set<const Expr*> directCallees;
   bool shouldVisitTemplateInstantiations() const{return true;}
   bool shouldVisitImplicitCode() const{return true;}
@@ -161,6 +165,22 @@ class Inventory:public RecursiveASTVisitor<Inventory> {
   bool VisitUnresolvedLookupExpr(UnresolvedLookupExpr* e){lookups.push_back(e);return true;}
   bool VisitTypeLoc(TypeLoc t){types.push_back({t,current});return true;}
   bool VisitCallExpr(CallExpr* c){calls.push_back({current,c,observed!=0});directCallees.insert(plain(c->getCallee()));return true;}
+  bool VisitPredefinedExpr(PredefinedExpr* e){signatureObservers.push_back({current,e});return true;}
+  bool VisitSourceLocExpr(SourceLocExpr* e){signatureObservers.push_back({current,e});return true;}
+  bool VisitAsmStmt(AsmStmt* s){assemblies.push_back(s);return true;}
+  bool VisitFileScopeAsmDecl(FileScopeAsmDecl* d){fileAssemblies.push_back(d);return true;}
+  bool TraverseTemplateArgumentLoc(const TemplateArgumentLoc& a) {
+    if(a.getArgument().getKind()==TemplateArgument::Declaration)
+      templateDeclarations.push_back({a.getArgument().getAsDecl(),a.getLocation()});
+    return RecursiveASTVisitor<Inventory>::TraverseTemplateArgumentLoc(a);
+  }
+  bool TraverseTemplateArgument(const TemplateArgument& a) {
+    if(a.getKind()==TemplateArgument::Declaration)
+      templateDeclarations.push_back({a.getAsDecl(),{}});
+    // LLVM23 RAV888..963: Pack delegates to derived TraverseTemplateArguments,
+    // whose elements call this override. Preserve Type/Expression traversal.
+    return RecursiveASTVisitor<Inventory>::TraverseTemplateArgument(a);
+  }
 };
 class Proof {
   ASTContext& context;SourceManager& source;
@@ -215,7 +235,7 @@ class Proof {
       stats.valueExpressions.insert(node);
       if(const auto* parens=dyn_cast<ParenExpr>(node))node=parens->getSubExpr();
       else if(const auto* cast=dyn_cast<ImplicitCastExpr>(node)) {
-        const auto* pointer=cast->getType()->getAs<PointerType>();
+        const auto* pointer=cast->getType()->getAs<clang::PointerType>();
         if(cast->getCastKind()!=CK_FunctionToPointerDecay||!pointer||
             !context.hasSameType(pointer->getPointeeType(),cast->getSubExpr()->getType()))return false;
         node=cast->getSubExpr();
@@ -543,6 +563,7 @@ class Proof {
     }else return fail(v->getLocation(),"unproved dynamic group factory/copy");
     if(!admitCall(call))return fail(call->getExprLoc(),"factory callee has an unproved wrapper");
     groups.emplace(v,f);
+    stats.localFactoryFunctions.insert(f);
     stats.valueExpressions.insert(call);stats.valueExpressions.insert(v->getInit());
     ++stats.values;++stats.factories;
     // The type-use walk below also checks all inner locations of this exact
@@ -709,6 +730,174 @@ bool ProveDynamicWarpGroups(ASTContext& c,const std::function<bool(SourceLocatio
     const std::function<bool(llvm::StringRef,SourceLocation)>& m,bool standard,DynamicWarpGroupStats& output,
     SourceLocation& location,std::string& error) {
   DynamicWarpGroupStats staged;if(!Proof(c,o,a,s,m,staged,location,error).run(standard))return false;
+  output=std::move(staged);return true;
+}
+
+bool ProveDynamicKernelAbiTails(ASTContext& context,const DynamicWarpGroupStats& dynamic,
+    const std::function<bool(SourceLocation)>& owned,
+    const std::function<bool(SourceLocation)>& caller,
+    const std::function<bool(llvm::StringRef,SourceLocation)>& macroFree,
+    const std::function<bool(const CallExpr*)>& occupancy,
+    std::vector<SourceLocation>& output,SourceLocation& bad,std::string& error) {
+  auto& source=context.getSourceManager();std::vector<SourceLocation> staged;
+  std::set<const FunctionDecl*> kernels;
+  const auto fail=[&](SourceLocation location,llvm::StringRef why) {
+    if(error.empty()){bad=location;error=why.str();}return false;
+  };
+  const auto literal=[&](SourceLocation location) {
+    return location.isFileID()&&source.isWrittenInMainFile(location)&&owned(location);
+  };
+  const auto callerAt=[&](SourceLocation location) {
+    return location.isValid()&&caller(source.getExpansionLoc(location));
+  };
+  const auto tokens=[&](SourceRange range) {
+    if(!literal(range.getBegin())||!literal(range.getEnd()))return false;
+    const auto file=source.getFileID(range.getBegin());
+    if(file!=source.getFileID(range.getEnd()))return false;
+    const auto end=Lexer::getLocForEndOfToken(range.getEnd(),0,source,context.getLangOpts());
+    if(!end.isFileID())return false;
+    bool invalid=false;const auto bytes=source.getBufferData(file,&invalid);
+    const unsigned start=source.getFileOffset(range.getBegin()),finish=source.getFileOffset(end);
+    if(invalid||start>=finish||finish>bytes.size())return false;
+    Lexer lexer(source.getLocForStartOfFile(file),context.getLangOpts(),
+                bytes.begin(),bytes.begin()+start,bytes.end());
+    for(;;){Token token;lexer.LexFromRawLexer(token);
+      if(token.is(tok::eof)||source.getFileOffset(token.getLocation())>=finish)break;
+      if(token.needsCleaning()||token.hasUCN()||token.is(tok::hash)||token.is(tok::hashhash))return false;
+      if(token.isAnyIdentifier()&&!macroFree(Lexer::getSpelling(token,source,context.getLangOpts()),token.getLocation()))return false;
+    }
+    return true;
+  };
+  for(const auto* function:dynamic.localFactoryFunctions) {
+    if(!function->hasAttr<CUDAGlobalAttr>()||function->getNumParams()<2)continue;
+    const auto n=function->getNumParams();const auto last=function->getParamDecl(n-1)->getType();
+    if(!context.hasSameType(last,context.UnsignedIntTy)||context.getTypeSize(last)!=32||
+        context.getTypeAlign(last)!=32)continue;
+    bool prefix=true;
+    for(unsigned i=0;i+1<n;++i) {
+      const auto t=function->getParamDecl(i)->getType();const auto* pointer=t->getAs<clang::PointerType>();
+      if(!pointer||pointer->getPointeeType()->isFunctionType()||context.getTypeSize(t)!=64||
+          context.getTypeAlign(t)!=64||t.isVolatileQualified()||t.getAddressSpace()!=LangAS::Default)prefix=false;
+    }
+    // Other signatures retain the previous domain; this feature neither
+    // guesses their padding nor grants them an ABI-completion witness.
+    if(!prefix)continue;
+    const FunctionDecl* definition=nullptr;
+    if(isa<CXXMethodDecl>(function)||function->getTemplatedKind()!=FunctionDecl::TK_NonTemplate||
+        !function->getDeclContext()->getRedeclContext()->isTranslationUnit()||
+        !function->hasBody(definition)||definition!=function||function->getPreviousDecl()||
+        function->getMostRecentDecl()!=function||function->isVariadic()||
+        !context.hasSameType(function->getReturnType(),context.VoidTy)||!literal(function->getLocation())||
+        !tokens(function->getNameInfo().getSourceRange()))
+      return fail(function->getLocation(),"dynamic kernel ABI padding requires one literal main-file ordinary global definition");
+    for(const auto* attr:function->attrs())if(!attr->isImplicit()&&
+        !isa<CUDAGlobalAttr>(attr)&&!isa<CUDALaunchBoundsAttr>(attr))
+      return fail(function->getLocation(),"dynamic kernel ABI padding has an unproved function attribute");
+    const auto* type=function->getType()->getAs<FunctionProtoType>();
+    if(!type||type->getCallConv()!=CC_C)return fail(function->getLocation(),"dynamic kernel ABI padding requires the ordinary C calling convention");
+    for(const auto* parameter:function->parameters())
+      if(parameter->hasAttrs()||parameter->hasDefaultArg()||!tokens(parameter->getSourceRange()))
+        return fail(parameter->getLocation(),"dynamic kernel ABI padding requires literal nondefault parameter declarations without attributes");
+    const auto* info=function->getTypeSourceInfo();
+    const auto location=info?info->getTypeLoc().getAs<FunctionProtoTypeLoc>():FunctionProtoTypeLoc();
+    const auto close=location?location.getRParenLoc():SourceLocation();Token token;
+    if(!literal(close)||Lexer::getRawToken(close,token,source,context.getLangOpts(),true)||
+        !token.is(tok::r_paren)||!macroFree("unsigned",close)||!macroFree("int",close))
+      return fail(function->getLocation(),"dynamic kernel ABI padding has no literal macro-free parameter-list terminator");
+    kernels.insert(function->getCanonicalDecl());staged.push_back(close);
+  }
+  if(kernels.empty()){output.clear();return true;}
+  Inventory inventory(context.BuiltinInfo);inventory.TraverseDecl(context.getTranslationUnitDecl());
+  const auto selected=[&](const NamedDecl* declaration) {
+    if(const auto* shadow=dyn_cast_or_null<UsingShadowDecl>(declaration))declaration=shadow->getTargetDecl();
+    const auto* f=dyn_cast_or_null<FunctionDecl>(declaration);
+    return f&&kernels.count(f->getCanonicalDecl());
+  };
+  std::set<std::string> kernelNames;
+  for(const auto* function:kernels)kernelNames.insert(function->getNameAsString());
+  const auto sameName=[&](const NamedDecl* declaration) {
+    return declaration&&declaration->getIdentifier()&&
+        kernelNames.count(declaration->getNameAsString());
+  };
+  // A new defaulted fifth argument must never create another overload or
+  // retarget an existing five-argument call. Keep the spelling unique across
+  // all caller declarations, not just the originally selected reference set.
+  for(const auto* declaration:inventory.declarations)
+    if(callerAt(declaration->getLocation())&&sameName(declaration)&&!selected(declaration))
+      return fail(declaration->getLocation(),"dynamic kernel ABI padding rejects caller same-name declarations or overloads");
+  for(const auto* reference:inventory.references)
+    if(callerAt(reference->getLocation())&&sameName(reference->getDecl())&&!selected(reference->getDecl()))
+      return fail(reference->getLocation(),"dynamic kernel ABI padding rejects same-name nonkernel references");
+  for(const auto* member:inventory.members)
+    if(callerAt(member->getMemberLoc())&&sameName(member->getMemberDecl())&&!selected(member->getMemberDecl()))
+      return fail(member->getMemberLoc(),"dynamic kernel ABI padding rejects same-name member observations");
+  const auto physicalArgument=[&](SourceLocation location) {
+    while(location.isMacroID()) {
+      if(!source.isMacroArgExpansion(location))return SourceLocation();
+      location=source.getImmediateSpellingLoc(location);
+    }
+    return location;
+  };
+  const auto directReference=[&](const Expr* expression,const DeclRefExpr* reference,bool macroArgument) {
+    unsigned decays=0;
+    while(expression&&expression!=reference) {
+      if(const auto* parens=dyn_cast<ParenExpr>(expression))expression=parens->getSubExpr();
+      else if(const auto* cast=dyn_cast<ImplicitCastExpr>(expression)) {
+        const auto* pointer=cast->getType()->getAs<clang::PointerType>();
+        if(cast->getCastKind()!=CK_FunctionToPointerDecay||++decays!=1||!pointer||
+            !context.hasSameType(pointer->getPointeeType(),cast->getSubExpr()->getType()))return false;
+        expression=cast->getSubExpr();
+      }else return false;
+    }
+    if(expression!=reference)return false;
+    const auto first=macroArgument?physicalArgument(reference->getBeginLoc()):reference->getBeginLoc();
+    const auto last=macroArgument?physicalArgument(reference->getEndLoc()):reference->getEndLoc();
+    return tokens({first,last});
+  };
+  std::set<const FunctionDecl*> launched;
+  for(const auto* reference:inventory.references)if(selected(reference->getDecl())) {
+    bool admitted=false;
+    for(const auto& entry:inventory.calls) {
+      if(entry.observation||!entry.owner||isa<CXXMethodDecl>(entry.owner)||entry.owner->getTemplatedKind()!=FunctionDecl::TK_NonTemplate||
+          entry.owner->hasAttr<CUDAGlobalAttr>()||entry.owner->hasAttr<CUDADeviceAttr>())continue;
+      if(const auto* launch=dyn_cast<CUDAKernelCallExpr>(entry.call)) {
+        if(launch->getDirectCallee()&&selected(launch->getDirectCallee())&&
+            directReference(launch->getCallee(),reference,false)) {
+          admitted=true;launched.insert(launch->getDirectCallee()->getCanonicalDecl());
+        }
+      }else if(entry.call->getNumArgs()>2&&occupancy(entry.call)&&
+          entry.call->getDirectCallee()&&entry.call->getDirectCallee()->getNameAsString()=="cudaOccupancyMaxPotentialBlockSize"&&
+          directReference(entry.call->getArg(2),reference,true))admitted=true;
+    }
+    if(!admitted)return fail(reference->getLocation(),"dynamic kernel ABI padding rejects kernel address escape, reflection, alias or unproved call");
+  }
+  for(const auto* function:kernels)if(!launched.count(function))
+    return fail(function->getLocation(),"dynamic kernel ABI padding requires its direct ordinary host launch in the same root");
+  for(const auto& observer:inventory.signatureObservers)
+    if(observer.first&&kernels.count(observer.first->getCanonicalDecl()))
+      return fail(observer.second->getExprLoc(),"dynamic kernel ABI padding rejects function/source signature observations");
+  for(const auto* assembly:inventory.assemblies)if(callerAt(assembly->getBeginLoc()))
+    return fail(assembly->getBeginLoc(),"dynamic kernel ABI padding rejects caller assembly symbol observations");
+  for(const auto* assembly:inventory.fileAssemblies)if(callerAt(assembly->getBeginLoc()))
+    return fail(assembly->getBeginLoc(),"dynamic kernel ABI padding rejects caller file-scope assembly symbol observations");
+  for(const auto* declaration:inventory.declarations)if(callerAt(declaration->getLocation())) {
+    if(const auto* imported=dyn_cast<UsingDecl>(declaration))
+      for(const auto* shadow:imported->shadows())if(selected(shadow))
+        return fail(declaration->getLocation(),"dynamic kernel ABI padding rejects kernel using aliases");
+    if((isa<UsingShadowDecl>(declaration)&&selected(declaration))||
+        declaration->hasAttr<AliasAttr>()||declaration->hasAttr<IFuncAttr>()||
+        declaration->hasAttr<AsmLabelAttr>()||declaration->hasAttr<WeakRefAttr>())
+      return fail(declaration->getLocation(),"dynamic kernel ABI padding rejects caller symbol aliases");
+  }
+  for(const auto* lookup:inventory.lookups)if(callerAt(lookup->getNameLoc())) {
+    if(kernelNames.count(lookup->getName().getAsString()))
+      return fail(lookup->getNameLoc(),"dynamic kernel ABI padding rejects unresolved same-name kernel lookup");
+    for(const auto* declaration:lookup->decls())if(selected(declaration))
+      return fail(lookup->getNameLoc(),"dynamic kernel ABI padding rejects unresolved kernel lookup");
+  }
+  for(const auto& item:inventory.templateDeclarations)if(selected(item.first))
+    return fail(item.second.isValid()?item.second:(*kernels.begin())->getLocation(),
+        "dynamic kernel ABI padding rejects kernel non-type template observations");
   output=std::move(staged);return true;
 }
 }  // namespace ascify

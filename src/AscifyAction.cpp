@@ -15890,6 +15890,72 @@ void AscifyAction::ExecuteAction() {
     return;
   }
   if (kernelThreadBoundPlan.used()) needsCudaCompatHeader = true;
+  std::vector<clang::SourceLocation> dynamicAbiTailInsertions;
+  std::string dynamicAbiTailError;
+  clang::SourceLocation dynamicAbiTailLocation;
+  if (!ascify::ProveDynamicKernelAbiTails(getCompilerInstance().getASTContext(),
+          dynamicWarpGroups,
+          [&](clang::SourceLocation location) {
+            return (localHeaderContext==nullptr||localHeaderContext->depth==0)&&
+                ownedNttpVoidCallLocation(location);
+          },dynamicCaller,
+          [&](llvm::StringRef name,clang::SourceLocation location) {
+            return !PP.getMacroDefinitionAtLoc(PP.getIdentifierInfo(name),location);
+          },[&](const clang::CallExpr* call) {
+            // Consume only this CI's successfully completed occupancy proof;
+            // neither an SDK-looking name nor an offset from another file can
+            // grant a new function-reference permission here.
+            const auto* callee=llvm::dyn_cast_or_null<clang::DeclRefExpr>(
+                call->getCallee()->IgnoreParenImpCasts());
+            if(!callee||call->getNumArgs()<=2||!closedBoundInvocation(call))return false;
+            auto location=callee->getLocation();
+            while(location.isMacroID()) {
+              if(!SM.isMacroArgExpansion(location))return false;
+              location=SM.getImmediateSpellingLoc(location);
+            }
+            if(!location.isFileID()||!SM.isWrittenInMainFile(location))return false;
+            const auto found=kernelThreadBoundPlan.occupancyCallees.find(SM.getFileOffset(location));
+            if(found==kernelThreadBoundPlan.occupancyCallees.end()||
+                !llvm::StringRef(found->second).starts_with(
+                    "::ascify::cudaOccupancyMaxPotentialBlockSizeMaxThreads<"))return false;
+            const auto* reference=llvm::dyn_cast<clang::DeclRefExpr>(
+                call->getArg(2)->IgnoreParenImpCasts());
+            const auto* kernel=reference?llvm::dyn_cast<clang::FunctionDecl>(reference->getDecl()):nullptr;
+            return kernel&&kernelThreadBoundPlan.kernels.count(kernel->getCanonicalDecl());
+          },dynamicAbiTailInsertions,dynamicAbiTailLocation,dynamicAbiTailError)) {
+    const auto diagnostic=getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error,"dynamic kernel ABI boundary: %0");
+    getCompilerInstance().getDiagnostics().Report(diagnostic)<<dynamicAbiTailError;
+    cudaRuntimeApiBoundaryFailed=true;return;
+  }
+  if(!dynamicAbiTailInsertions.empty()) {
+    ct::Replacements staged(*replacements);std::vector<SemanticRewriteRange> ranges;
+    for(const auto location:dynamicAbiTailInsertions) {
+      if(!location.isFileID()||!SM.isWrittenInMainFile(location)||
+          !ownedNttpVoidCallLocation(location)) {
+        dynamicAbiTailError="padding has no literal root insertion owner";break;
+      }
+      const auto position=SM.getDecomposedLoc(location);
+      for(const auto& range:SemanticRewriteRanges)
+        if(range.file==position.first&&range.beginOffset<=position.second&&position.second<range.endOffset)
+          dynamicAbiTailError="padding overlaps an existing semantic rewrite";
+      const ct::Replacement edit(SM,location,0U,", unsigned int = 0u");
+      for(const auto& existing:staged)
+        if(existing.getFilePath()==edit.getFilePath()&&existing.getOffset()==edit.getOffset()&&existing.getLength()==0)
+          dynamicAbiTailError="padding collides with another insertion";
+      if(!dynamicAbiTailError.empty()||!llcompat::insertReplacement(staged,edit,&dynamicAbiTailError))break;
+      ranges.push_back({position.first,position.second,position.second+1});
+    }
+    if(!dynamicAbiTailError.empty()) {
+      const auto diagnostic=getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error,"dynamic kernel ABI boundary: %0");
+      getCompilerInstance().getDiagnostics().Report(diagnostic)<<dynamicAbiTailError;
+      cudaRuntimeApiBoundaryFailed=true;return;
+    }
+    *replacements=std::move(staged);
+    SemanticRewriteRanges.insert(SemanticRewriteRanges.end(),ranges.begin(),ranges.end());
+    llvm::errs()<<"Ascify dynamic kernel ABI tail v1: kernels="<<dynamicAbiTailInsertions.size()<<"\n";
+  }
   // Texture macro admission consumes the existing helper status proof.
   // Keep it after that single proof pass and before the raw token rewrites.
   std::string textureError;
