@@ -143,6 +143,39 @@ template <unsigned Size, unsigned BlockSize> struct scratch_thread_block_tile {
 template <unsigned Size, unsigned BlockSize>
 ASCIFY_FRONTEND_COMPAT_DEVICE_ scratch_thread_block_tile<Size, BlockSize>
 tiled_partition(const scratch_thread_block<BlockSize>& parent);
+
+// Opaque parsing values for a separately authenticated register-only group
+// contract. Mandatory whole-TU proof must reject all unproved operations,
+// representation observations, aliases, copies and escapes before publication.
+class grid_group {
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ grid_group();
+ public:
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned long long thread_rank();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ static unsigned long long size();
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ bool is_valid() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync() const;
+};
+ASCIFY_FRONTEND_COMPAT_DEVICE_ grid_group this_grid();
+class coalesced_group {
+ protected:
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ coalesced_group();
+ public:
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned size() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned num_threads() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned thread_rank() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned meta_group_rank() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned meta_group_size() const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync() const;
+  template<class T> ASCIFY_FRONTEND_COMPAT_DEVICE_ T shfl(T,int) const;
+};
+ASCIFY_FRONTEND_COMPAT_DEVICE_ coalesced_group coalesced_threads();
+template<unsigned Size,class Parent> ASCIFY_FRONTEND_COMPAT_DEVICE_
+coalesced_group binary_partition(const thread_block_tile<Size,Parent>&,bool);
+ASCIFY_FRONTEND_COMPAT_DEVICE_ coalesced_group binary_partition(const coalesced_group&,bool);
+template<class Label> ASCIFY_FRONTEND_COMPAT_DEVICE_
+coalesced_group labeled_partition(const coalesced_group&,Label);
+template<class Label,unsigned Size,class Parent> ASCIFY_FRONTEND_COMPAT_DEVICE_
+coalesced_group labeled_partition(const thread_block_tile<Size,Parent>&,Label);
 }  // namespace cooperative_groups
 #undef ASCIFY_FRONTEND_COMPAT_DEVICE_
 #endif

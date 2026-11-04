@@ -263,6 +263,19 @@ bool appendArgumentsAdjusters(
                  << frontendCompatibilityError << "\n";
     return false;
   }
+  frontendCompatibility.sourceCudaHostDriver = !hostCxx;
+  Tool.appendArgumentsAdjuster([&frontendCompatibility](
+      const ct::CommandLineArguments &arguments, llvm::StringRef) {
+    for (const auto &argument : arguments)
+      if ((!argument.empty() && argument.front() == '@') ||
+          argument == "--config" || llvm::StringRef(argument).starts_with("--config=") ||
+          llvm::StringRef(argument).starts_with("--config-user-dir") ||
+          llvm::StringRef(argument).starts_with("--config-system-dir") ||
+          llvm::StringRef(argument).contains("target-sdk-version") ||
+          llvm::StringRef(argument).contains("target-variant-sdk-version"))
+        frontendCompatibility.callerSdkMetadataOverride = true;
+    return arguments;
+  });
   if (Verbose) {
     Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster("-v", ct::ArgumentInsertPosition::END));
   }

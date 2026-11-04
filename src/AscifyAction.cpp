@@ -665,6 +665,24 @@ bool isAscifyCudaCompatPublishedMacro(llvm::StringRef name) {
 const char *const AscifyCudaCompatIdentifiers[] = {
 #include "AscifyCudaCompatIdentifiers.inc"
 };
+const char *const DynamicWarpCompatIdentifiers[] = {
+#include "DynamicWarpCompatIdentifiers.inc"
+};
+bool isDynamicWarpCompatIdentifier(llvm::StringRef name) {
+  return std::find_if(std::begin(DynamicWarpCompatIdentifiers),
+      std::end(DynamicWarpCompatIdentifiers),
+      [&](const char* candidate) { return name==candidate; })!=
+      std::end(DynamicWarpCompatIdentifiers);
+}
+bool isDynamicWarpControlledToken(llvm::StringRef name) {
+  return isDynamicWarpCompatIdentifier(name)||name.starts_with("_CG_")||
+      name.starts_with("_COOPERATIVE_GROUPS_");
+}
+bool isNewDynamicProjectionName(llvm::StringRef name) {
+  return name=="cooperative_groups"||name=="grid_group"||name=="coalesced_group"||name=="this_grid"||
+      name=="coalesced_threads"||name=="binary_partition"||
+      name=="labeled_partition"||name=="greater";
+}
 
 bool isAscifyCudaCompatIdentifier(llvm::StringRef name) {
   return std::find_if(
@@ -6137,6 +6155,173 @@ bool AscifyAction::proveOriginalCgInclude(clang::SourceLocation location,
 #endif
 }
 
+bool AscifyAction::sealDynamicWarpGroupInputs() {
+  if (!dynamicWarpGroups.used()) return true;
+  auto &compiler=getCompilerInstance();
+  auto &source=compiler.getSourceManager();
+  auto &pp=compiler.getPreprocessor();
+  const auto reject=[&](llvm::StringRef reason) {
+    const auto id=compiler.getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error,"dynamic warp group boundary: %0");
+    compiler.getDiagnostics().Report(id)<<reason;
+    cudaRuntimeApiBoundaryFailed=true;return false;
+  };
+  auto &ast=compiler.getASTContext();
+  const auto *aux=ast.getAuxTargetInfo();
+  if (!frontendCompatibility.sourceCudaHostDriver ||
+      frontendCompatibility.callerSdkMetadataOverride ||
+      !ordinaryRuntimeProfileInput(compiler) || compiler.getLangOpts().CUDAIsDevice ||
+      ast.getTargetInfo().getTriple().str()!="aarch64-conda-linux-gnu" || !aux ||
+      aux->getTriple().str()!="nvptx64-nvidia-cuda" ||
+      ast.getTargetInfo().getSDKVersion()!=llvm::VersionTuple(13,2) ||
+      originalCgSdkRoot.empty() || originalCgIncludes.empty() ||
+      cudaAttributeControlModified || deviceTemplateAttributeMacroConflict || frontendCgControlModified)
+    return reject("current host-driver SDK tuple or physical CG projection is unproved");
+  // Unparsed SDK providers are byte/UID witnesses only, never AST owners.
+  struct Role { const char *path; std::uint64_t size; const char *sha256; };
+  static const Role roles[]={
+    {"cooperative_groups/details/partitioning.h",7153,"010cfe4e17aa5f7a27a97d91988522a73614541dbbdf384b947270fe45fd0f65"},
+    {"cooperative_groups/details/functional.h",8905,"d8157c8bc062773d24831b989090806f0171388651cb31e01be73fad52a14737"},
+    {"cooperative_groups/details/reduce.h",23296,"323a8c0f04f44f2599938256705dd61f0f31b7032aca2cc0e02df3cbb7fc79ed"},
+    {"cooperative_groups/details/coalesced_reduce.h",4257,"a41420158ee2eb857ced73404e0d5410840754d60e22d42d1e34b9078ca7f297"},
+    {"cooperative_groups/details/coalesced_scan.h",7314,"0df66fe5de56d1726ffad655860ac87632e3b3a682c7fbb4a32d650c8a63a354"}};
+  const auto remember=[&](const std::string &path,std::uint64_t size,llvm::StringRef sha) {
+    llvm::SmallString<256> canonical;
+    auto entry=source.getFileManager().getFileRef(path);
+    if (!entry) { llvm::consumeError(entry.takeError()); return false; }
+    const auto bytes=llvm::MemoryBuffer::getFile(path);
+    const auto &file=entry->getFileEntry();
+    if (llvm::sys::fs::real_path(path,canonical)||canonical!=path||!bytes||
+        file.getSize()!=size||(*bytes)->getBufferSize()!=size||
+        contextualInputSha256((*bytes)->getBuffer())!=sha||
+        !physicalSourceFileMatches(path,file,source)) return false;
+    OriginalCgInput input{path,sha.str(),file.getUniqueID().getDevice(),file.getUniqueID().getFile(),size};
+    const auto old=std::find_if(originalCgInputs.begin(),originalCgInputs.end(),
+        [&](const OriginalCgInput &value) { return value.path==path; });
+    if (old==originalCgInputs.end()) originalCgInputs.push_back(input);
+    else if (old->sha256!=input.sha256||old->size!=input.size||
+             old->device!=input.device||old->file!=input.file) return false;
+    return true;
+  };
+  for (const auto &role:roles)
+    if (!remember(originalCgSdkRoot+"/"+role.path,role.size,role.sha256))
+      return reject("dynamic SDK provider changed");
+  std::string backend,error;
+  if (!ascify::ResolveDynamicWarpGroupsBackend(frontendCompatibility,backend,error)||
+      !remember(backend,8916,"a26e6f1a40deede2d5571e46e2c59e7053c4a8c254de6b197eb12fbda5cbbc98"))
+    return reject("owned dynamic backend has no complete physical identity");
+  const auto native=[&](clang::SourceLocation location) {
+    if (!location.isFileID()) return false;
+    const auto file=source.getFileID(location);
+    if (cudaRuntimeApiSdkFileIds.count(file.getHashValue())||isOwnedCudaCompilerInput(file,compiler))return true;
+    if (verifiedFrontendCgEntryFileIds.count(file.getHashValue())&&
+        !macroAlteredFrontendCgFileIds.count(file.getHashValue())&&
+        verifiedFrontendCgFile(file,compiler,frontendCompatibility))return true;
+    if (ordinaryRuntimeProfileInput(compiler)&&!frontendHostMathGuardModified&&
+        !frontendCgControlModified&&!cudaAttributeControlModified&&
+        verifiedFrontendHostMathEntryFileIds.count(file.getHashValue())&&
+        !macroAlteredFrontendHostMathFileIds.count(file.getHashValue())&&
+        verifiedForcedFrontendHostMathFile(file,compiler,frontendCompatibility)) return true;
+    const auto *entry=source.getFileEntryForID(file);
+    return entry&&trustedSystemFileIds.count(file.getHashValue())&&source.isInSystemHeader(location)&&
+        !source.isFileOverridden(entry)&&physicalSourceFileMatches(source.getFilename(location),*entry,source)&&
+        (pathIsWithinPhysicalDirectory(source.getFilename(location),"/usr/include")||
+         pathIsWithinPhysicalDirectory(source.getFilename(location),"/usr/lib/gcc"));
+  };
+  for (const auto &event:dynamicWarpMacroEvents)
+    if (!native(event.second)) return reject("caller define/undef history captures a dynamic backend token");
+  for (const auto &macro:compiler.getPreprocessorOpts().Macros) {
+    const llvm::StringRef definition(macro.first);
+    if (isDynamicWarpControlledToken(definition.split('=').first.split('(').first.trim())||
+        definition.contains('\\')||definition.contains('\n')||definition.contains('\r'))
+      return reject("command-line macro history is outside the dynamic contract");
+  }
+  for (const auto &entry:pp.macros(false)) {
+    if(!isDynamicWarpControlledToken(entry.first->getName()))continue;
+    const auto *macro=pp.getMacroInfo(entry.first);
+    if (macro&&!macro->isBuiltinMacro()&&!native(macro->getDefinitionLoc()))
+      return reject("incoming dynamic backend macro has no native owner");
+  }
+  // This raw-token role exempts only compiler cacheline stack directives. It
+  // does not classify the predefines buffer as native or grant AST ownership.
+  const auto compilerCachelineStackToken=[&](clang::SourceLocation location,llvm::StringRef tokenName) {
+    const auto file=pp.getPredefinesFileID();
+    if (!location.isValid()||!location.isFileID()||file.isInvalid()||
+        source.getFileID(location)!=file||source.getFileEntryForID(file)) return false;
+    bool invalid=false;const auto bytes=source.getBufferData(file,&invalid);
+    if (invalid||bytes!=pp.getPredefines()) return false;
+    const auto offset=source.getFileOffset(location);if(offset>=bytes.size())return false;
+    auto begin=offset;while(begin&&bytes[begin-1]!='\n'&&bytes[begin-1]!='\r')--begin;
+    auto end=offset;while(end<bytes.size()&&bytes[end]!='\n'&&bytes[end]!='\r')++end;
+    if(tokenName!="push_macro"||offset!=begin+llvm::StringRef("#pragma ").size())return false;
+    const char *const keys[]={"__GCC_DESTRUCTIVE_SIZE","__GCC_CONSTRUCTIVE_SIZE"};
+    const std::string expected[]={
+      "#pragma push_macro(\"__GCC_DESTRUCTIVE_SIZE\")",
+      "#pragma push_macro(\"__GCC_CONSTRUCTIVE_SIZE\")"};
+    unsigned occurrences[2]={0,0};llvm::StringRef remaining=bytes;
+    while(!remaining.empty()) {
+      const auto split=remaining.split('\n');
+      for(unsigned i=0;i<2;++i)if(split.first==expected[i])++occurrences[i];
+      remaining=split.second;
+    }
+    // The observed compiler emits each of these two directives twice. No
+    // extra occurrence or unobserved pop directive acquires this token role.
+    if(occurrences[0]!=2||occurrences[1]!=2)return false;
+    const auto line=bytes.slice(begin,end);
+    for(unsigned i=0;i<2;++i)
+      if(line==expected[i]&&!isDynamicWarpControlledToken(keys[i])&&
+          !isAscifyCudaCompatIdentifier(keys[i]))return true;
+    return false;
+  };
+  // Inspect all retained caller file instances, including inactive directives.
+  // A later undef or a macro stack restore cannot erase the source history.
+  for (const auto file:enteredSourceFileIds) {
+    const auto begin=source.getLocForStartOfFile(file);
+    // Reuse the existing physical product-resource/native-parent proof for
+    // this raw-token role only; it never grants CUDA SDK AST ownership.
+    if (native(begin)||fullWarpNativeCompilerInput(file,compiler,trustedSystemFileIds)) continue;
+    bool invalid=false;const auto bytes=source.getBufferData(file,&invalid);
+    if (invalid) return reject("cannot inventory dynamic caller macro history");
+    const bool frozenHelper=frozenNvidiaSampleHelperFileRole(source,begin)!=0;
+    clang::Lexer lexer(begin,compiler.getLangOpts(),bytes.begin(),bytes.begin(),bytes.end());
+    unsigned directive=0;
+    for (;;) {
+      clang::Token token;lexer.LexFromRawLexer(token);
+      if (token.is(clang::tok::eof))break;
+      if (token.isAtStartOfLine())directive=token.is(clang::tok::hash)?1:0;
+      if (!token.isAnyIdentifier())continue;
+      const auto name=clang::Lexer::getSpelling(token,source,compiler.getLangOpts());
+      if(llvm::StringRef(name).starts_with("_CG_")||llvm::StringRef(name).starts_with("_COOPERATIVE_GROUPS_"))
+        return reject("retained caller token observes a private original CG control");
+      if ((name=="_Pragma"||name=="__pragma"||name=="push_macro"||name=="pop_macro")&&
+          !compilerCachelineStackToken(token.getLocation(),name))
+        return reject("dynamic caller macro-stack history is unproved");
+      // Current-CI declaration witnesses cannot see a target-only branch.
+      // Frozen official helpers grant only this conditional-token role: their
+      // exact bytes cannot inject the owned group namespace. All macro/name
+      // checks here and their existing independent closure proof still apply.
+      if (name=="ascify"||name=="ascify_cg"||name=="asc_shfl"||
+          name=="asc_ballot"||name=="asc_activemask")
+        return reject("retained caller token can inject an owned backend name");
+      if (directive==1&&!frozenHelper&&
+          (name=="if"||name=="ifdef"||name=="ifndef"||name=="elif"||
+           name=="elifdef"||name=="elifndef"||name=="else"||name=="endif"))
+        return reject("retained caller conditional has no target-equivalent source witness");
+      if (directive==1)directive=(name=="define"||name=="undef")?2:0;
+      else if (directive==2) {
+        if (token.needsCleaning()||isDynamicWarpControlledToken(name))
+          return reject("retained define/undef captures a dynamic backend token");
+        directive=0;
+      }
+    }
+  }
+  if (localHeaderContext&&localHeaderContext->inputEvidence)
+    localHeaderContext->inputEvidence->dynamicWarpSdkTuple=
+        ast.getTargetInfo().getTriple().str()+";"+ast.getTargetInfo().getSDKVersion().getAsString()+
+        ";"+aux->getTriple().str();
+  return true;
+}
+
 bool AscifyAction::sealOriginalCgProviders() {
   auto &compiler = getCompilerInstance();
   auto &source = compiler.getSourceManager();
@@ -8976,14 +9161,14 @@ bool AscifyAction::auditKernelAttributeObservations() {
       return true;
     }
     bool VisitMemberExpr(clang::MemberExpr *member) {
-      if (member->getMemberDecl()->getName() != "maxThreadsPerBlock") return true;
+      const auto *field = llvm::dyn_cast<clang::FieldDecl>(member->getMemberDecl());
+      if (field == nullptr || field->getName() != "maxThreadsPerBlock") return true;
       // Audit retained local, forced and -isystem project headers too. Only
       // physically admitted CUDA SDK implementation files may observe their
       // own metadata without publishing the project compatibility adapter.
       const auto use = source.getExpansionLoc(member->getExprLoc());
       if (use.isValid() && sdk.count(source.getFileID(use).getHashValue())) return true;
-      const auto *field = llvm::dyn_cast<clang::FieldDecl>(member->getMemberDecl());
-      if (field == nullptr || field->getParent()->getQualifiedNameAsString() != "cudaFuncAttributes")
+      if (field->getParent()->getQualifiedNameAsString() != "cudaFuncAttributes")
         return true;
       const auto loc = source.getSpellingLoc(field->getLocation());
       if (loc.isInvalid() || !sdk.count(source.getFileID(loc).getHashValue())) return true;
@@ -9716,6 +9901,9 @@ bool AscifyAction::insertSemanticReplacement(
 std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::CompilerInstance &CI, StringRef) {
   Finder.reset(new mat::MatchFinder);
   scalar64Plan = {};
+  dynamicWarpGroups = {};
+  dynamicWarpMacroEvents.clear();
+  capturedDynamicProjectionName.clear();
   nttpVoidCallPlan = {};
   directImageWitness = {};
   directImageUtilityMacroUses.clear();
@@ -10295,6 +10483,10 @@ void AscifyAction::Defined(const clang::Token &MacroNameTok,
 void AscifyAction::MacroUndefined(
     const clang::Token &MacroNameTok,
     const clang::MacroDefinition &MD) {
+  if (MacroNameTok.getIdentifierInfo() &&
+      isDynamicWarpControlledToken(MacroNameTok.getIdentifierInfo()->getName()))
+    dynamicWarpMacroEvents.emplace_back(MacroNameTok.getIdentifierInfo()->getName().str(),
+                                        MacroNameTok.getLocation());
   if (MacroNameTok.getIdentifierInfo())
     recordDirectImageUtilityControl(MacroNameTok.getIdentifierInfo()->getName(),
         "undef", MacroNameTok.getLocation(), MD.getMacroInfo());
@@ -10341,6 +10533,8 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
     return;
   const llvm::StringRef name =
       MacroNameTok.getIdentifierInfo()->getName();
+  if (isDynamicWarpControlledToken(name))
+    dynamicWarpMacroEvents.emplace_back(name.str(),MacroNameTok.getLocation());
   recordDirectImageUtilityControl(name, "define", MacroNameTok.getLocation(),
       getCompilerInstance().getPreprocessor().getMacroInfo(MacroNameTok.getIdentifierInfo()));
   if (originalCgControlName(name) &&
@@ -11059,12 +11253,13 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
                 const std::set<unsigned> &frozenTextureCgFiles,
                 const std::set<unsigned> &frozenRuntimePatternFiles, bool textureOnly,
                 const ascify::Scalar64Plan& scalar64,
+                const ascify::DynamicWarpGroupStats& dynamicGroups,
                 const ascify::NttpVoidCallPlan& nttpVoid,
                 const ascify::HostPointerSwapPlan& hostPointerSwap)
         : context(context), source(source), sdk(sdk), audited(audited), native(native), frozenTextureUtilityFiles(frozenTextureUtilityFiles),
           frozenTextureCgFiles(frozenTextureCgFiles),
           frozenRuntimePatternFiles(frozenRuntimePatternFiles),
-          textureOnly(textureOnly), scalar64(scalar64), nttpVoid(nttpVoid), hostPointerSwap(hostPointerSwap) {}
+          textureOnly(textureOnly), scalar64(scalar64), dynamicGroups(dynamicGroups), nttpVoid(nttpVoid), hostPointerSwap(hostPointerSwap) {}
     bool shouldVisitTemplateInstantiations() const { return true; }
     bool shouldVisitImplicitCode() const { return true; }
     bool TraverseDecl(clang::Decl *declaration) {
@@ -11211,6 +11406,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       return clang::RecursiveASTVisitor<RecordAudit>::TraverseInitListExpr(expression);
     }
     bool VisitTypeLoc(clang::TypeLoc type) {
+      if (!textureOnly&&dynamicGroups.sourceTypeLocations.count(type.getOpaqueData()))return true;
       if (scalar64.scalarSignatureTypeLocs.count(type.getOpaqueData())) return true;
       // Exact signature/local T occurrences of a three-statement pointer swap.
       // Both audit routes require the same closed plan and emitted guard;
@@ -11229,6 +11425,13 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       return inspectEnumNumericOperand(constant->getInitExpr(), constant->getLocation());
     }
     bool VisitExpr(clang::Expr *expression) {
+      // These are exact current-CI nodes. Traversal and all inquiry/template
+      // visitors continue; no record type, body or arbitrary callee is exempt.
+      if (!textureOnly&&(dynamicGroups.scalarExpressions.count(expression)||
+          dynamicGroups.valueExpressions.count(expression)||
+          dynamicGroups.sourceReferences.count(expression)||
+          dynamicGroups.directCallees.count(expression)||
+          dynamicGroups.functorConstructions.count(expression)))return true;
       // Aggregate value-initialization of an admitted runtime adapter also
       // creates zero-initializers for SDK-only subobjects. They are not a
       // separately written SDK type observation. Explicit TypeLocs and all
@@ -12001,6 +12204,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     const std::set<unsigned> &frozenRuntimePatternFiles;
     const bool textureOnly;
     const ascify::Scalar64Plan& scalar64;
+    const ascify::DynamicWarpGroupStats& dynamicGroups;
     const ascify::NttpVoidCallPlan& nttpVoid;
     const ascify::HostPointerSwapPlan& hostPointerSwap;
     unsigned runtimePatternDepth = 0;
@@ -12010,7 +12214,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     std::vector<std::pair<unsigned, const clang::TagDecl *>> runtimeIdentityArguments;
     std::set<const clang::RecordDecl *> reflectedRecords;
     std::set<const clang::VarDecl *> inquiryVariables;
-  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, frozenTextureCgFiles, frozenRuntimePatternFiles, textureOnly, scalar64Plan, nttpVoidCallPlan, hostPointerSwapPlan);
+  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, frozenTextureCgFiles, frozenRuntimePatternFiles, textureOnly, scalar64Plan, dynamicWarpGroups, nttpVoidCallPlan, hostPointerSwapPlan);
   if (!records.TraverseDecl(compiler.getASTContext().getTranslationUnitDecl()))
     {
       const auto diagnostic = compiler.getDiagnostics().getCustomDiagID(
@@ -12088,8 +12292,11 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
     if (verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
         !frontendCgMacroExpansionMatches(
             MacroNameTok.getIdentifierInfo()->getName(), macroInfo, file,
-            getCompilerInstance(), frontendCompatibility))
+            getCompilerInstance(), frontendCompatibility)) {
       macroAlteredFrontendCgFileIds.insert(file.getHashValue());
+      if(isNewDynamicProjectionName(MacroNameTok.getIdentifierInfo()->getName()))
+        capturedDynamicProjectionName=MacroNameTok.getIdentifierInfo()->getName().str();
+    }
   }
   if (frontendCompatibility.enabled() && profileUse.isValid() &&
       sourceManager.getFilename(profileUse) ==
@@ -14144,6 +14351,7 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
 void AscifyAction::EndSourceFileAction() {
   if (cudaRuntimeApiBoundaryFailed)
     return;
+  if (!sealDynamicWarpGroupInputs()) return;
   if (!sealOriginalCgProviders()) return;
   const bool helperDiscovery = localHeaderContext != nullptr &&
       localHeaderContext->deferredInheritedHelperDiscovery;
@@ -14308,6 +14516,14 @@ void AscifyAction::EndSourceFileAction() {
   if (packedRecords.used())
     for (const auto file : enteredSourceFileIds) recordContextPragmaSource(file);
   finalizeNvidiaSampleHelperClosure();
+  if (dynamicWarpGroups.used() && !nvidiaSampleHelperIncludes.empty() &&
+      (localHeaderContext == nullptr || !localHeaderContext->helperTransactionCommitted)) {
+    const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "dynamic warp group boundary: included helper requires its committed source transaction");
+    getCompilerInstance().getDiagnostics().Report(diagnostic);
+    return;
+  }
   for (unsigned required:cudaTextureRequiredHelperOffsets) {
     const bool committed=std::any_of(nvidiaSampleHelperMacroCandidates.begin(),
         nvidiaSampleHelperMacroCandidates.end(),[&](const auto &candidate) {
@@ -14339,6 +14555,9 @@ void AscifyAction::EndSourceFileAction() {
     includes += "#include <ascify/cuda_vec3_layout.hpp>\n";
   if (needsCudaTextureHeader)
     includes += "#include <ascify/texture_compat.hpp>\n";
+  if (dynamicWarpGroups.used())
+    includes += "#include <ascify/cooperative_groups_compat.hpp>\n"
+                "#include <ascify/dynamic_warp_groups_compat.hpp>\n";
   const bool useSimdTargetRecipe =
       TargetRecipe == ascify::DavC310TargetRecipe::SimdRecipeName;
   const bool hasSelectedTargetHeader =
@@ -14730,6 +14949,38 @@ void AscifyAction::ExecuteAction() {
   // Reset the contextual token watcher above before any diagnostic early exit.
   if (getCompilerInstance().getDiagnostics().hasErrorOccurred())
     return;
+  // A macro can erase a new class/factory QName before AST inventory. Its
+  // actual expansion in the exact pinned projection is itself a new surface
+  // observation, including when no remaining registered group name survives.
+  if(!capturedDynamicProjectionName.empty()) {
+    const auto diagnostic=getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error,"dynamic warp group boundary: new projection name '%0' was captured by a macro");
+    getCompilerInstance().getDiagnostics().Report(diagnostic)<<capturedDynamicProjectionName;
+    cudaRuntimeApiBoundaryFailed=true;return;
+  }
+  class ProjectionScopeAudit : public clang::RecursiveASTVisitor<ProjectionScopeAudit> {
+    std::function<bool(clang::SourceLocation)> projected;
+   public:
+    clang::SourceLocation bad;
+    explicit ProjectionScopeAudit(std::function<bool(clang::SourceLocation)> p):projected(std::move(p)){}
+    bool VisitNamespaceDecl(clang::NamespaceDecl* declaration) {
+      if(declaration->getName()=="cooperative_groups"&&projected(declaration->getLocation())&&
+          !declaration->getDeclContext()->isTranslationUnit()){bad=declaration->getLocation();return false;}
+      return true;
+    }
+  } projectionScope([&](clang::SourceLocation location) {
+      if(!location.isFileID())return false;
+      const auto file=SM.getFileID(location);
+      return verifiedFrontendCgEntryFileIds.count(file.getHashValue())&&
+          verifiedFrontendCgFile(file,getCompilerInstance(),frontendCompatibility);
+    });
+  if(!verifiedFrontendCgEntryFileIds.empty()&&
+      !projectionScope.TraverseDecl(getCompilerInstance().getASTContext().getTranslationUnitDecl())) {
+    const auto diagnostic=getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error,"frontend CG projection must retain its translation-unit namespace (origin %0)");
+    getCompilerInstance().getDiagnostics().Report(diagnostic)<<projectionScope.bad.printToString(SM);
+    cudaRuntimeApiBoundaryFailed=true;return;
+  }
   if (!sealOriginalCgProviders()) return;
   // All PP callbacks and Sema have completed. Seal the entire conditional
   // proof BEFORE either surface audit, and long before output publication.
@@ -14890,6 +15141,59 @@ void AscifyAction::ExecuteAction() {
       if (!nttpCgFile(declaration->getLocation())) return false;
     return true;
   };
+  std::string dynamicError;
+  clang::SourceLocation dynamicLocation;
+  std::map<unsigned,bool> dynamicCallerFiles;
+  const auto dynamicCaller=[&](clang::SourceLocation location) {
+    if(location.isInvalid()||!location.isFileID())return false;
+    const auto file=SM.getFileID(location);
+    const auto old=dynamicCallerFiles.find(file.getHashValue());
+    if(old!=dynamicCallerFiles.end())return old->second;
+    const auto* entry=SM.getFileEntryForID(file);
+    const bool native=scalar64Sdk(location)||
+        (!frontendHostMathGuardModified&&!frontendCgControlModified&&!cudaAttributeControlModified&&
+         verifiedFrontendHostMathEntryFileIds.count(file.getHashValue())&&
+         !macroAlteredFrontendHostMathFileIds.count(file.getHashValue())&&
+         verifiedForcedFrontendHostMathFile(file,getCompilerInstance(),frontendCompatibility))||
+        (entry&&trustedSystemFileIds.count(file.getHashValue())&&SM.isInSystemHeader(location)&&
+         !SM.isFileOverridden(entry)&&physicalSourceFileMatches(SM.getFilename(location),*entry,SM)&&
+         (pathIsWithinPhysicalDirectory(SM.getFilename(location),"/usr/include")||
+          pathIsWithinPhysicalDirectory(SM.getFilename(location),"/usr/lib/gcc")));
+    dynamicCallerFiles[file.getHashValue()]=!native;return !native;
+  };
+  if (!ascify::ProveDynamicWarpGroups(getCompilerInstance().getASTContext(),
+          [&](clang::SourceLocation location) { return ownedNttpVoidCallLocation(location); },
+          dynamicCaller,
+          [&](const clang::Decl* declaration) { return declaration&&nttpCgFile(declaration->getLocation()); },
+          [&](llvm::StringRef name,clang::SourceLocation location) {
+            return !PP.getMacroDefinitionAtLoc(PP.getIdentifierInfo(name),location);
+          }, ordinaryRuntimeProfileInput(getCompilerInstance())&&TargetPolicy=="dav-c310-vec"&&
+              TargetRecipe=="none"&&!AscifyAMAP,
+          dynamicWarpGroups,dynamicLocation,dynamicError)) {
+    const auto diagnostic=getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error,"dynamic warp group boundary: %0");
+    getCompilerInstance().getDiagnostics().Report(dynamicLocation,diagnostic)<<dynamicError;
+    cudaRuntimeApiBoundaryFailed=true;return;
+  }
+  if (!sealDynamicWarpGroupInputs()||!sealOriginalCgProviders())return;
+  if (dynamicWarpGroups.used()) {
+    for (const auto* expression:dynamicWarpGroups.valueExpressions) {
+      const auto location=expression->getBeginLoc();
+      if (!location.isFileID()||SM.isWrittenInMainFile(location))continue;
+      if (!localHeaderContext||!localHeaderContext->plan) {
+        const auto diagnostic=getCompilerInstance().getDiagnostics().getCustomDiagID(
+            clang::DiagnosticsEngine::Error,
+            "dynamic warp group boundary: selected header requires its current joint source transaction");
+        getCompilerInstance().getDiagnostics().Report(diagnostic);
+        cudaRuntimeApiBoundaryFailed=true;return;
+      }
+      localHeaderContext->plan->requireInheritedSourceContext(SM.getFilename(location).str());
+    }
+    needsCudaCompatHeader=true;
+    llvm::errs()<<"Ascify dynamic warp groups v1: values="<<dynamicWarpGroups.values
+        <<", factories="<<dynamicWarpGroups.factories<<", reductions="<<dynamicWarpGroups.reductions
+        <<", shuffles="<<dynamicWarpGroups.shuffles<<", grid_queries="<<dynamicWarpGroups.coordinateQueries<<"\n";
+  }
   ascify::FullWarpGroupStats fullWarpGroups;
   std::string fullWarpGroupError;
   clang::SourceLocation fullWarpGroupLocation;
@@ -15586,6 +15890,72 @@ void AscifyAction::ExecuteAction() {
     return;
   }
   if (kernelThreadBoundPlan.used()) needsCudaCompatHeader = true;
+  std::vector<clang::SourceLocation> dynamicAbiTailInsertions;
+  std::string dynamicAbiTailError;
+  clang::SourceLocation dynamicAbiTailLocation;
+  if (!ascify::ProveDynamicKernelAbiTails(getCompilerInstance().getASTContext(),
+          dynamicWarpGroups,
+          [&](clang::SourceLocation location) {
+            return (localHeaderContext==nullptr||localHeaderContext->depth==0)&&
+                ownedNttpVoidCallLocation(location);
+          },dynamicCaller,
+          [&](llvm::StringRef name,clang::SourceLocation location) {
+            return !PP.getMacroDefinitionAtLoc(PP.getIdentifierInfo(name),location);
+          },[&](const clang::CallExpr* call) {
+            // Consume only this CI's successfully completed occupancy proof;
+            // neither an SDK-looking name nor an offset from another file can
+            // grant a new function-reference permission here.
+            const auto* callee=llvm::dyn_cast_or_null<clang::DeclRefExpr>(
+                call->getCallee()->IgnoreParenImpCasts());
+            if(!callee||call->getNumArgs()<=2||!closedBoundInvocation(call))return false;
+            auto location=callee->getLocation();
+            while(location.isMacroID()) {
+              if(!SM.isMacroArgExpansion(location))return false;
+              location=SM.getImmediateSpellingLoc(location);
+            }
+            if(!location.isFileID()||!SM.isWrittenInMainFile(location))return false;
+            const auto found=kernelThreadBoundPlan.occupancyCallees.find(SM.getFileOffset(location));
+            if(found==kernelThreadBoundPlan.occupancyCallees.end()||
+                !llvm::StringRef(found->second).starts_with(
+                    "::ascify::cudaOccupancyMaxPotentialBlockSizeMaxThreads<"))return false;
+            const auto* reference=llvm::dyn_cast<clang::DeclRefExpr>(
+                call->getArg(2)->IgnoreParenImpCasts());
+            const auto* kernel=reference?llvm::dyn_cast<clang::FunctionDecl>(reference->getDecl()):nullptr;
+            return kernel&&kernelThreadBoundPlan.kernels.count(kernel->getCanonicalDecl());
+          },dynamicAbiTailInsertions,dynamicAbiTailLocation,dynamicAbiTailError)) {
+    const auto diagnostic=getCompilerInstance().getDiagnostics().getCustomDiagID(
+        clang::DiagnosticsEngine::Error,"dynamic kernel ABI boundary: %0");
+    getCompilerInstance().getDiagnostics().Report(diagnostic)<<dynamicAbiTailError;
+    cudaRuntimeApiBoundaryFailed=true;return;
+  }
+  if(!dynamicAbiTailInsertions.empty()) {
+    ct::Replacements staged(*replacements);std::vector<SemanticRewriteRange> ranges;
+    for(const auto location:dynamicAbiTailInsertions) {
+      if(!location.isFileID()||!SM.isWrittenInMainFile(location)||
+          !ownedNttpVoidCallLocation(location)) {
+        dynamicAbiTailError="padding has no literal root insertion owner";break;
+      }
+      const auto position=SM.getDecomposedLoc(location);
+      for(const auto& range:SemanticRewriteRanges)
+        if(range.file==position.first&&range.beginOffset<=position.second&&position.second<range.endOffset)
+          dynamicAbiTailError="padding overlaps an existing semantic rewrite";
+      const ct::Replacement edit(SM,location,0U,", unsigned int = 0u");
+      for(const auto& existing:staged)
+        if(existing.getFilePath()==edit.getFilePath()&&existing.getOffset()==edit.getOffset()&&existing.getLength()==0)
+          dynamicAbiTailError="padding collides with another insertion";
+      if(!dynamicAbiTailError.empty()||!llcompat::insertReplacement(staged,edit,&dynamicAbiTailError))break;
+      ranges.push_back({position.first,position.second,position.second+1});
+    }
+    if(!dynamicAbiTailError.empty()) {
+      const auto diagnostic=getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error,"dynamic kernel ABI boundary: %0");
+      getCompilerInstance().getDiagnostics().Report(diagnostic)<<dynamicAbiTailError;
+      cudaRuntimeApiBoundaryFailed=true;return;
+    }
+    *replacements=std::move(staged);
+    SemanticRewriteRanges.insert(SemanticRewriteRanges.end(),ranges.begin(),ranges.end());
+    llvm::errs()<<"Ascify dynamic kernel ABI tail v1: kernels="<<dynamicAbiTailInsertions.size()<<"\n";
+  }
   // Texture macro admission consumes the existing helper status proof.
   // Keep it after that single proof pass and before the raw token rewrites.
   std::string textureError;

@@ -1,0 +1,76 @@
+{
+  "schema": "ascify.original-target-validation.v1",
+  "date": "2026-11-03",
+  "sample": "binaryPartitionCG",
+  "CUDA_Samples_version": "v13.0",
+  "upstream_commit": "3f1c50965017932fc81e6d94a3fc9e04c105b312",
+  "source_commit": "e26769084285e293179228a237eebcdf55e9bec8",
+  "translator_sha256": "f3c1ef0fe1929b144b8a25b73ccc2420939e7a23a7fcf9d186b7339be86b9b3b",
+  "program_sha256": "75237196e74291cb9662b769577654ac94d11edb30a7e4e8c61191c79b33281f",
+  "device_image_sha256": "e8447130af5c4fa90c105f5d3d7c41788c7fd0747f598c8bb718f2f2e2b19724",
+  "original_CU_sha256": "5a3be526cdd535a8c2cf2cb740105e4b4f46d7aa93ef966f9543723a460a1457",
+  "platform": "950DT",
+  "CANN": "9.1.0",
+  "target": "dav-c310-vec",
+  "recipe": "none",
+  "original_source_files": 8,
+  "original_translation_units": 1,
+  "N": 102400,
+  "actual_occupancy_launch": {
+    "blocks": 128,
+    "threads_per_block": 1024
+  },
+  "stream": "original single nonblocking stream",
+  "original_algorithm_launch_arguments_and_numeric_criteria_preserved": true,
+  "source_completion": "one anonymous default unsigned parameter completes an observed four-byte launch ABI tail hole; original four launch expressions unchanged",
+  "actual_host_copy_bytes": 48,
+  "original_argument_offsets": [
+    0,
+    8,
+    16,
+    24
+  ],
+  "unused_zero_parameter_offset": 28,
+  "dimension_offsets": [
+    32,
+    40
+  ],
+  "kernel_argument_metadata_bytes": 32,
+  "fresh_native": "O3 configure/build/install and CTest4 passed; all36 actual MD sets match independent queries,904 physical inputs stable",
+  "current_CPU_regressions": "baseline307, Scalar72, masked22, forward9, Uniform original+47, namespace31, coordinates9+5, NTTP12, dynamic19, ABI six sources/11 conversion calls, legacy32 golden",
+  "original_CUDA_source_validity": {
+    "NVCC": "13.4.59",
+    "relocatable_device_compilation_architectures": [
+      75,
+      80,
+      86,
+      87,
+      89,
+      90,
+      100,
+      110,
+      120
+    ],
+    "NVIDIA_device_execution": false
+  },
+  "complete_CANN_target": "O2 compile and link passed; device339/host326 actual dependencies match queries;447 physical inputs and31 runtime providers stable",
+  "original_NPU_program_invocations": 1,
+  "original_program_PID": 654688,
+  "original_program_returncode": 0,
+  "actual_transfer_payload_bytes": [
+    409600,
+    4,
+    8
+  ],
+  "exact_actual_input_math": {
+    "odd_count": 50945,
+    "odd_sum": 1272565,
+    "even_sum": 1233938
+  },
+  "original_stdout_completed": true,
+  "before_after_health_and_idle": true,
+  "all_bound_inputs_and_execution_evidence_unchanged": true,
+  "root_original_acceptance_sha256": "6f0af75eeeb6f66671a96e83c0ecb4bfa033128e244ad9f121583b49209896c8",
+  "performance_claim": false,
+  "scope": "Complete original binaryPartitionCG target only; other group algorithms and launch signatures need separate validation."
+}

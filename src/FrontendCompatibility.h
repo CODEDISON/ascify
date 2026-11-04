@@ -17,6 +17,10 @@ inline constexpr const char* kAdmittedFrontendCompatibilityV1 =
 struct FrontendCompatibilityConfig {
   std::string profile;
   std::string canonicalRoot;
+  // Product main selects the normal host CUDA driver. This is not authority
+  // from an option, manifest or a previous CompilerInstance.
+  bool sourceCudaHostDriver = false;
+  bool callerSdkMetadataOverride = false;
 
   bool enabled() const { return !canonicalRoot.empty(); }
 };
@@ -53,5 +57,10 @@ bool IsVerifiedFrontendCooperativeGroupsInput(
     const FrontendCompatibilityConfig& config,
     const std::string& path,
     const std::string& parsedContents);
+
+// Resolve only the same product's installed or build-tree backend. The caller
+// must additionally pin bytes, physical UID and the complete input lifetime.
+bool ResolveDynamicWarpGroupsBackend(const FrontendCompatibilityConfig& config,
+                                    std::string& path, std::string& error);
 
 }  // namespace ascify

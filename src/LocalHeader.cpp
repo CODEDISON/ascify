@@ -112,6 +112,8 @@ bool writeManifest(const std::string &path,
     out << "context_tokens_sha256=" << proof.tokenSha256 << "\n";
     out << "context_macros_sha256=" << proof.macroSha256 << "\n";
     out << "context_pragma_events_sha256=" << proof.pragmaSha256 << "\n";
+    if (!proof.dynamicWarpSdkTuple.empty())
+      out << "context_dynamic_warp_sdk_tuple=" << proof.dynamicWarpSdkTuple << "\n";
     for (const auto &item : plan.contextInlines()) {
       const auto once = proof.contextOnceLineOffsets.find(item.sourcePath);
       if (once != proof.contextOnceLineOffsets.end())
@@ -1462,7 +1464,8 @@ bool ascifySourceWithLocalHeaderClosure(
         return false;
       }
       if (originalEvidence.providerIdentities != jointEvidence.providerIdentities ||
-          originalEvidence.providerSizes != jointEvidence.providerSizes) {
+          originalEvidence.providerSizes != jointEvidence.providerSizes ||
+          originalEvidence.dynamicWarpSdkTuple != jointEvidence.dynamicWarpSdkTuple) {
         plan.fail("contextual original SDK provider identities changed during joint parse");
         return false;
       }

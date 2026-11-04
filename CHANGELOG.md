@@ -6,6 +6,11 @@ for supported domains and experimental paths.
 
 ## Unreleased
 
+- Validate the complete original CUDA Samples v13.0 `binaryPartitionCG` target
+  on 950DT, preserving its input size, occupancy launch, algorithm and stream.
+  Complete the proved launch-argument tail hole while retaining the original
+  four launch expressions. See the [validation record](docs/validation/binary-partition-cg-20261103.md).
+
 - Validate the complete original CUDA Samples v13.0 `reduction` target across
   int/float/double and45 original configurations, with unchanged16M inputs,
   original numerical predicates and independent actual-input checks. See the

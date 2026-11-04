@@ -44,6 +44,7 @@ THE SOFTWARE.
 #include "HostPointerSwap.h"
 #include "SharedWordAlignment.h"
 #include "KernelThreadBounds.h"
+#include "DynamicWarpGroups.h"
 #include "LocalHeader.h"
 
 namespace ct = clang::tooling;
@@ -170,6 +171,10 @@ private:
   std::vector<clang::SourceRange> SkippedSourceRanges;
   std::vector<SemanticRewriteRange> SemanticRewriteRanges;
   ascify::Scalar64Plan scalar64Plan;
+  ascify::DynamicWarpGroupStats dynamicWarpGroups;
+  std::vector<std::pair<std::string,clang::SourceLocation>> dynamicWarpMacroEvents;
+  bool sealDynamicWarpGroupInputs();
+  std::string capturedDynamicProjectionName;
   ascify::NttpVoidCallPlan nttpVoidCallPlan;
   ascify::HostPointerSwapPlan hostPointerSwapPlan;
   std::vector<SemanticRewriteRange> cudaLaneIdMacroRanges;

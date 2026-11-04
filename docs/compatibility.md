@@ -379,6 +379,16 @@ See [frontend-profile checks](../tests/frontend_compat/check_frontend_compat.sh)
 [cooperative-group tests](../tests/rewrite/check_cooperative_groups_compat.sh), and
 [mask tests](../tests/rewrite/check_masked_warp_compat.sh).
 
+## Dynamic register groups
+
+The bounded coalesced, partition, query, integer broadcast and reduction source
+domain is described in the [dynamic group contract](dynamic-warp-groups-source.md).
+The complete original CUDA Samples v13.0 `binaryPartitionCG` target passed
+[original-target NPU validation](validation/binary-partition-cg-20261103.md).
+Eligible kernel signatures receive a proved [launch ABI tail completion](dynamic-kernel-abi-tail.md).
+Other group algorithms, architecture-selected regions and launch shapes retain
+their separate conversion and device-validation boundaries.
+
 ## Uniform block scratch reduction
 
 This bounded adapter passed the [complete original reduction validation](validation/reduction-20261103.md).

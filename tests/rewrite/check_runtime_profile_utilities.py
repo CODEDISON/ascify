@@ -213,8 +213,11 @@ def main():
                     assert not output.is_symlink()
                     assert (not output.exists()) if mode == 'fresh' else output.read_text() == sentinel
                     assert not Path(str(output) + '.headers').exists() and not Path(str(output) + '.headers').is_symlink()
-                    assert any(marker in result.stderr for marker in ('CUDA runtime-API header boundary', 'CUDA texture boundary',
-                                'frontend compatibility', 'Ascify cannot publish CUDA compatibility output')), (case['name'], result.stderr)
+                    markers = ('CUDA runtime-API header boundary', 'CUDA texture boundary',
+                               'frontend compatibility', 'Ascify cannot publish CUDA compatibility output')
+                    if case['name'] == 'nested_cg':
+                        markers += ('frontend CG projection must retain its translation-unit namespace',)
+                    assert any(marker in result.stderr for marker in markers), (case['name'], result.stderr)
                 assert {name: sha(Path(name)) for name in frozen} == frozen
             row['passed'] = True; save(); print(case['name'] + ': passed', flush=True)
         assert {name: sha(Path(name)) for name in identities} == identities

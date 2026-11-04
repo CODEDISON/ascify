@@ -209,6 +209,53 @@ class Proof {
         context.hasSameUnqualifiedType(operation->getType(),callee->getParamDecl(2)->getType()) &&
         sdk(source.getSpellingLoc(operation->getConstructor()->getLocation()));
   }
+  bool unselectedCoalescedReduce(const FunctionTemplateDecl* candidate) const {
+    if (!candidate || !sdk(candidate->getLocation())) return false;
+    const auto* function=candidate->getTemplatedDecl();
+    const auto* parameters=candidate->getTemplateParameters();
+    if (parameters->size()!=1 || parameters->getRequiresClause() ||
+        function->getTrailingRequiresClause() || function->getNumParams()!=3 ||
+        function->isVariadic() || function->hasBody() ||
+        !function->hasAttr<CUDADeviceAttr>() ||
+        function->getQualifiedNameAsString()!="cooperative_groups::reduce" ||
+        !context.hasSameType(function->getReturnType(),context.IntTy) ||
+        !context.hasSameType(function->getParamDecl(1)->getType(),context.IntTy)) return false;
+    const auto* operation=dyn_cast<TemplateTypeParmDecl>(parameters->getParam(0));
+    if (!operation || operation->isParameterPack() || operation->hasDefaultArgument() ||
+        operation->hasAttrs()) return false;
+    for (const auto* declaration:candidate->redecls())
+      if (!sdk(declaration->getLocation())) return false;
+    for (const auto* declaration:function->redecls()) {
+      if (!sdk(declaration->getLocation()) || declaration->hasBody()) return false;
+      for (const auto* attribute:declaration->attrs())
+        if (!isa<CUDADeviceAttr>(attribute)) return false;
+      for (const auto* parameter:declaration->parameters())
+        if (parameter->hasDefaultArg() || parameter->hasAttrs()) return false;
+    }
+    const auto argument=function->getParamDecl(2)->getType();
+    const auto* actual=argument->getAs<TemplateTypeParmType>();
+    if (!actual || actual->getDecl()!=operation || argument.hasLocalQualifiers()) return false;
+    const auto first=function->getParamDecl(0)->getType();
+    if (!first->isLValueReferenceType() ||
+        !first->getPointeeType().isConstQualified() ||
+        first->getPointeeType().isVolatileQualified()) return false;
+    const auto* record=first->getPointeeType()->getAsCXXRecordDecl();
+    const auto* definition=record ? record->getDefinition() : nullptr;
+    if (!definition || definition->getNumBases()!=0 ||
+        record->getQualifiedNameAsString()!="cooperative_groups::coalesced_group") return false;
+    for (const auto* declaration:record->redecls())
+      if (!sdk(declaration->getLocation())) return false;
+    for (const auto* constructor:definition->ctors()) {
+      if (constructor->isImplicit()) continue;
+      if (!constructor->isDefaultConstructor() || constructor->getNumParams()!=0 ||
+          constructor->getDescribedFunctionTemplate() || constructor->hasBody()) return false;
+      for (const auto* declaration:constructor->redecls())
+        if (!sdk(declaration->getLocation()) || declaration->hasBody()) return false;
+      for (const auto* attribute:constructor->attrs())
+        if (!isa<CUDADeviceAttr>(attribute)) return false;
+    }
+    return true;
+  }
   bool reduceForwarderPattern(const FunctionTemplateDecl* primary,
                               const TemplateTypeParmDecl*& group) const {
     const auto* params=primary->getTemplateParameters();
@@ -246,7 +293,13 @@ class Proof {
     unsigned candidates=0;
     for (const auto* d : lookup->decls()) {
       const auto* t=dyn_cast<FunctionTemplateDecl>(d);
-      if (!t || !reduce(t->getTemplatedDecl())) return false;
+      if (!t) return false;
+      if (!reduce(t->getTemplatedDecl())) {
+        // This pinned SDK overload cannot accept any admitted static/scratch
+        // group. It is only a lookup inventory item, never an arithmetic leaf.
+        if (!unselectedCoalescedReduce(t)) return false;
+        continue;
+      }
       ++candidates;
     }
     // Every concrete specialization below must select exactly the trusted
