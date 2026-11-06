@@ -1,6 +1,7 @@
 #include "DeviceAggregateInlining.h"
 #include "StandaloneDeviceTarget.h"
 #include "RegisterTile32Lowering.h"
+#include "CudaExecutionCoordinates.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
 #include "clang/AST/DeclCXX.h"
@@ -11,6 +12,9 @@
 #include "clang/AST/GlobalDecl.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/PrettyPrinter.h"
+#include "clang/Basic/Builtins.h"
+#include "clang/Basic/TargetBuiltins.h"
+#include "clang/Basic/TargetInfo.h"
 #include "llvm/Support/raw_ostream.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Frontend/CompilerInstance.h"
@@ -317,10 +321,58 @@ class Proof {
   bool invalid=false;const auto data=sm.getBufferData(sm.getFileID(end),&invalid);unsigned offset=sm.getFileOffset(end);while(!invalid&&offset<data.size()&&std::isspace(static_cast<unsigned char>(data[offset])))++offset;
   if(invalid||offset>=data.size()||data[offset]!=';')return false;fact.guardOffset=offset+1;return true;
  }
- bool noRecursion(const FunctionDecl* f,std::set<const FunctionDecl*>& active,std::set<const FunctionDecl*>& done){
+  bool compilerImplicitBlockBarrier(const CallExpr* call) const {
+   const auto* callee=call?call->getDirectCallee():nullptr;
+   if(!ci.getLangOpts().CUDA||!callee||!callee->isImplicit()||
+      call->getNumArgs()!=0||!call->getType()->isVoidType())return false;
+   const unsigned raw=callee->getBuiltinID();if(!raw)return false;
+   auto& builtins=context.BuiltinInfo;
+   const auto* target=&context.getTargetInfo();unsigned id=raw;
+   // Host CUDA registers NVPTX builtins in the auxiliary-ID interval. Compare
+   // the normalized target enum, never the observed host-specific raw number.
+   if(builtins.isAuxBuiltinID(raw)){
+    target=context.getAuxTargetInfo();if(!target)return false;
+    id=builtins.getAuxBuiltinID(raw);
+   }
+   const auto arch=target->getTriple().getArch();
+   if((arch!=llvm::Triple::nvptx&&arch!=llvm::Triple::nvptx64)||
+      id!=clang::NVPTX::BI__syncthreads)return false;
+   for(const auto* declaration:callee->redecls()){
+    const auto* prototype=declaration->getType()->getAs<FunctionProtoType>();
+    if(!declaration->isImplicit()||declaration->getBuiltinID()!=raw||
+       declaration->doesThisDeclarationHaveABody()||declaration->getDefinition()||
+       declaration->isDeleted()||declaration->isDefaulted()||isa<CXXMethodDecl>(declaration)||
+       declaration->getTemplatedKind()!=FunctionDecl::TK_NonTemplate||
+       !prototype||prototype->isVariadic()||prototype->getNumParams()!=0||
+       declaration->getNumParams()!=0||!prototype->getReturnType()->isVoidType()||
+       !declaration->hasAttr<BuiltinAttr>()||!declaration->hasAttr<CUDADeviceAttr>())return false;
+    for(const auto* attribute:declaration->attrs())
+     if(!isa<BuiltinAttr>(attribute)&&!isa<CUDADeviceAttr>(attribute))return false;
+   }
+   const auto* reference=dyn_cast_or_null<DeclRefExpr>(plain(call->getCallee()));
+   if(!reference||reference->hasQualifier()||reference->hasExplicitTemplateArgs()||
+      reference->getDecl()->getCanonicalDecl()!=callee->getCanonicalDecl()||
+      !literal(reference->getLocation())||!literal(call->getBeginLoc())||
+      !literal(call->getEndLoc())||call->getBeginLoc()!=reference->getLocation()||
+      sm.getFileID(call->getBeginLoc())!=sm.getFileID(call->getEndLoc()))return false;
+   bool invalid=false;
+   const auto text=Lexer::getSourceText(CharSourceRange::getTokenRange(call->getSourceRange()),sm,ci.getLangOpts(),&invalid);
+   if(invalid||text.contains('\\'))return false;
+   // The raw lexer reads its end sentinel; a SourceManager substring is
+   // not NUL-terminated at the call boundary. Keep an owned terminated copy.
+   const std::string tokenBuffer=text.str();
+   Lexer rawTokens(call->getBeginLoc(),ci.getLangOpts(),tokenBuffer.data(),tokenBuffer.data(),tokenBuffer.data()+tokenBuffer.size());Token token;
+   rawTokens.LexFromRawLexer(token);
+   if(!token.is(tok::raw_identifier)||token.needsCleaning()||token.getRawIdentifier()!="__syncthreads")return false;
+   rawTokens.LexFromRawLexer(token);if(!token.is(tok::l_paren)||token.needsCleaning())return false;
+   rawTokens.LexFromRawLexer(token);if(!token.is(tok::r_paren)||token.needsCleaning())return false;
+   rawTokens.LexFromRawLexer(token);return token.is(tok::eof);
+  }
+  bool noRecursion(const FunctionDecl* f,std::set<const FunctionDecl*>& active,std::set<const FunctionDecl*>& done,bool& usesCompilerBlockBarrier){
   f=f->getCanonicalDecl();if(done.count(f))return true;if(!active.insert(f).second)return false;
   for(const auto& site:inventory.calls)if(site.second&&site.second->getCanonicalDecl()==f){const auto* callee=site.first->getDirectCallee();if(!callee)return false;if(sdk(callee))continue;
-   if(callee->getBuiltinID()){const auto name=callee->getName();if(name=="memcpy"||name=="__builtin_memcpy")continue;return false;}const auto* def=callee->getDefinition();if(!def||!literal(def->getLocation())||!noRecursion(callee,active,done))return false;}
+   if(compilerImplicitBlockBarrier(site.first)){usesCompilerBlockBarrier=true;continue;}
+    if(callee->getBuiltinID()){const auto name=callee->getName();if(name=="memcpy"||name=="__builtin_memcpy")continue;return false;}const auto* def=callee->getDefinition();if(!def||!literal(def->getLocation())||!noRecursion(callee,active,done,usesCompilerBlockBarrier))return false;}
   const auto* definition=f->getDefinition();if(!definition||!definition->getBody())return false;
   class Observations:public RecursiveASTVisitor<Observations>{public:bool safe=true;
    bool VisitPredefinedExpr(PredefinedExpr*){safe=false;return true;}
@@ -331,10 +383,55 @@ class Proof {
   graphParts.push_back(file(definition->getLocation())+":"+std::to_string(sm.getFileOffset(definition->getLocation()))+":"+digest(printed));
   active.erase(f);done.insert(f);return true;
  }
+ bool implicitSharedStorage(const VarDecl* variable) const {
+  if(variable->getStorageClass()==SC_None)return true; // Preserve the old path.
+  if(variable->getStorageClass()!=SC_Static)return false;
+  const auto* attribute=variable->getAttr<CUDASharedAttr>();if(!attribute)return false;
+  const auto begin=sm.getExpansionLoc(variable->getBeginLoc());
+  const auto end=sm.getExpansionLoc(variable->getEndLoc());
+  if(!literal(begin)||!literal(end)||sm.getFileID(begin)!=sm.getFileID(end)||
+     begin!=sm.getExpansionLoc(attribute->getLocation()))return false;
+  bool invalid=false;
+  const auto text=Lexer::getSourceText(CharSourceRange::getTokenRange(begin,end),sm,ci.getLangOpts(),&invalid);
+  if(invalid||text.contains('\\'))return false;
+  const std::string buffer=text.str();
+  Lexer raw(begin,ci.getLangOpts(),buffer.data(),buffer.data(),buffer.data()+buffer.size());
+  Token tokens[7];
+  for(auto& token:tokens){raw.LexFromRawLexer(token);if(token.needsCleaning())return false;}
+  if(!tokens[0].is(tok::raw_identifier)||tokens[0].getRawIdentifier()!="__shared__"||
+     !tokens[1].is(tok::raw_identifier)||tokens[1].getRawIdentifier()!="unsigned"||
+     !tokens[2].is(tok::raw_identifier)||tokens[2].getRawIdentifier()!="int"||
+     !tokens[3].is(tok::raw_identifier)||tokens[3].getRawIdentifier()!=variable->getName()||
+     !tokens[4].is(tok::l_square)||!tokens[5].is(tok::numeric_constant)||!tokens[6].is(tok::r_square))return false;
+  Token tail;raw.LexFromRawLexer(tail);if(!tail.is(tok::eof))return false;
+  // A caller must not inject a written storage class through a replacement
+  // for __shared__ or a nested qualifier macro. These are data/provenance
+  // checks only; no macro file obtains SDK declaration authority here.
+  auto& preprocessor=ci.getPreprocessor();std::vector<std::string> pending{"__shared__"};
+  std::set<std::string> used;
+  while(!pending.empty()){
+   const auto name=pending.back();pending.pop_back();if(!used.insert(name).second)continue;
+   if(used.size()>32)return false;
+   const auto definition=preprocessor.getMacroDefinitionAtLoc(preprocessor.getIdentifierInfo(name),begin);
+   if(!definition){if(name=="__shared__")return false;continue;}
+   const auto* macro=definition.getMacroInfo();
+   if(!macro||definition.isAmbiguous()||!definition.getModuleMacros().empty()||macro->isBuiltinMacro()||macro->isVariadic()||
+      !fixedNative(macro->getDefinitionLoc())||!fixedNative(macro->getDefinitionEndLoc()))return false;
+   for(const auto& token:macro->tokens()){
+    if(!token.getLocation().isFileID()||!native(token.getLocation()))return false;
+    const auto word=preprocessor.getSpelling(token);if(word=="static"||word=="extern")return false;
+    if(const auto* identifier=token.getIdentifierInfo())
+     if(!macro->isFunctionLike()||macro->getParameterNum(identifier)<0)pending.push_back(identifier->getName().str());
+   }
+  }
+  for(const auto& event:macroEvidence.controls)
+   if(used.count(event.first)&&!fixedNative(event.second))return false;
+  return true;
+ }
  bool shared(const FunctionDecl* f,DeviceAggregateInlineFact& fact){
   class Shared:public RecursiveASTVisitor<Shared>{public:std::vector<const VarDecl*> vars;std::vector<const DeclRefExpr*> refs;bool VisitVarDecl(VarDecl*v){if(v->hasAttr<CUDASharedAttr>())vars.push_back(v);return true;}bool VisitDeclRefExpr(DeclRefExpr*r){refs.push_back(r);return true;}} v;v.TraverseStmt(f->getBody());
   if(v.vars.empty())return true;if(v.vars.size()!=1||fact.calls!=1)return false;const auto* var=v.vars.front();const auto* array=context.getAsConstantArrayType(var->getType());
-  if(!literal(var->getLocation())||var->getStorageClass()!=SC_None||var->hasInit()||!array||!context.hasSameType(array->getElementType(),context.UnsignedIntTy)||array->getSize().ugt(4096))return false;
+  if(!literal(var->getLocation())||!implicitSharedStorage(var)||var->hasInit()||!array||!context.hasSameType(array->getElementType(),context.UnsignedIntTy)||array->getSize().ugt(4096))return false;
   for(const auto* a:var->attrs())if(!isa<CUDASharedAttr>(a))return false;fact.sharedBytes=static_cast<unsigned>(array->getSize().getZExtValue()*4);if(!fact.sharedBytes)return false;
   for(const auto* r:v.refs)if(r->getDecl()==var){const auto parents=context.getParents(*r);const auto* cast=parents.size()==1?parents[0].get<ImplicitCastExpr>():nullptr;if(!cast||cast->getCastKind()!=CK_ArrayToPointerDecay)return false;const auto up=context.getParents(*cast);const auto* sub=up.size()==1?up[0].get<ArraySubscriptExpr>():nullptr;if(!sub||sub->getBase()!=cast)return false;
    const auto uses=context.getParents(*sub);if(uses.size()!=1)return false;
@@ -350,12 +447,18 @@ class Proof {
    // with authenticated non-terminating SDK/builtin calls precedes it.
    const auto* body=cast<CompoundStmt>(caller->getBody());
    class Setup:public RecursiveASTVisitor<Setup>{
-    const std::function<bool(const Decl*)>& sdk;
-    public:bool safe=true;explicit Setup(const std::function<bool(const Decl*)>& s):sdk(s){}
+    const std::function<bool(const Decl*)>& sdk;ASTContext& context;
+    const std::function<bool(SourceLocation)>& native;
+    public:bool safe=true;explicit Setup(const std::function<bool(const Decl*)>& s,ASTContext& c,const std::function<bool(SourceLocation)>& n):sdk(s),context(c),native(n){}
+    bool TraversePseudoObjectExpr(PseudoObjectExpr* expression){
+     const auto coordinate=ProveCudaExecutionCoordinate(expression,context,native);
+     if(coordinate&&coordinate->expression==expression)return true;
+     return RecursiveASTVisitor<Setup>::TraversePseudoObjectExpr(expression);
+    }
     bool VisitCallExpr(CallExpr* c){const auto* f=c->getDirectCallee();safe&=f&&!f->isNoReturn()&&(sdk(f)||f->getBuiltinID());return true;}
     bool VisitLambdaExpr(LambdaExpr*){safe=false;return true;}
     bool VisitCXXThrowExpr(CXXThrowExpr*){safe=false;return true;}
-   } setup(sdk);
+   } setup(sdk,context,native);
    for(const auto* statement:body->body()){if(statement==decl)break;if(!isa<DeclStmt>(statement))return false;setup.TraverseStmt(const_cast<Stmt*>(statement));}
    if(!setup.safe)return false;
 
@@ -420,7 +523,7 @@ class Proof {
      fact.calls=witness->calls;fact.callerOffset=witness->callerOffset;fact.referenceSites=witness->referenceSites;
     }
    }
-   std::set<const FunctionDecl*> active,done;graphParts.clear();valid&=fact.calls>0&&noRecursion(f,active,done)&&shared(f,fact);
+   std::set<const FunctionDecl*> active,done;bool usesCompilerBlockBarrier=false;graphParts.clear();valid&=fact.calls>0&&noRecursion(f,active,done,usesCompilerBlockBarrier)&&shared(f,fact)&&(!usesCompilerBlockBarrier||fact.sharedBytes>0);
    std::sort(graphParts.begin(),graphParts.end());std::string graph;for(const auto& part:graphParts)graph+=part+"\n";fact.bodyGraph=digest(graph);
    if(witness)valid&=fact==*witness;
    if(!valid){error="aggregate helper does not have a closed POD/direct-call/shared proof";return false;}out.facts.push_back(fact);

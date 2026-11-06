@@ -16290,7 +16290,7 @@ void AscifyAction::ExecuteAction() {
            verifiedFrontendCgFile(file,getCompilerInstance(),frontendCompatibility))) &&
           physicalSourceFileMatches(SM.getFilename(location),*entry,SM);
     };
-    const auto nativeInput = [&](clang::SourceLocation location) {
+    const auto nativeInputUncached = [&](clang::SourceLocation location) {
       if (!location.isFileID()) return false;
       const auto file=SM.getFileID(location);const auto* entry=SM.getFileEntryForID(file);
       if (!entry || !physicalSourceFileMatches(SM.getFilename(location),*entry,SM)) return false;
@@ -16305,6 +16305,89 @@ void AscifyAction::ExecuteAction() {
       return trustedSystemFileIds.count(file.getHashValue()) && SM.isInSystemHeader(location) &&
           (pathIsWithinPhysicalDirectory(SM.getFilename(location),"/usr/include") ||
            pathIsWithinPhysicalDirectory(SM.getFilename(location),"/usr/lib/gcc"));
+    };
+    // Local to this completed-preprocessing CI. No SDK, AST, or caller
+    // ownership is cached or enlarged. System-header state is location-sensitive.
+    struct NativeInputSnapshot {
+      clang::FileID file;
+      const clang::FileEntry* entry=nullptr;
+      std::string requested,canonical,uniqueId,parsedSha256;
+      std::size_t size=0;
+    };
+    struct NativeInputMemoValue { clang::SourceLocation location; bool native=false; };
+    std::map<unsigned,NativeInputSnapshot> nativeInputSnapshots;
+    std::map<std::pair<unsigned,bool>,NativeInputMemoValue> nativeInputMemo;
+    bool nativeInputCaptureFailed=false;
+    const auto snapshotNativeInput = [&](clang::FileID file,NativeInputSnapshot& value) {
+      value.file=file;value.entry=SM.getFileEntryForID(file);
+      // A nonphysical FileID still has a stable identity in this CI, but it
+      // never gains a physical/native role from this cache.
+      if (!value.entry) return true;
+      const auto begin=SM.getLocForStartOfFile(file);
+      value.requested=SM.getFilename(begin).str();
+      value.canonical=contextualCanonicalPath(value.requested);
+      llvm::sys::fs::UniqueID first,last;
+      if (value.canonical.empty() || SM.isFileOverridden(value.entry) ||
+          llvm::sys::fs::getUniqueID(value.requested,first) || first!=value.entry->getUniqueID()) return false;
+      bool invalid=false;const auto parsed=SM.getBufferData(file,&invalid);
+      const auto physical=llvm::MemoryBuffer::getFile(value.requested);
+      if (invalid || !physical || parsed!=(*physical)->getBuffer() ||
+          llvm::sys::fs::getUniqueID(value.requested,last) || first!=last ||
+          contextualCanonicalPath(value.requested)!=value.canonical) return false;
+      value.uniqueId=std::to_string(first.getDevice())+":"+std::to_string(first.getFile());
+      value.parsedSha256=contextualInputSha256(parsed);value.size=parsed.size();
+      return true;
+    };
+    const auto captureNativeInputAncestry = [&](clang::FileID first) {
+      std::vector<clang::FileID> pending{first};std::set<unsigned> visited;
+      while (!pending.empty()) {
+        const auto file=pending.back();pending.pop_back();
+        if (file.isInvalid() || !visited.insert(file.getHashValue()).second) continue;
+        if (!nativeInputSnapshots.count(file.getHashValue())) {
+          NativeInputSnapshot value;
+          if (!snapshotNativeInput(file,value)) return false;
+          nativeInputSnapshots.emplace(file.getHashValue(),std::move(value));
+        }
+        const auto include=SM.getIncludeLoc(file);
+        if (include.isInvalid()) continue;
+        // Preserve both physical ancestry paths if an include location is a
+        // macro. The uncached classifier itself retains its original rules.
+        for (const auto location:{SM.getSpellingLoc(include),SM.getExpansionLoc(include)})
+          if (location.isFileID()) pending.push_back(SM.getFileID(location));
+      }
+      return true;
+    };
+    const auto nativeInput = [&](clang::SourceLocation location) {
+      if (location.isInvalid() || !location.isFileID()) return false;
+      const auto file=SM.getFileID(location);
+      if (file.isInvalid()) return false;
+      const auto key=std::make_pair(file.getHashValue(),SM.isInSystemHeader(location));
+      const auto found=nativeInputMemo.find(key);
+      if (found!=nativeInputMemo.end()) return found->second.native;
+      if (!captureNativeInputAncestry(file)) { nativeInputCaptureFailed=true;return false; }
+      const bool native=nativeInputUncached(location);
+      nativeInputMemo.emplace(key,NativeInputMemoValue{location,native});
+      return native;
+    };
+    const auto revalidateNativeInputMemo = [&]() {
+      if (nativeInputCaptureFailed) return false;
+      for (const auto& item:nativeInputSnapshots) {
+        const auto& expected=item.second;NativeInputSnapshot actual;
+        if (!snapshotNativeInput(expected.file,actual) || actual.entry!=expected.entry ||
+            actual.requested!=expected.requested || actual.canonical!=expected.canonical ||
+            actual.uniqueId!=expected.uniqueId || actual.size!=expected.size ||
+            actual.parsedSha256!=expected.parsedSha256) return false;
+      }
+      // Once per distinct key, also replay the unchanged classifier. This
+      // covers its resource/frozen-parent predicates without trusting a later
+      // Bind or a generic transaction to repair this cache's own scope.
+      for (const auto& item:nativeInputMemo) {
+        const auto& value=item.second;
+        if (!value.location.isFileID() || SM.getFileID(value.location).getHashValue()!=item.first.first ||
+            SM.isInSystemHeader(value.location)!=item.first.second ||
+            nativeInputUncached(value.location)!=value.native) return false;
+      }
+      return true;
     };
     const auto helperDiagnostic = [&](const ascify::DeviceNativeMacroUse& observed) {
       // No range-wide exception: the builtin must come directly from a
@@ -16389,6 +16472,10 @@ void AscifyAction::ExecuteAction() {
         }
         if (aggregateError.empty() && !ascify::RecordStandaloneCallerEdges(edges,aggregateError)) {}
       }
+      // Analyze and root-edge classification have now finished using the
+      // cache. Revalidate before any plan fact or source edit is committed.
+      if (aggregateError.empty() && !revalidateNativeInputMemo())
+        aggregateError="native-data input/ancestry identity changed during owned analysis";
       if (aggregateError.empty() && context->depth==0 && !context->plan->recordDeviceInlineFacts(analysis))
         aggregateError=context->plan->failureReason();
       if (context->depth!=0 && context->plan->deviceInlineProjectStamp()!=analysis.projectStamp)
