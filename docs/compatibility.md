@@ -99,6 +99,12 @@ returned to the caller; explicit reset is needed when cleanup status matters.
 The [lifecycle test](../tests/rewrite/runtime_lifecycle_compat_test.cpp) exercises
 ownership, rebinding, callback ordering, rollback, and normal process exit.
 
+The complete original CUDA Samples v13.0 `simpleMPI` target passed
+[two-rank original-target validation](validation/simple-mpi-20261105.md) using
+the existing runtime lifecycle and copy adapters. The unchanged MPI host TU is
+compiled and linked against a real MPI implementation. The validated scope is
+one host and two processes on the same default logical device.
+
 ## Host and target API adaptations
 
 | Surface | Contract and limit |

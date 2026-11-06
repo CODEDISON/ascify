@@ -1,0 +1,87 @@
+{
+  "schema": "ascify.original-simpleMPI.root-acceptance.v1",
+  "passed": true,
+  "reviewer": "root",
+  "updated_utc": "2026-11-06T06:25:21.255484+00:00",
+  "original_sample": "simpleMPI",
+  "strict_CUDA_Samples_version": "v13.0",
+  "original_upstream_commit": "3f1c50965017932fc81e6d94a3fc9e04c105b312",
+  "original_source_edits": 0,
+  "original_TUs": [
+    "simpleMPI.cpp",
+    "simpleMPI.cu"
+  ],
+  "original_files": {
+    "simpleMPI.cu": "86d11fcbe508d2defac95e201675e003a3c6e5ec12b9ac8c2e14077613405e0e",
+    "simpleMPI.cpp": "3b499d71f39be07a33b59d60d3db41a1f60a2aff37175e2b9c00c047fedf733d",
+    "simpleMPI.h": "4c15f8af2cae675d3b049edff0bf02916b49544a4061050f1564675d9d8a0780",
+    "CMakeLists.txt": "0cbf0060f20e00d549e75d9857405e9b43fcbd159286970f6ddc8b34d54455d4",
+    "README.md": "08fe68b05ea0b196e7ac92f9a86c9fcd54a557880a1e23f7f733b0fa896505c5"
+  },
+  "product_source_commit": "e26769084285e293179228a237eebcdf55e9bec8",
+  "binary_sha256": "f3c1ef0fe1929b144b8a25b73ccc2420939e7a23a7fcf9d186b7339be86b9b3b",
+  "public_production_commit_before_new_validation": "e29ae7bb7606506c296856c420a3f59a21fd6b4a",
+  "new_production_source_changes": 0,
+  "program_sha256": "a1f2221b3920870984b41be1692c50d852d288bf848fe8468294dfb15313b345",
+  "complete_original_target_O2_linked": true,
+  "host_CPP_adapter": "real OpenMPI4.1.2 package headers and existing same-version C/CXX shared libraries; original CPP compiled C++17/O2/PIC",
+  "CUDA_TU_adapter": "Ascify precise/recipe-none to CCEC O2, original C++17/PIC/RDC source contract",
+  "upstream_CMake_executed": false,
+  "native_NVCC_architectures_replayed": false,
+  "actual_build_processes": 14,
+  "device_kernel_argument_bytes": 16,
+  "host_copy_bytes_including_packed_dimensions": 32,
+  "original_grid": 10000,
+  "original_block": 256,
+  "MPI_implementation": "OpenMPI4.1.2; headers/bin/common isolated on DT, no global install/repair",
+  "MPI_ranks": 2,
+  "MPI_groups_executed": 1,
+  "actual_MPI_controller_PID": 3216062,
+  "actual_rank_PIDs": [
+    3216066,
+    3216067
+  ],
+  "returncode": 0,
+  "runtime_visible_device": 0,
+  "physical_chip": 2,
+  "same_implicit_default_device_for_both_ranks": true,
+  "original_stdout": "Running on 2 nodes\nAverage of square roots is: 0.667279\nPASSED\n",
+  "elements_checked": 5120000,
+  "preselected_max_ULP": 1,
+  "observed_max_ULP": 1,
+  "max_absolute_error": 5.960464477539063e-08,
+  "original_fp32_partial_sums": [
+    1708138.75,
+    1708328.875
+  ],
+  "original_MPI_SUM": 3416467.5,
+  "original_fp32_average": 0.6672788262367249,
+  "original_printed_average": "0.667279",
+  "capture_payload_bytes": 40960000,
+  "observer_sha256": "51784d114cbdda8a667482a015763321d841959d3b018771dd46011880d6cedb",
+  "all_actual_inputs_unchanged": true,
+  "before_and_after_healthy_idle": true,
+  "supplemental_numeric_boundary": "Original PASSED has no threshold; one ULP full-data sqrt check chosen before device run, plus original serial fp32 sums/MPI float reduce/printed average",
+  "scope": "Single host, two original MPI ranks on same implicit logical0; no multi-host network or performance claim; historical cross-product union, other products not revalidated",
+  "vector_counts_after": [
+    18,
+    38
+  ],
+  "core_counts_after": [
+    33,
+    75
+  ],
+  "evidence_authority_DT": "/home/chenyun/ascify_generalization60_20261101/simplempi_original_v1",
+  "evidence_references": {
+    "/home/chenyun/ascify_generalization60_20261101/simplempi_original_v1/peer_actual_original_acceptance_v1.json": "6284be1062a4cbc6098671b04bb81683cb5133e8415a867635ded3fbf3ce3d16",
+    "/home/chenyun/ascify_generalization60_20261101/simplempi_original_v1/peer_simplempi_CPU_static_ABI_acceptance_v1.json": "630ab208ff10c945974650ea82d7ecc5c2c8611d930a332e7b56766d7cf0e3c4",
+    "/home/chenyun/ascify_generalization60_20261101/simplempi_original_v1/actual_device_two_rank_v1/summary.json": "47223ce496a4444b8690c2e1ab0150ba5b2dc307e031084871740d783c96a1fb",
+    "/home/chenyun/ascify_generalization60_20261101/simplempi_original_v1/actual_device_two_rank_v1/actual_input_oracle_v1.json": "97796583f3b6790042682820a72c9cd31249a9c20ed1be5ec56076f17ada5a76",
+    "/home/chenyun/ascify_generalization60_20261101/simplempi_original_v1/actual_build_v2/resume_v1/resume_summary.json": "dc7a07762014b212f01d53a79dedf1f011aa4eb5d0ef0e8978a71164c380a17a",
+    "/home/chenyun/ascify_generalization60_20261101/simplempi_original_v1/actual_device_two_rank_v1/program.process.json": "5ac5b9c2b3a584a9849cc3a9e2821ebb3e340978436a198647623c2d661b8208",
+    "/home/chenyun/ascify_generalization60_20261101/simplempi_original_v1/actual_device_two_rank_v1/inputs.before.json": "f23356370d01bb0afd79e21c5648771dbae1d3bbb615f4604e9c4c31df9ae349",
+    "/home/chenyun/ascify_generalization60_20261101/simplempi_original_v1/actual_device_two_rank_v1/inputs.after.json": "f23356370d01bb0afd79e21c5648771dbae1d3bbb615f4604e9c4c31df9ae349"
+  },
+  "large_artifacts_downloaded": false,
+  "TFR_shelved_by_user": true
+}

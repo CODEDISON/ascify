@@ -6,6 +6,11 @@ for supported domains and experimental paths.
 
 ## Unreleased
 
+- Validate the complete original CUDA Samples v13.0 `simpleMPI` target on 950DT,
+  preserving both TUs and the original two-rank workload. Check all 5120000
+  square-root outputs and the original MPI average using existing production code.
+  See the [validation record](docs/validation/simple-mpi-20261105.md).
+
 - Validate the complete original CUDA Samples v13.0 `binaryPartitionCG` target
   on 950DT, preserving its input size, occupancy launch, algorithm and stream.
   Complete the proved launch-argument tail hole while retaining the original
