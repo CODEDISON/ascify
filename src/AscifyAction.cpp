@@ -16295,7 +16295,8 @@ void AscifyAction::ExecuteAction() {
       const auto file=SM.getFileID(location);const auto* entry=SM.getFileEntryForID(file);
       if (!entry || !physicalSourceFileMatches(SM.getFilename(location),*entry,SM)) return false;
       if (cudaRuntimeApiSdkFileIds.count(file.getHashValue()) ||
-          isOwnedCudaCompilerInput(file,getCompilerInstance()) ||
+          isOwnedCudaCompilerInput(file,getCompilerInstance(),true) ||
+          fullWarpNativeCompilerInput(file,getCompilerInstance(),trustedSystemFileIds) ||
           (verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
            verifiedFrontendCgFile(file,getCompilerInstance(),frontendCompatibility)) ||
           (verifiedFrontendHostMathEntryFileIds.count(file.getHashValue()) &&
