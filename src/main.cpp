@@ -36,6 +36,16 @@ THE SOFTWARE.
 #include "clang/Basic/DiagnosticOptions.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Driver/Compilation.h"
+#if __has_include("clang/Options/Options.h")
+#include "clang/Options/Options.h"
+namespace standalone_options = clang::options;
+using clang::getDriverOptTable;
+#else
+#include "clang/Driver/Options.h"
+namespace standalone_options = clang::driver::options;
+using clang::driver::getDriverOptTable;
+#endif
+#include "llvm/Option/ArgList.h"
 #if LLVM_VERSION_MAJOR >= 22
 #include "clang/Driver/CudaInstallationDetector.h"
 #endif
@@ -713,7 +723,39 @@ bool migrationReceiptPathConflicts(const std::string &receiptPath,
              normalizedPathForReceiptComparison(artifactPath);
 }
 
+// FixedCompilationDatabase normalizes away positional/linker inputs. Owned
+// target admission must inspect the original compiler tail before that loss.
+static bool validateStandaloneRawCompilerInputs(
+    const std::vector<std::string>& arguments, std::string& error) {
+  std::vector<const char*> raw;
+  for (const auto& argument : arguments) raw.push_back(argument.c_str());
+  unsigned missingIndex=0, missingCount=0;
+  const auto parsed=getDriverOptTable().ParseArgs(raw,missingIndex,missingCount);
+  if (missingCount) {
+    error="unmapped standalone parser argument: missing raw compiler option value";
+    return false;
+  }
+  for (const auto* argument : parsed) {
+    const auto& option=argument->getOption();
+    if (option.matches(standalone_options::OPT_INPUT) ||
+        option.matches(standalone_options::OPT__DASH_DASH) ||
+        option.matches(standalone_options::OPT_Link_Group) ||
+        option.hasFlag(standalone_options::LinkerInput) ||
+        option.hasFlag(standalone_options::LinkOption)) {
+      error="unmapped standalone parser argument: "+argument->getAsString(parsed);
+      return false;
+    }
+  }
+  return true;
+}
+
 int main(int argc, const char **argv) {
+  std::vector<std::string> rawCompilerArguments;
+  bool compilerTail=false;
+  for (int index=1; index<argc; ++index) {
+    if (compilerTail) rawCompilerArguments.emplace_back(argv[index]);
+    else if (llvm::StringRef(argv[index])=="--") compilerTail=true;
+  }
   llvm::cl::SetVersionPrinter(printVersions);
   // LLVM groups single-letter options. Its built-in -h alias prints help and
   // exits before the rest of an unknown option such as --helpful is checked.
@@ -788,6 +830,13 @@ int main(int argc, const char **argv) {
     return 1;
   }
   if (Versions) printVersions(llvm::outs());
+  if (StandaloneDeviceExecutable) {
+    std::string rawCompilerError;
+    if (!validateStandaloneRawCompilerInputs(rawCompilerArguments,rawCompilerError)) {
+      llvm::errs()<<sAscify<<sError<<rawCompilerError<<"\n";
+      return 1;
+    }
+  }
   if (StandaloneDeviceExecutable && (fileSources.size()!=1 || !OptLocalHeadersRecursive || Inplace || NoOutput || TargetPolicy!="dav-c310-vec" || TargetRecipe!="none")) {
     llvm::errs()<<"standalone device executable requires one source, recursive physical output and dav-c310-vec/none\n";return 1;
   }

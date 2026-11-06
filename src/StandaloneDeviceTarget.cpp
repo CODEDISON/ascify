@@ -16,6 +16,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/TargetParser/Triple.h"
 #include <filesystem>
@@ -35,7 +36,12 @@ namespace ascify { namespace {
 namespace fs=std::filesystem;
 bool safePath(llvm::StringRef path){return !path.empty()&&std::none_of(path.begin(),path.end(),[](char c){const auto x=static_cast<unsigned char>(c);return x<32||x==127;});}
 std::string physicalPath(const fs::path& p){if(!safePath(p.string()))return {};std::error_code ec;auto q=fs::canonical(p,ec);return ec||!safePath(q.string())?std::string():q.string();}
-bool read(const fs::path& p,std::string& s){std::ifstream f(p,std::ios::binary);if(!f)return false;s.assign(std::istreambuf_iterator<char>(f),{});return !f.bad();}
+bool read(const fs::path& p,std::string& s){
+ const auto buffer=llvm::MemoryBuffer::getFileAsStream(p.string());
+ if(!buffer)return false;
+ s=(*buffer)->getBuffer().str();
+ return true;
+}
 std::string hash(llvm::StringRef s){llvm::SHA256 h;h.update(s);auto data=h.final();std::string out;const char hex[]="0123456789abcdef";for(auto x:data){out+=hex[(static_cast<unsigned char>(x)>>4)&15];out+=hex[static_cast<unsigned char>(x)&15];}return out;}
 bool within(const std::string& path,const std::string& root){return path.size()>root.size()&&path.compare(0,root.size(),root)==0&&path[root.size()]=='/';}
 struct Target {
