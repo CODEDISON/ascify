@@ -1,0 +1,153 @@
+{
+  "schema": "ascify.original-shfl-scan.root-acceptance.v1",
+  "passed": true,
+  "reviewer": "root",
+  "updated_utc": "2026-11-06T15:40:54.688272+00:00",
+  "original_sample": "shfl_scan",
+  "strict_CUDA_Samples_version": "v13.0",
+  "original_upstream_commit": "3f1c50965017932fc81e6d94a3fc9e04c105b312",
+  "original_source_edits": 0,
+  "original_files": {
+    "shfl_scan.cu": "f9008fbc9b98be0ad1fa070931f13433f8efae068e24d2f6af3475d6ac03305b",
+    "shfl_integral_image.cuh": "a4b09515c4370ddfe4a0e330cd4cf82546e82e48426502ccbd7ec3e818fd9b02"
+  },
+  "product_source_commit": "d9a6f98001b245d6efe457cf6d420d57d98ac5e5",
+  "source_files": 688,
+  "source_manifest_sha256": "8b20db6dc68277b5e8f84ae2f2ef1bc62957408f13d73a5172d196cb5f0c7012",
+  "binary_sha256": "35ba502d4c20231e84d2f1494c1224db32f99a8c1633aa97b64e8d97d29e7eb1",
+  "program_sha256": "4d25e14df270b962889668f7939af57332716f37ae7c771d0361887633e10b54",
+  "owned_target_receipt_sha256": "ff700a69e92fa644a3c738578ea5d2c5d7cd51050e90f3d209b760eb280b49ad",
+  "complete_original_target_O2_linked": true,
+  "compile_units": 1,
+  "owned_device_objects_linked": 1,
+  "user_device_archives": 0,
+  "RDC_preserved": true,
+  "rows_block": 120,
+  "original_algorithm_constants_and_workloads_preserved": true,
+  "upstream_CMake_executed": false,
+  "build_boundary": "Owned fixed target adapter: one generated device object and CANN/system providers; no claim for arbitrary parent CMake, user archives or general helper ABI.",
+  "sourcevalid_reused_certificate_sha256": "10d9e17d94beb3dad86f94901a571b2f06ff2947103c55b397b241ec93357f82",
+  "sourcevalid_replayed": false,
+  "actual_original_CLI_PID": 3625752,
+  "actual_original_CLI_returncode": 0,
+  "actual_original_CLI_seconds": 208.08861153014004,
+  "actual_formal_NPU_PID": 3631617,
+  "formal_NPU_invocations": 1,
+  "actual_NPU_returncode": 0,
+  "actual_NPU_seconds": 3.840039050206542,
+  "runtime_visible_device": 0,
+  "application_device": 0,
+  "physical_chip": 2,
+  "platform": "Ascend950DT",
+  "CANN_version": "9.1.0",
+  "elements_checked": 4212992,
+  "exact_integer_match": true,
+  "capture_records": [
+    {
+      "sequence": 0,
+      "elements_checked": 65536,
+      "payload_sha256": "dd8186a3d57826d3179717fbcaef8e4c24c5380f0ee7d869f41f727015fe17ab"
+    },
+    {
+      "sequence": 1,
+      "elements_checked": 256,
+      "payload_sha256": "708ecd9704258acfa3427fde6a7dae048e3207e0bf3389666abcb5d7e0fadf4e"
+    },
+    {
+      "sequence": 2,
+      "elements_checked": 2073600,
+      "payload_sha256": "84b242b2f860c491d78c69890130fcdb69066ae938814cf7453867d5d752ffc3"
+    },
+    {
+      "sequence": 3,
+      "elements_checked": 2073600,
+      "payload_sha256": "974bdcf6c23a6d22abab40dcced219a97ab275b01af5a35d20876fd817ceda76"
+    }
+  ],
+  "original_CPU_scan_diff": 0,
+  "original_integral_row_diff": 0,
+  "original_integral_checksum": 2073600,
+  "original_expected_checksum": 2073600,
+  "source_provider_inputs": 654,
+  "formal_device_binding_records": 836,
+  "runtime_providers": 31,
+  "all_actual_inputs_unchanged": true,
+  "before_and_after_healthy_idle": true,
+  "manual_or_old_product_ELF_results_inherited": false,
+  "native_validation": {
+    "merged_actual_M_MD_instances": 42,
+    "current_fresh_O3_instances": 3,
+    "reused_unchanged_objects_MD": 39,
+    "installed_files": 336,
+    "CTest": 4,
+    "all_passed": true
+  },
+  "CPU_regression": {
+    "logical_cases": 307,
+    "expectation_changes": 0,
+    "seven_groups_passed": true,
+    "legacy_supplemental_pair_passed": true,
+    "additional_dynamic19_ABI11_checks": 30,
+    "additional_embedded_Clang_calls": 26,
+    "additional_not_folded_into307": true,
+    "barrier_literal_macro_cases": 2,
+    "finite_items": [
+      "original_shfl",
+      "renamed",
+      "function_address",
+      "shared_two_calls_one_kernel",
+      "archive_argv",
+      "aliasUID",
+      "generatedUID"
+    ],
+    "UID_host_unit_executions": 2,
+    "all_current_product_checks_passed": true
+  },
+  "preserved_infrastructure_failure": {
+    "failed_link_PID": 3634277,
+    "returncode": 1,
+    "cause": "ELF output path collided with test log directory",
+    "M_PID": 3634093,
+    "compile_PID": 3634095,
+    "both_returncode": 0,
+    "continuation_link_PID": 3640301,
+    "continuation_returncode": 0,
+    "UID_PIDs": [
+      3640323,
+      3640324
+    ],
+    "CLI_M_compile_replays": 0,
+    "precompile_snapshot_boundary": "Original runner validated M=MD and in-memory before/after inputs before reaching link; it did not serialize that unit precompile snapshot. Current prepared snapshot is explicitly current, not reconstructed history."
+  },
+  "raw_compiler_archive_refused": true,
+  "authentic_existing_output_preserved": true,
+  "scope": "Unchanged original shfl_scan on this product/toolchain/shape; no performance claim. Historical accepted-name union spans products and is not a same-product revalidation of all names.",
+  "vector_counts_after": [
+    19,
+    38
+  ],
+  "core_counts_after": [
+    34,
+    75
+  ],
+  "strict_v13_0_accepted_after": 41,
+  "evidence_authority_DT": "/home/chenyun/ascify_generalization60_20261101/",
+  "evidence_references": {
+    "/home/chenyun/ascify_generalization60_20261101/vector_owned_native_v1/root_raw_args_incremental_acceptance_v1.json": "277e83c56d7e850dce0b48b040d931e2456574c3a614687acafd03c2e211dd31",
+    "/home/chenyun/ascify_generalization60_20261101/shfl_owned_device_v1/peer_formal_owned_device_verification_v2.json": "852ccf15abfb0e1f70d80aac876b9147d6ebced61483f0f2c13a03d063de0302",
+    "/home/chenyun/ascify_generalization60_20261101/vector_owned_regression307_v4/peer_regression307_verification_v4.json": "92fff90e86814128441729423783a0ca9d8d641ed226636f9c034cd3992843ee",
+    "/home/chenyun/ascify_generalization60_20261101/vector_owned_builtin_barrier_cases_v1/peer_feature2_verification_v2.json": "3ae399d8d45c78844ae8b8def969784a67bed6e09f3027f021c37c8f14f508ac",
+    "/home/chenyun/ascify_generalization60_20261101/vector_owned_finite_v1/peer_current_finite_acceptance_v1.json": "6d6547d562ccce7e366a61bfb53f26cc70a70c8bd77f24a84244d422cb00d27d",
+    "/home/chenyun/ascify_generalization60_20261101/vector_owned_finite_v1/actual_v4/summary.json": "76f8dd09e0a2bc2573ed2239b554ee563f3cf40d22a0cb7fec4a8ecac1045723",
+    "/home/chenyun/ascify_generalization60_20261101/vector_owned_regression307_v4/regression/summary.json": "8e3c52be586ca1d01a8f4a0bf7bd4c3390789fd9f220b6117e7970b5dac42709",
+    "/home/chenyun/ascify_generalization60_20261101/vector_owned_builtin_barrier_cases_v1/actual_v2/summary.json": "d83330b187a40a7d546f7fbe8c4c34d3adb7ce8dfbfc5cdc967c3ba4438dbbb1",
+    "/home/chenyun/ascify_generalization60_20261101/shfl_owned_device_v1/actual_device_original_v2/summary.json": "d37d562731dc396022ec1b795746bbf2c51832941f50b2731cc7b45f794df1b4",
+    "/home/chenyun/ascify_generalization60_20261101/shfl_owned_device_v1/actual_device_original_v2/numeric.receipt.json": "501e2b069f0419a1d034f1e7fb9de363f8b681f3be90c3344dd8e81365408354",
+    "/home/chenyun/ascify_generalization60_20261101/shfl_owned_device_v1/actual_device_original_v2/capture.receipt.json": "eef488f659f56d4d22d054eeaa7dbfe7c1b14259f1b61050b32f2a7f0d53ec7d",
+    "/home/chenyun/ascify_generalization60_20261101/vector_owned_finite_v1/remainder_actual_v3/uid_continuation_v1/summary.json": "4192dece4c82638f56581400c47f5d30262f45abc181a4950138e8ea999adbb9",
+    "/home/chenyun/ascify_generalization60_20261101/vector_owned_regression307_v3/additional_dynamic19_controller_v1/summary.json": "25d443cd00caef8a0c5b34405474d284ac7e07daca20762db24a7c1ea6b5728b",
+    "/home/chenyun/ascify_generalization60_20261101/vector_owned_regression307_v3/additional_ABI11_controller_v1/summary.json": "ac9db55038e8e1603cabb20f12c1dd2d5d86513a15149d6b93560b2205d065c5"
+  },
+  "large_artifacts_downloaded": false,
+  "TFR_shelved_by_user": true
+}
