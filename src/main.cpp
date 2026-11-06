@@ -29,6 +29,7 @@ THE SOFTWARE.
 #include "LLVMCompat.h"
 #include "AscifyAction.h"
 #include "ArgParse.h"
+#include "StandaloneDeviceTarget.h"
 #include "llvm/Support/Debug.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/DiagnosticIDs.h"
@@ -280,6 +281,14 @@ bool appendArgumentsAdjusters(
     Tool.appendArgumentsAdjuster(ct::getInsertArgumentAdjuster("-v", ct::ArgumentInsertPosition::END));
   }
   Tool.appendArgumentsAdjuster(ct::getClangSyntaxOnlyAdjuster());
+  if (StandaloneDeviceExecutable) {
+    Tool.appendArgumentsAdjuster([sSourceAbsPath](const ct::CommandLineArguments& arguments,llvm::StringRef) {
+      std::string error;
+      if (!ascify::RecordStandaloneParserArguments(sSourceAbsPath,arguments,error))
+        llvm::errs()<<sAscify<<sError<<error<<"\n";
+      return arguments;
+    });
+  }
   return true;
 }
 
@@ -779,6 +788,9 @@ int main(int argc, const char **argv) {
     return 1;
   }
   if (Versions) printVersions(llvm::outs());
+  if (StandaloneDeviceExecutable && (fileSources.size()!=1 || !OptLocalHeadersRecursive || Inplace || NoOutput || TargetPolicy!="dav-c310-vec" || TargetRecipe!="none")) {
+    llvm::errs()<<"standalone device executable requires one source, recursive physical output and dav-c310-vec/none\n";return 1;
+  }
   if (fileSources.empty()) {
     return 0;
   }

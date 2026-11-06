@@ -31,7 +31,7 @@ if(NOT ASCIFY_CLANG_TESTS_ONLY)
   # Keep core LLVM libraries in LLVM_LINK_COMPONENTS so AddLLVM respects
   # distributions built with LLVM_LINK_LLVM_DYLIB=ON.
   set(LLVM_LINK_COMPONENTS
-    ProfileData Support MCParser MC BitReader Option Core)
+    ProfileData Support MCParser MC BitReader Option Core Object)
   set(ASCIFY_ADDL_LINK_LIBS)
   if(LLVM_PACKAGE_VERSION VERSION_GREATER "6.0.1")
     list(APPEND ASCIFY_ADDL_LINK_LIBS clangToolingInclusions)
@@ -48,6 +48,9 @@ if(NOT ASCIFY_CLANG_TESTS_ONLY)
     src/ArgParse.cpp
     src/AscifyAction.cpp
     src/BoundedDeviceTemplateInlining.cpp
+    src/DeviceAggregateInlining.cpp
+    src/RegisterTile32Lowering.cpp
+    src/StandaloneDeviceTarget.cpp
     src/CUDA2DPP.cpp
     src/CUDA2DPP_Device_API.cpp
     src/CUDA2DPP_Runtime_API_functions.cpp
@@ -177,7 +180,7 @@ if(NOT ASCIFY_CLANG_TESTS_ONLY)
     file(RELATIVE_PATH ASCIFY_INSTALL_LIB_FROM_BINDIR
       "${CMAKE_INSTALL_FULL_BINDIR}" "${CMAKE_INSTALL_FULL_LIBDIR}")
     set_target_properties(ascify-clang PROPERTIES
-      INSTALL_RPATH "${ASCIFY_INSTALL_ORIGIN}/${ASCIFY_INSTALL_LIB_FROM_BINDIR}")
+      INSTALL_RPATH "${ASCIFY_INSTALL_ORIGIN}/${ASCIFY_INSTALL_LIB_FROM_BINDIR};${LLVM_LIBRARY_DIRS}")
   endif()
 endif()
 
@@ -202,6 +205,9 @@ if(ASCIFY_CLANG_TESTS OR ASCIFY_CLANG_TESTS_ONLY)
     # The test substitutes only the unused CLI entry and diagnostic labels.
     add_llvm_executable(ascify-local-header-kernel-bound-policy-test
       src/LocalHeader.cpp src/ArgParse.cpp
+      src/DeviceAggregateInlining.cpp
+      src/RegisterTile32Lowering.cpp
+      src/StandaloneDeviceTarget.cpp
       tests/rewrite/local_header_kernel_bound_policy_test.cpp)
     target_compile_features(ascify-local-header-kernel-bound-policy-test PRIVATE cxx_std_17)
     target_include_directories(ascify-local-header-kernel-bound-policy-test SYSTEM PRIVATE

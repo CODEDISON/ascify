@@ -74,6 +74,8 @@ THE SOFTWARE.
 #include "CudaVec3AbiBoundary.h"
 #include "CudaTextureBoundary.h"
 #include "BoundedDeviceTemplateInlining.h"
+#include "DeviceAggregateInlining.h"
+#include "StandaloneDeviceTarget.h"
 #include "Scalar64Lowering.h"
 #include "NttpVoidCall.h"
 #include "FullWarpGroups.h"
@@ -1312,17 +1314,17 @@ RawRowwiseSimdConflict rawFileRowwiseSimdConflict(
   return conflict;
 }
 
-std::string findConventionalMainOuterGuard(
-    clang::CompilerInstance &compiler) {
+std::string findConventionalOuterGuardInFile(
+    clang::CompilerInstance &compiler, clang::FileID file) {
   clang::SourceManager &sourceManager = compiler.getSourceManager();
   bool invalid = false;
   const llvm::StringRef buffer = sourceManager.getBufferData(
-      sourceManager.getMainFileID(), &invalid);
+      file, &invalid);
   if (invalid)
     return {};
 
   clang::Lexer lexer(
-      sourceManager.getLocForStartOfFile(sourceManager.getMainFileID()),
+      sourceManager.getLocForStartOfFile(file),
       compiler.getPreprocessor().getLangOpts(), buffer.begin(),
       buffer.begin(), buffer.end());
   std::vector<std::string> spellings;
@@ -1354,21 +1356,25 @@ std::string findConventionalMainOuterGuard(
   return spellings[2];
 }
 
+std::string findConventionalMainOuterGuard(clang::CompilerInstance &compiler) {
+  return findConventionalOuterGuardInFile(compiler,compiler.getSourceManager().getMainFileID());
+}
+
 // The prefix recognizer above is also used for output-header shielding; it
 // does not prove that a conditional encloses the whole input. Runtime-header
 // admission needs that stronger property before treating one guard level as
 // an unconditional part of a selected local header. Keep the original guard
 // and all its source tokens: this is not a guessed parent macro environment.
-bool hasCompleteMainOuterGuard(clang::CompilerInstance &compiler) {
-  const std::string guard = findConventionalMainOuterGuard(compiler);
+bool hasCompleteOuterGuardInFile(clang::CompilerInstance &compiler, clang::FileID file) {
+  const std::string guard = findConventionalOuterGuardInFile(compiler,file);
   if (guard.empty() || isAscifyCudaCompatPublishedMacro(guard) ||
       isNvidiaSampleHelperObservableMacro(guard))
     return false;
   auto &source = compiler.getSourceManager();
   bool invalid = false;
-  const auto buffer = source.getBufferData(source.getMainFileID(), &invalid);
+  const auto buffer = source.getBufferData(file, &invalid);
   if (invalid) return false;
-  clang::Lexer lexer(source.getLocForStartOfFile(source.getMainFileID()),
+  clang::Lexer lexer(source.getLocForStartOfFile(file),
                      compiler.getLangOpts(), buffer.begin(), buffer.begin(),
                      buffer.end());
   struct RawToken { std::string spelling; bool startsLine; bool isHash; };
@@ -1437,6 +1443,10 @@ bool hasCompleteMainOuterGuard(clang::CompilerInstance &compiler) {
     i = end;
   }
   return false;
+}
+
+bool hasCompleteMainOuterGuard(clang::CompilerInstance &compiler) {
+  return hasCompleteOuterGuardInFile(compiler,compiler.getSourceManager().getMainFileID());
 }
 
 } // namespace
@@ -6418,6 +6428,15 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
                                       StringRef resolved_file_name, StringRef search_path,
                                       StringRef, const clang::Module* module) {
   packedRecords.includeOrFileTransition();
+  if (StandaloneDeviceExecutable && !resolved_file_name.empty()) {
+    deviceAggregateResolvedIncludes.insert(contextualCanonicalPath(resolved_file_name));
+    bool bad=false;
+    const auto text=clang::Lexer::getSourceText(filename_range,getCompilerInstance().getSourceManager(),getCompilerInstance().getLangOpts(),&bad);
+    const std::string expected=(is_angled?"<":"\"")+file_name.str()+(is_angled?">":"\"");
+    deviceAggregateIncludeEdges.push_back({hash_loc,filename_range,file_name.str(),resolved_file_name.str(),search_path.str(),is_angled,
+        !bad && hash_loc.isFileID() && filename_range.getBegin().isFileID() && filename_range.getEnd().isFileID() && text==expected &&
+        includeToken.getIdentifierInfo() && includeToken.getIdentifierInfo()->getPPKeywordID()==clang::tok::pp_include});
+  }
   std::string frontendCompatibilityError;
   if (!ascify::ValidateFrontendCompatibilityInclude(
           frontendCompatibility, file_name.str(), resolved_file_name.str(),
@@ -6920,6 +6939,7 @@ void AscifyAction::FileSkipped(const clang::FileEntry& skippedFile,
 void AscifyAction::PragmaDirective(
     clang::SourceLocation Loc,
     clang::PragmaIntroducerKind Introducer) {
+  if (StandaloneDeviceExecutable) deviceAggregateMacroEvidence.pragmas.push_back(Loc);
   recordDirectImageUtilityControl("", "pragma", Loc, nullptr);
   if (localHeaderContext != nullptr &&
       localHeaderContext->inputEvidence != nullptr) {
@@ -10483,6 +10503,8 @@ void AscifyAction::Defined(const clang::Token &MacroNameTok,
 void AscifyAction::MacroUndefined(
     const clang::Token &MacroNameTok,
     const clang::MacroDefinition &MD) {
+  if (StandaloneDeviceExecutable && MacroNameTok.getIdentifierInfo())
+    deviceAggregateMacroEvidence.controls.push_back({MacroNameTok.getIdentifierInfo()->getName().str(),MacroNameTok.getLocation()});
   if (MacroNameTok.getIdentifierInfo() &&
       isDynamicWarpControlledToken(MacroNameTok.getIdentifierInfo()->getName()))
     dynamicWarpMacroEvents.emplace_back(MacroNameTok.getIdentifierInfo()->getName().str(),
@@ -10533,6 +10555,8 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
     return;
   const llvm::StringRef name =
       MacroNameTok.getIdentifierInfo()->getName();
+  if (StandaloneDeviceExecutable)
+    deviceAggregateMacroEvidence.controls.push_back({name.str(),MacroNameTok.getLocation()});
   if (isDynamicWarpControlledToken(name))
     dynamicWarpMacroEvents.emplace_back(name.str(),MacroNameTok.getLocation());
   recordDirectImageUtilityControl(name, "define", MacroNameTok.getLocation(),
@@ -10551,6 +10575,9 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
   }
   if (name == "__attribute__" || name == "always_inline")
     deviceTemplateAttributeMacroConflict = true;
+  if (name == "inline" || name == "__attribute__" || name == "always_inline" ||
+      name == "static_assert" || name == "sizeof" || name == "alignof")
+    deviceAggregateTokenMacroConflict = true;
   if (name == "__MVS__")
     cudaRuntimeApiMvsControlModified = true;
   // Rewritten builtin tokens are preprocessed again by the target compiler.
@@ -12267,6 +12294,8 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
                                 const clang::MacroDefinition &MD,
                                 clang::SourceRange Range,
                                 const clang::MacroArgs *Args) {
+  if (StandaloneDeviceExecutable)
+    ascify::ObserveDeviceNativeMacro(getCompilerInstance(),MacroNameTok,MD,Range,Args,deviceAggregateMacroEvidence);
   observeDirectImageUtilityMacro(MacroNameTok, MD, Range, Args);
   observeCudaRuntimeApiMacroUse(MacroNameTok, MD);
   if (MacroNameTok.getIdentifierInfo() == nullptr)
@@ -14516,6 +14545,17 @@ void AscifyAction::EndSourceFileAction() {
   if (packedRecords.used())
     for (const auto file : enteredSourceFileIds) recordContextPragmaSource(file);
   finalizeNvidiaSampleHelperClosure();
+  for (unsigned required:deviceAggregateRequiredHelperOffsets) {
+    const bool consumed=localHeaderContext && localHeaderContext->helperTransactionCommitted && std::any_of(nvidiaSampleHelperMacroCandidates.begin(),
+        nvidiaSampleHelperMacroCandidates.end(),[&](const auto& candidate) {
+          return candidate.invocationRange.beginOffset==required && candidate.statusDomainProven && candidate.rewritten;
+        });
+    if (!consumed) {
+      const auto diagnostic=getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error,"device aggregate inline boundary: required helper diagnostic transaction did not commit");
+      getCompilerInstance().getDiagnostics().Report(diagnostic);return;
+    }
+  }
   if (dynamicWarpGroups.used() && !nvidiaSampleHelperIncludes.empty() &&
       (localHeaderContext == nullptr || !localHeaderContext->helperTransactionCommitted)) {
     const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
@@ -16230,6 +16270,200 @@ void AscifyAction::ExecuteAction() {
       llvm::errs() << "Ascify bounded device-template inlining v1: families=" << edits.families
                    << ", definitions=" << edits.qualifiers.size()
                    << ", instances=" << edits.instances << ", max_depth=64, max_nodes=256\n";
+    }
+  }
+  if (StandaloneDeviceExecutable) {
+    std::string aggregateError;
+    auto* context=localHeaderContext;
+    ascify::DeviceAggregateInlineAnalysis analysis;
+    const auto ordinary = context && context->plan && !context->plan->failed() &&
+        !context->virtualInput && OptLocalHeadersRecursive && DefaultPreprocessor &&
+        TargetPolicy=="dav-c310-vec" && TargetRecipe=="none" &&
+        !cudaAttributeControlModified && !deviceAggregateTokenMacroConflict;
+    const auto sdkInput = [&](const clang::Decl* declaration) {
+      if (!declaration || declaration->getLocation().isInvalid()) return false;
+      const auto location=SM.getSpellingLoc(declaration->getLocation());
+      const auto file=SM.getFileID(location);const auto* entry=SM.getFileEntryForID(file);
+      return entry && (cudaRuntimeApiSdkFileIds.count(file.getHashValue()) ||
+          isOwnedCudaCompilerInput(file,getCompilerInstance()) ||
+          (verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
+           verifiedFrontendCgFile(file,getCompilerInstance(),frontendCompatibility))) &&
+          physicalSourceFileMatches(SM.getFilename(location),*entry,SM);
+    };
+    const auto nativeInput = [&](clang::SourceLocation location) {
+      if (!location.isFileID()) return false;
+      const auto file=SM.getFileID(location);const auto* entry=SM.getFileEntryForID(file);
+      if (!entry || !physicalSourceFileMatches(SM.getFilename(location),*entry,SM)) return false;
+      if (cudaRuntimeApiSdkFileIds.count(file.getHashValue()) ||
+          isOwnedCudaCompilerInput(file,getCompilerInstance()) ||
+          (verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
+           verifiedFrontendCgFile(file,getCompilerInstance(),frontendCompatibility)) ||
+          (verifiedFrontendHostMathEntryFileIds.count(file.getHashValue()) &&
+           verifiedForcedFrontendHostMathFile(file,getCompilerInstance(),frontendCompatibility))) return true;
+      if (frozenNvidiaSampleHelperFileRole(SM,location)!=FrozenNvidiaSampleHelperNone) return true;
+      return trustedSystemFileIds.count(file.getHashValue()) && SM.isInSystemHeader(location) &&
+          (pathIsWithinPhysicalDirectory(SM.getFilename(location),"/usr/include") ||
+           pathIsWithinPhysicalDirectory(SM.getFilename(location),"/usr/lib/gcc"));
+    };
+    const auto helperDiagnostic = [&](const ascify::DeviceNativeMacroUse& observed) {
+      // No range-wide exception: the builtin must come directly from a
+      // frozen helper replacement-list token, never from its value argument.
+      if ((observed.name!="__FILE__" && observed.name!="__LINE__") ||
+          !observed.unambiguous || !observed.definition ||
+          !observed.definition->isBuiltinMacro() || !observed.nameLocation.isMacroID() ||
+          SM.isMacroArgExpansion(observed.nameLocation)) return false;
+      const auto slot=SM.getImmediateSpellingLoc(observed.nameLocation);
+      if (!slot.isFileID() || slot!=SM.getSpellingLoc(observed.nameLocation) || !nativeInput(slot)) return false;
+      const auto immediate=SM.getImmediateExpansionRange(observed.nameLocation);
+      if (!immediate.isTokenRange() || !immediate.getBegin().isFileID() || !immediate.getEnd().isFileID()) return false;
+      const auto after=clang::Lexer::getLocForEndOfToken(immediate.getEnd(),0,SM,getCompilerInstance().getLangOpts());
+      if (!after.isFileID() || SM.getFileID(immediate.getBegin())!=SM.getFileID(after)) return false;
+      const auto file=SM.getFileID(immediate.getBegin());
+      const unsigned begin=SM.getFileOffset(immediate.getBegin()),end=SM.getFileOffset(after);
+      const NvidiaSampleHelperMacroCandidate* candidate=nullptr;
+      for (const auto& value:nvidiaSampleHelperMacroCandidates)
+        if (value.invocationRange.file==file && value.invocationRange.beginOffset==begin && value.invocationRange.endOffset==end) {
+          if (candidate || !value.statusDomainProven || !value.nameLocation.isFileID() ||
+              !SM.isWrittenInMainFile(value.nameLocation)) return false;
+          candidate=&value;
+        }
+      if (!candidate) return false;
+      const llvm::StringRef expected=candidate->kind==NvidiaSampleHelperMacroKind::CheckCudaErrors ? "checkCudaErrors" : "getLastCudaError";
+      const ascify::DeviceNativeMacroUse* helper=nullptr;
+      for (const auto& use:deviceAggregateMacroEvidence.uses) {
+        if (use.name!=expected || use.nameLocation!=candidate->nameLocation) continue;
+        if (helper || !use.unambiguous || !use.definition ||
+            frozenNvidiaSampleHelperFileRole(SM,use.definition->getDefinitionLoc())!=FrozenOfficialNvidiaSampleHelperCuda ||
+            !activeNvidiaSampleHelperMacroBodyMatches(expected,*use.definition,PP)) return false;
+        helper=&use;
+      }
+      if (!helper) return false;
+      const auto tokens=helper->definition->tokens();
+      const unsigned index=candidate->kind==NvidiaSampleHelperMacroKind::CheckCudaErrors ?
+          (observed.name=="__FILE__"?9U:11U) : (observed.name=="__FILE__"?4U:6U);
+      if (index>=tokens.size() || tokens[index].getLocation()!=slot ||
+          PP.getSpelling(tokens[index])!=observed.name ||
+          helper->definition->getParameterNum(tokens[index].getIdentifierInfo())>=0) return false;
+      // The same actual PP callback must name this direct literal invocation.
+      if (helper->invocation.getBegin()!=immediate.getBegin() || helper->invocation.getEnd()!=immediate.getEnd()) return false;
+      deviceAggregateRequiredHelperOffsets.insert(begin);
+      return true;
+    };
+    const auto completeGuard = [&](clang::FileID file) {
+      if (!hasCompleteOuterGuardInFile(getCompilerInstance(),file)) return false;
+      const auto guard=findConventionalOuterGuardInFile(getCompilerInstance(),file);
+      if (guard.empty() || profilerMacroDefinitions[guard]!=1 || profilerMacroUndefinitions[guard]!=0) return false;
+      const auto* info=PP.getMacroInfo(PP.getIdentifierInfo(guard));
+      return info && !info->isFunctionLike() && info->getNumTokens()==0 &&
+          info->getDefinitionLoc().isFileID() && SM.getFileID(info->getDefinitionLoc())==file;
+    };
+    if (ordinary && context->depth==0) for (const auto& path:deviceAggregateResolvedIncludes) {
+      auto file=getCompilerInstance().getFileManager().getFileRef(path);
+      if (!file) { llvm::consumeError(file.takeError()); aggregateError="resolved caller input vanished";break; }
+      if (SM.translateFile(&file->getFileEntry()).isValid()) continue;
+      const bool trustedUnparsed=isConfiguredCudaSdkDependencyRole(path) ||
+          pathIsWithinPhysicalDirectory(path,ownedClangResourceDirectory()) ||
+          pathIsWithinPhysicalDirectory(path,"/usr/include") || pathIsWithinPhysicalDirectory(path,"/usr/lib/gcc");
+      if (!trustedUnparsed) {aggregateError="caller include has no entered original body/incoming-guard proof: "+path;break;}
+    }
+    if (!ordinary) aggregateError="requires an ordinary recursive physical project and unchanged inline/layout macros";
+    else if (!aggregateError.empty()) {}
+    else if (!ascify::AnalyzeDeviceAggregateInlining(getCompilerInstance(),
+        context->plan->rootSourcePath(),context->sourcePath,
+        [&](clang::SourceLocation location){return ownedPreservedMaxLocation(location);},
+        sdkInput,nativeInput,deviceAggregateMacroEvidence,helperDiagnostic,completeGuard,
+        context->depth==0?nullptr:&context->plan->deviceInlineFacts(),
+        context->depth==0?nullptr:&context->plan->deviceRegisterFactories(),analysis,aggregateError)) {}
+    else {
+      if (context->depth==0) {
+        std::vector<ascify::StandaloneDeviceIncludeEdge> edges;
+        for (const auto& item:deviceAggregateIncludeEdges) {
+          auto selected=getCompilerInstance().getFileManager().getFileRef(item.resolved);
+          if (!selected) {llvm::consumeError(selected.takeError());aggregateError="original include edge provider vanished";break;}
+          const auto child=SM.translateFile(&selected->getFileEntry());
+          if (child.isValid() && nativeInput(SM.getLocForStartOfFile(child))) continue;
+          if (!item.literal || !item.hash.isFileID() || child.isInvalid()) {aggregateError="retained caller include has no literal physical edge";break;}
+          const auto parent=SM.isWrittenInMainFile(item.hash)?context->sourcePath:SM.getFilename(item.hash).str();
+          edges.push_back({parent,item.resolved,item.spelling,item.search,SM.getFileOffset(item.hash),item.angled});
+        }
+        if (aggregateError.empty() && !ascify::RecordStandaloneCallerEdges(edges,aggregateError)) {}
+      }
+      if (aggregateError.empty() && context->depth==0 && !context->plan->recordDeviceInlineFacts(analysis))
+        aggregateError=context->plan->failureReason();
+      if (context->depth!=0 && context->plan->deviceInlineProjectStamp()!=analysis.projectStamp)
+        aggregateError="project inputs changed between root and selected header";
+      ct::Replacements staged(*replacements);
+      std::set<unsigned> guards;std::vector<ascify::DeviceAggregateInlineFact> applied;
+      for (const auto& fact:analysis.facts) {
+        if (fact.sourcePath!=context->sourcePath) continue;
+        const auto& expected=context->plan->deviceInlineFacts();
+        if (std::find(expected.begin(),expected.end(),fact)==expected.end()) {
+          aggregateError="selected helper differs from complete original root AST proof";break;
+        }
+        const auto start=SM.getLocForStartOfFile(SM.getMainFileID());
+        const auto anchor=start.getLocWithOffset(fact.insertOffset);
+        for (const auto& range:SemanticRewriteRanges)
+          if (range.file==SM.getMainFileID() && range.beginOffset<=fact.insertOffset &&
+              fact.insertOffset<range.endOffset) aggregateError="inline annotation overlaps a semantic transaction";
+        if (!aggregateError.empty() || !llcompat::insertReplacement(staged,
+            ct::Replacement(SM,anchor,0,"inline __attribute__((always_inline)) "),&aggregateError)) break;
+        if (guards.insert(fact.guardOffset).second) {
+          const std::string guard=" static_assert(sizeof(::"+fact.recordName+")=="+
+              std::to_string(fact.recordBytes)+" && alignof(::"+fact.recordName+")=="+
+              std::to_string(fact.recordAlign)+", \"Ascify aggregate layout contract\"); ";
+          if (!llcompat::insertReplacement(staged,ct::Replacement(SM,
+              start.getLocWithOffset(fact.guardOffset),0,guard),&aggregateError)) break;
+        }
+        applied.push_back(fact);
+      }
+      std::vector<ascify::DeviceRegisterTile32Fact> registerApplied;
+      for (const auto& fact:analysis.registerFactories) {
+        if (!aggregateError.empty()) break;
+        if (fact.sourcePath!=context->sourcePath) continue;
+        const auto& expected=context->plan->deviceRegisterFactories();
+        if (std::find(expected.begin(),expected.end(),fact)==expected.end()) {
+          aggregateError="selected register factory lacks complete original root proof";break;
+        }
+        const auto start=SM.getLocForStartOfFile(SM.getMainFileID());
+        const ct::Replacement factory(SM,start.getLocWithOffset(fact.beginOffset),
+            fact.endOffset-fact.beginOffset,"::ascify_cg::register_partition32_v1");
+        for (const auto& range:SemanticRewriteRanges)
+          if (range.file==SM.getMainFileID() && range.beginOffset<fact.endOffset && fact.beginOffset<range.endOffset)
+            aggregateError="register factory overlaps a semantic transaction";
+        ct::Replacements retained;
+        const auto bytes=SM.getBufferData(SM.getMainFileID());
+        for (const auto& edit:staged) {
+          const unsigned end=edit.getOffset()+edit.getLength();
+          if (edit.getFilePath()==factory.getFilePath() && edit.getOffset()<fact.endOffset && fact.beginOffset<end) {
+            // Absorb only the ordinary namespace token mapping already
+            // covered by the full literal callee replacement, never an edit
+            // in its argument or an unrelated semantic rewrite.
+            if (fact.beginOffset<=edit.getOffset() && end<=fact.endOffset &&
+                edit.getReplacementText()=="ascify_cg" && bytes.substr(edit.getOffset(),edit.getLength())=="cooperative_groups") continue;
+            aggregateError="register factory overlaps an unproved replacement";break;
+          }
+          if (!llcompat::insertReplacement(retained,edit,&aggregateError)) break;
+        }
+        if (!aggregateError.empty() || !llcompat::insertReplacement(retained,factory,&aggregateError)) break;
+        staged=std::move(retained);registerApplied.push_back(fact);
+      }
+      if (aggregateError.empty() && !registerApplied.empty()) {
+        const auto start=SM.getLocForStartOfFile(SM.getMainFileID());
+        llcompat::insertReplacement(staged,ct::Replacement(SM,start,0,
+            "#include <ascify/register_tile32_compat.hpp>\n"),&aggregateError);
+      }
+      if (aggregateError.empty()) {
+        *replacements=std::move(staged);
+        for (const auto& fact:registerApplied) context->plan->markDeviceRegisterApplied(fact);
+        for (const auto& fact:applied) context->plan->markDeviceInlineApplied(fact);
+        llvm::errs()<<"Ascify closed aggregate device helpers v1: definitions="<<applied.size()<<"\n";
+      }
+    }
+    if (!aggregateError.empty()) {
+      const auto diagnostic=getCompilerInstance().getDiagnostics().getCustomDiagID(
+          clang::DiagnosticsEngine::Error,"device aggregate inline boundary: %0");
+      getCompilerInstance().getDiagnostics().Report(diagnostic)<<aggregateError;
+      cudaRuntimeApiBoundaryFailed=true;return;
     }
   }
   // Every helper edit remains staged until the raw pass reaches EOF. Any

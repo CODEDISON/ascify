@@ -56,6 +56,8 @@ extern cl::opt<std::string> TargetPolicy;
 extern cl::opt<std::string> SimtMathMode;
 extern cl::opt<std::string> TargetRecipe;
 extern cl::opt<std::string> FrontendCompat;
+extern cl::opt<bool> StandaloneDeviceExecutable;
+extern cl::opt<std::string> StandaloneCannRoot;
 extern cl::opt<std::string> MigrationReceiptPath;
 extern const std::vector<std::string> ascifyOptions;
 extern const std::vector<std::string> ascifyOptionsWithTwoArgs;

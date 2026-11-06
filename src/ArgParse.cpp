@@ -167,6 +167,13 @@ cl::opt<std::string> FrontendCompat("frontend-compat",
   cl::init("none"),
   cl::cat(ToolTemplateCategory));
 
+cl::opt<bool> StandaloneDeviceExecutable("standalone-device-executable",
+  cl::desc("Build one owned CANN executable with the recursive output bundle; grants only that fixed target's bounded aggregate inlining"),
+  cl::init(false), cl::cat(ToolTemplateCategory));
+cl::opt<std::string> StandaloneCannRoot("standalone-cann-root",
+  cl::desc("Existing real CANN provider for the owned executable builder"),
+  cl::value_desc("directory"), cl::init("/usr/local/Ascend/cann-9.1.0"), cl::cat(ToolTemplateCategory));
+
 cl::opt<std::string> MigrationReceiptPath("migration-receipt",
   cl::desc("Atomically write a deterministic JSON migration receipt"),
   cl::value_desc("filename"),
@@ -210,6 +217,7 @@ const std::vector<std::string> ascifyOptions {
   std::string(AscifyAMAP.ArgStr),
   std::string(OptLocalHeaders.ArgStr),
   std::string(OptLocalHeadersRecursive.ArgStr),
+  std::string(StandaloneDeviceExecutable.ArgStr),
 };
 
 const std::vector<std::string> ascifyOptionsWithTwoArgs {
@@ -222,5 +230,6 @@ const std::vector<std::string> ascifyOptionsWithTwoArgs {
   std::string(SimtMathMode.ArgStr),
   std::string(TargetRecipe.ArgStr),
   std::string(FrontendCompat.ArgStr),
+  std::string(StandaloneCannRoot.ArgStr),
   std::string(MigrationReceiptPath.ArgStr),
 };

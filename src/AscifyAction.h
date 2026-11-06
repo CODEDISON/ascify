@@ -46,6 +46,7 @@ THE SOFTWARE.
 #include "KernelThreadBounds.h"
 #include "DynamicWarpGroups.h"
 #include "LocalHeader.h"
+#include "DeviceAggregateInlining.h"
 
 namespace ct = clang::tooling;
 namespace mat = clang::ast_matchers;
@@ -190,6 +191,15 @@ private:
   std::vector<CudaAttributeGuard> cudaAttributeGuards;
   bool cudaAttributeControlModified = false;
   bool deviceTemplateAttributeMacroConflict = false;
+  std::set<unsigned> deviceAggregateRequiredHelperOffsets;
+  bool deviceAggregateTokenMacroConflict = false;
+  ascify::DeviceNativeMacroEvidence deviceAggregateMacroEvidence;
+  std::set<std::string> deviceAggregateResolvedIncludes;
+  struct DeviceAggregateInclude {
+    clang::SourceLocation hash;clang::CharSourceRange range;
+    std::string spelling,resolved,search;bool angled=false,literal=false;
+  };
+  std::vector<DeviceAggregateInclude> deviceAggregateIncludeEdges;
   std::vector<SemanticRewriteRange> nvidiaSampleHelperMacroRanges;
   std::vector<NvidiaSampleHelperMacroCandidate>
       nvidiaSampleHelperMacroCandidates;

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "clang/Tooling/CommonOptionsParser.h"
+#include "DeviceAggregateInlining.h"
 
 namespace ct = clang::tooling;
 
@@ -159,6 +160,20 @@ class LocalHeaderClosurePlan {
   const std::string &rootSourcePath() const { return rootSourcePath_; }
   const std::string &rootArtifactPath() const { return rootArtifactPath_; }
   const std::string &bundlePath() const { return bundlePath_; }
+  const std::vector<ascify::DeviceAggregateInlineFact>& deviceInlineFacts() const { return deviceInlineFacts_; }
+  bool recordDeviceInlineFacts(const ascify::DeviceAggregateInlineAnalysis& analysis) {
+    const auto& facts=analysis.facts;
+    if (!deviceInlineProjectStamp_.empty() && deviceInlineProjectStamp_!=analysis.projectStamp) { fail("device inline project snapshot changed"); return false; }
+    deviceInlineProjectStamp_=analysis.projectStamp;
+    if (!deviceInlineFacts_.empty() && deviceInlineFacts_ != facts) { fail("device inline project facts changed"); return false; }
+    if (!deviceRegisterFactories_.empty() && deviceRegisterFactories_!=analysis.registerFactories) { fail("register factory project facts changed"); return false; }
+    deviceInlineFacts_=facts; deviceRegisterFactories_=analysis.registerFactories; return true;
+  }
+  void markDeviceInlineApplied(const ascify::DeviceAggregateInlineFact& fact) { deviceInlineApplied_.insert({fact.sourcePath,fact.functionOffset}); }
+  const std::vector<ascify::DeviceRegisterTile32Fact>& deviceRegisterFactories() const { return deviceRegisterFactories_; }
+  void markDeviceRegisterApplied(const ascify::DeviceRegisterTile32Fact& fact) { deviceRegisterApplied_.insert({fact.sourcePath,fact.beginOffset}); }
+  const std::string& deviceInlineProjectStamp() const { return deviceInlineProjectStamp_; }
+  bool allDeviceInlineApplied() const { return deviceInlineFacts_.size()==deviceInlineApplied_.size() && deviceRegisterFactories_.size()==deviceRegisterApplied_.size(); }
   bool isSelectedRootHeader(const std::string &path) const;
   void requireInheritedHelperContext(const std::string &path);
   const std::set<std::string> &inheritedHelperHeaders() const {
@@ -231,6 +246,11 @@ class LocalHeaderClosurePlan {
   std::vector<LocalHeaderContextInline> contextInlines_;
   bool failed_ = false;
   std::string failureReason_;
+  std::string deviceInlineProjectStamp_;
+  std::vector<ascify::DeviceAggregateInlineFact> deviceInlineFacts_;
+  std::vector<ascify::DeviceRegisterTile32Fact> deviceRegisterFactories_;
+  std::set<std::pair<std::string,unsigned>> deviceRegisterApplied_;
+  std::set<std::pair<std::string,unsigned>> deviceInlineApplied_;
 };
 
 struct LocalHeaderRewriteContext {

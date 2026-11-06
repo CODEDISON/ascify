@@ -1,4 +1,5 @@
 #include "LocalHeader.h"
+#include "StandaloneDeviceTarget.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -83,7 +84,8 @@ bool existsAndIsNonemptyRegular(const std::string &path) {
 }
 
 bool writeManifest(const std::string &path,
-                   const LocalHeaderClosurePlan &plan) {
+                   const LocalHeaderClosurePlan &plan,
+                   const std::vector<std::pair<std::string,std::string>>& deviceArtifacts = {}) {
   std::error_code ec;
   llvm::raw_fd_ostream out(path, ec);
   if (ec)
@@ -137,6 +139,8 @@ bool writeManifest(const std::string &path,
       out << "context_inline=" << item.sourcePath << "\t" << item.sourceSha256
           << "\t" << item.includeOffset << "\n";
   }
+  for (const auto& artifact : deviceArtifacts)
+    out << "device_artifact=" << artifact.first << "\t" << artifact.second << "\n";
   out.close();
   return !out.has_error();
 }
@@ -149,8 +153,42 @@ bool ownedBundle(const std::string &path) {
       !existsAndIsRegular(pathString(marker)))
     return false;
   std::string content;
-  return readFile(pathString(marker), content) &&
-         content.rfind("schema=1\n", 0) == 0;
+  if (!readFile(pathString(marker), content) || content.rfind("schema=1\n", 0) != 0)
+    return false;
+  // Device executable artifacts remain part of the same owned transaction.
+  // A marker alone cannot bless a foreign or changed .ascify-device tree.
+  const fs::path device = fs::path(path) / ".ascify-device";
+  std::error_code ec;
+  const auto deviceStatus = fs::symlink_status(device, ec);
+  const bool haveDevice = !ec && deviceStatus.type() != fs::file_type::not_found;
+  if (ec && ec != std::errc::no_such_file_or_directory) return false;
+  std::map<std::string,std::string> expected;
+  std::istringstream lines(content); std::string line;
+  while (std::getline(lines,line)) {
+    if (line.rfind("device_artifact=",0) != 0) continue;
+    const auto tab = line.find('\t');
+    if (tab == std::string::npos) return false;
+    const auto relative = line.substr(16,tab-16), digest = line.substr(tab+1);
+    const fs::path entry(relative);
+    if (relative.rfind(".ascify-device/",0) != 0 || entry.is_absolute() ||
+        entry.lexically_normal().generic_string() != relative ||
+        digest.size()!=64 || !std::all_of(digest.begin(),digest.end(),[](char c){return (c>='0'&&c<='9')||(c>='a'&&c<='f');}) ||
+        !expected.emplace(relative,digest).second) return false;
+    for (const auto& part : entry) if (part=="..") return false;
+  }
+  if (!haveDevice) return expected.empty();
+  if (fs::is_symlink(deviceStatus) || !fs::is_directory(deviceStatus) || expected.empty()) return false;
+  std::set<std::string> observed; ec.clear();
+  for (fs::recursive_directory_iterator it(device,ec),end;!ec&&it!=end;it.increment(ec)) {
+    if (it->is_symlink(ec)) return false;
+    if (it->is_directory(ec)) continue;
+    if (!it->is_regular_file(ec)) return false;
+    const auto relative=it->path().lexically_relative(path).generic_string();
+    const auto found=expected.find(relative); std::string bytes;
+    if (found==expected.end() || !readFile(pathString(it->path()),bytes) || inputSha256(bytes)!=found->second) return false;
+    observed.insert(relative);
+  }
+  return !ec && observed.size()==expected.size();
 }
 
 bool inspectPath(const std::string &path,
@@ -1087,6 +1125,13 @@ bool ascifySourceWithLocalHeaderClosure(
       inplace ? fs::path(mainSourceAbsPath + ".ascify-headers")
               : fs::path(pathString(finalRoot) + ".headers");
 
+  if (StandaloneDeviceExecutable) {
+    std::string error;
+    if (!recursive || inplace || analysisOnly || TargetPolicy!="dav-c310-vec" || TargetRecipe!="none" ||
+        !ascify::PrepareStandaloneDeviceTarget(mainSourceAbsPath,pathString(finalRoot),pathString(finalBundle),ascify_exe,error)) {
+      llvm::errs()<<sAscify<<sError<<"standalone target preparation: "<<error<<"\n";return false;
+    }
+  }
   LocalHeaderClosurePlan plan(
       mainSourceAbsPath, pathString(finalRoot), pathString(finalBundle),
       recursive ? LocalHeaderClosureMode::Recursive
@@ -1550,6 +1595,15 @@ bool ascifySourceWithLocalHeaderClosure(
     plan.markStaged(index);
   }
 
+  if (StandaloneDeviceExecutable) {
+    std::string error;
+    if (!plan.allDeviceInlineApplied() || plan.deviceInlineProjectStamp().empty() ||
+        !ascify::ValidateDeviceInlineProjectSnapshot(plan.rootSourcePath(),
+            plan.deviceInlineProjectStamp(),error)) {
+      llvm::errs()<<sAscify<<sError<<"device inline project transaction incomplete/changed: "<<error<<"\n";
+      llvm::sys::fs::remove_directories(stagingRoot);return false;
+    }
+  }
   if (!plan.verifyContextInputs() || !plan.validateArtifactIsolation(inplace)) {
     llvm::errs() << sAscify << sError
                  << "Local-header artifact isolation failed: "
@@ -1567,17 +1621,34 @@ bool ascifySourceWithLocalHeaderClosure(
     return false;
   }
 
+  if (StandaloneDeviceExecutable) {
+    std::string error;
+    std::vector<std::pair<std::string,std::string>> translatedHeaders;
+    for (const auto& node : plan.nodes()) translatedHeaders.emplace_back(node.sourcePath,node.artifactRelativePath);
+    if (!plan.hasPublishedBundle() || !ascify::BuildStandaloneDeviceTarget(pathString(stagedRoot),pathString(stagedBundle),translatedHeaders,error)) {
+      llvm::errs()<<sAscify<<sError<<"standalone target build: "<<error<<"\n";
+      // Failed compiler evidence remains in this private staging directory.
+      return false;
+    }
+  }
   if (analysisOnly) {
     llvm::sys::fs::remove_directories(stagingRoot);
     return true;
   }
 
+  std::vector<std::pair<std::string,std::string>> deviceArtifacts;
+  if (StandaloneDeviceExecutable) {
+    std::string error;
+    if (!ascify::GetStandaloneDeviceArtifacts(pathString(stagedBundle),deviceArtifacts,error)) {
+      llvm::errs()<<sAscify<<sError<<"standalone artifact sealing: "<<error<<"\n";return false;
+    }
+  }
   if (plan.hasPublishedBundle()) {
     const std::error_code bundleEc = llvm::sys::fs::create_directories(
         pathString(stagedBundle));
     if (bundleEc ||
         !writeManifest(pathString(stagedBundle /
-                                  ".ascify-local-closure"), plan)) {
+                                  ".ascify-local-closure"), plan, deviceArtifacts)) {
       llvm::errs() << sAscify << sError
                    << "Cannot write local-header closure manifest\n";
       llvm::sys::fs::remove_directories(stagingRoot);
@@ -1585,6 +1656,12 @@ bool ascifySourceWithLocalHeaderClosure(
     }
   }
 
+  if (StandaloneDeviceExecutable) {
+    std::string error;std::vector<std::pair<std::string,std::string>> checkedArtifacts;
+    if (!plan.verifyContextInputs() || !ascify::GetStandaloneDeviceArtifacts(pathString(stagedBundle),checkedArtifacts,error)) {
+      llvm::errs()<<sAscify<<sError<<"standalone publication snapshot changed: "<<error<<"\n";return false;
+    }
+  }
   if (!publishClosure(pathString(stagedRoot), pathString(stagedBundle),
                       pathString(finalRoot), pathString(finalBundle),
                       plan.hasPublishedBundle())) {
