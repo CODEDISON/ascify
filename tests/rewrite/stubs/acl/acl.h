@@ -22,6 +22,9 @@ aclError aclrtLaunchHostFunc(aclrtStream, aclrtHostFunc, void*);
 aclError aclrtDeviceCanAccessPeer(int32_t*, int32_t, int32_t);
 aclError aclrtDeviceEnablePeerAccess(int32_t, uint32_t);
 aclError aclrtDeviceDisablePeerAccess(int32_t);
+// Exact native 9.1 prototypes; unit definitions provide controlled CPU results.
+aclError aclrtDeviceGetStreamPriorityRange(int32_t*, int32_t*);
+aclError aclrtCreateStreamWithConfig(aclrtStream*, uint32_t, uint32_t);
 #if !defined(ASCIFY_TEST_PUBLIC_85_ACL)
 enum aclrtStreamStatus {
   ACL_STREAM_STATUS_COMPLETE = 0,

@@ -1,0 +1,149 @@
+{
+  "schema": "ascify.StreamPriorities.root-original-acceptance.v1",
+  "passed": true,
+  "reviewer": "root",
+  "updated_utc": "2026-11-07T02:49:15.951325+00:00",
+  "original_sample": "StreamPriorities",
+  "strict_CUDA_Samples_version": "v13.0",
+  "original_upstream_commit": "3f1c50965017932fc81e6d94a3fc9e04c105b312",
+  "original_source_edits": 0,
+  "original_source_sha256": "0b1eff9fde84fef6f4e261edde75d2a07729468fe59437259786adf0d574b00b",
+  "product_source_commit": "271c4b5abce37214027a0bb050b93a877378ee69",
+  "source_files": 688,
+  "source_manifest_sha256": "0bbac3f9e18f802b82e34ca834730322be5ebc93f87bcbe5e036e38bae7fba51",
+  "binary_sha256": "8d9537f115ad2d06eaeb9cff2e5b4fb7b541810dcb4a155fa41c8de08a0e7b3b",
+  "program_sha256": "4c6a448aface6a17671334341ca7977bcc816278f9c2e3444809c42cbd45a196",
+  "complete_original_target_O2_linked": true,
+  "ordinary_conversion": true,
+  "compile_units": 1,
+  "device_objects_linked": 1,
+  "user_device_archives": 0,
+  "RDC_preserved": true,
+  "upstream_CMake_executed": false,
+  "upstream_CMake_preserved": true,
+  "build_boundary": "Unchanged complete original CU, ordinary conversion, fixed one-object O2 CANN target adapter; original aarch64 CMake skip was preserved, not executed or counted as upstream CMake success.",
+  "original_algorithm_constants_and_workloads_preserved": true,
+  "original_workload": {
+    "host_buffers": 4,
+    "device_buffers": 4,
+    "bytes_each": 268435456,
+    "named_priority_streams": 2,
+    "events": 4,
+    "launches": 4,
+    "blocks": 1024,
+    "threads": 512,
+    "launch_count_evidence": "Original unchanged two-iteration/two-stream loop; no device trace hooks"
+  },
+  "actual_original_CLI_PID": 4116395,
+  "actual_original_CLI_returncode": 0,
+  "actual_formal_NPU_PID": 4124146,
+  "formal_NPU_invocations": 1,
+  "actual_NPU_returncode": 0,
+  "actual_NPU_seconds": 8.866751899942756,
+  "runtime_visible_device": 0,
+  "physical_chip": 2,
+  "platform": "Ascend950DT",
+  "CANN_version": "9.1.0",
+  "elements_checked": 134217728,
+  "exact_integer_match": true,
+  "total_actual_D2H_bytes": 536870912,
+  "capture_records": [
+    {
+      "sequence": 0,
+      "role": "low",
+      "bytes": 268435456,
+      "checked_signed_int32": 67108864,
+      "payload_sha256": "dd35184592035e35706106862e5f431a5a1f9868354055b970e2d4bb6f18ba05",
+      "record_sha256": "12cdf5e16d20b876f0fed8ab016c124fb04c6de5c966c0e36174e0fbd39963c6",
+      "payload_fnv64": 8962900451144758053
+    },
+    {
+      "sequence": 1,
+      "role": "high",
+      "bytes": 268435456,
+      "checked_signed_int32": 67108864,
+      "payload_sha256": "dd35184592035e35706106862e5f431a5a1f9868354055b970e2d4bb6f18ba05",
+      "record_sha256": "bd0446664cbd14334af8f68805291a5af1ff70f6db02fad5d22ab9b02bdd335b",
+      "payload_fnv64": 8962900451144758053
+    }
+  ],
+  "numeric_formula": "Each of two complete outputs equals signed int32[i], i=0..67108863.",
+  "original_full_memcmp_passed": 2,
+  "original_priority_range": {
+    "LOW": 7,
+    "HI": 0
+  },
+  "original_elapsed_time_ms": {
+    "LOW": 2.28,
+    "HI": 2.725
+  },
+  "priority_performance_order_required": false,
+  "performance_claim": false,
+  "native_priority_readbacks": [
+    0,
+    7
+  ],
+  "native_flags": 0,
+  "added_ACL_calls": 0,
+  "added_synchronization_calls": 0,
+  "all_actual_inputs_unchanged": true,
+  "before_and_after_healthy_idle": true,
+  "native_validation": {
+    "actual_O3_instances": 42,
+    "fresh": 3,
+    "retained": 39,
+    "install_payload_files": 332,
+    "CTest": 4,
+    "O0_debt": 0,
+    "all_passed": true
+  },
+  "CPU_regression": {
+    "logical_cases": 307,
+    "supplemental_legacy_processes": 2,
+    "additional_dynamic_ABI_calls": 30,
+    "additional_embedded_Clang_calls": 26,
+    "expectation_changes": 0,
+    "all_current_product_checks_passed": true
+  },
+  "vector_counts_after": [
+    19,
+    38
+  ],
+  "vector_scope_unchanged": true,
+  "core_counts_after": [
+    35,
+    75
+  ],
+  "core_compute": 28,
+  "core_Runtime": 7,
+  "strict_v13_0_accepted_after": 42,
+  "remaining_to45": 10,
+  "historical_union_is_same_product_revalidation": false,
+  "current_product_new_original_names": [
+    "StreamPriorities"
+  ],
+  "P2P_acceptances_added": 0,
+  "evidence_references": {
+    "streampriorities_native_v1/actual_native_O3_v1/summary.json": "1a54cc91634f13b1c418b4b3262032aa1cf39548d03d2634e8687ed447ebcbaf",
+    "streampriorities_native_v1/root_native_acceptance_v1.json": "8d4563c186fb70648f27d04ed12c66aa9b63c6b1f2012a5022168e3d8b6009ef",
+    "streampriorities_native_v1/peer_native_O3_readback_v1.json": "048f3ae2dba6d492815146b57b4e3be14239705e21272731325cd98b04fadc48",
+    "streampriorities_source_validity_v1/actual_v1/summary.json": "6a0c112992c81878901cdd6192abfbb29327176caf29e89744e992715a2a8d4a",
+    "streampriorities_source_validity_v1/peer_original_source_validity_actual_v1.json": "572643ed7ef3d589472cefd071bf39b197f7088a98af05d1a4ccc4424304a657",
+    "streampriorities_original_CPU_v1/actual_v1/summary.json": "5b532a71d3d76e5ada25b678e0384d1acbe5a96e8de04fe419d29fc7ae7442bd",
+    "streampriorities_original_CPU_v1/peer_original_CPU_readback_v1.json": "84fb411a25fc682c28cab9cd351ea976480dd3cb61fe63138ecec204b155179c",
+    "streampriorities_sync_observer_v1/CPU_actual_v1/summary.json": "20194cc9ce9b86c71413cae4bf1cdcd918a7494e708531b4eb47bb6e1e4e1960",
+    "streampriorities_sync_observer_v1/peer_CPU_actual_readback_v1.json": "c42401fc33fe415e570f4a9a1cd6f46df0be2db46ec4e67e59726833ab17cd71",
+    "streampriorities_device_v1/actual_v1/summary.json": "d5a3c464d946170d14712f4d92c7cd40d2e658a7556e87cc308f935fec2d770c",
+    "streampriorities_device_v1/actual_v1/independent_numeric_validation.json": "ff320ec2d3dba5ef95d1ec6ff7df82cb271d1f1be4869ef50fb1206f88f49160",
+    "streampriorities_device_v1/peer_actual_device_readback_v1.json": "163dc2490c38a5b97e119e63d5bbe54207e29f8b1e7fea560d509af8e9a4bc67",
+    "streampriorities_regression_v1/regression/summary.json": "f7e613d87aea0e31c4fad4d8c756855f13968f5ae8b10dc4337803e956221d95",
+    "streampriorities_regression_v1/peer_regression307_readback_v1.json": "d1daa579f4e6a2faa5782b2e923d36ca65d598f466a1ffdae87b506fcda35cec",
+    "streampriorities_regression_v1/additional_dynamic19_controller_v1/summary.json": "75d4afd567c9e663e4217c392e0cec28799270254fdb175cf05a1d5c465a6ff4",
+    "streampriorities_regression_v1/additional_ABI11_controller_v1/summary.json": "cf170976c41c1878f12a146c9a1d2988b389398217a41e7ce8416c4a5b2e55b9",
+    "streampriorities_regression_v1/peer_additional30_readback_v1.json": "fca023ca6e084a730d691b046c2b8b71452694f90da0fceab547e00839899065"
+  },
+  "large_artifacts_downloaded": false,
+  "scope": "Complete unchanged original StreamPriorities on this source/product/toolchain/workload only. Historical sample union spans products; original vector38 scope excludes StreamPriorities.",
+  "full_evidence_retained_on_validation_host": true,
+  "authoritative_Root_receipt_sha256": "3d96c1771d4bf2366e2558692366073b0a565762fdced47cbd307fa99c10ed74"
+}

@@ -86,6 +86,8 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   // subset needed by OneFlow's dynamic-UB selection code.
   m["cudaFuncGetAttributes"]                                   = {"ascify::cudaFuncGetAttributes",                          CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
   m["cudaFuncSetAttribute"]                                    = {"ascify::cudaFuncSetAttribute",                           CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
+  m["cudaDeviceGetStreamPriorityRange"] = {"ascify::cudaDeviceGetStreamPriorityRange", CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
+  m["cudaStreamCreateWithPriority"] = {"ascify::cudaStreamCreateWithPriority", CONV_STREAM, API_RUNTIME, SEC::STREAM};
   // Stream management
   m["cudaStreamCreate"]                                        = {"ascify::cudaStreamCreate",                               CONV_STREAM, API_RUNTIME, SEC::STREAM};
   m["cudaStreamCreateWithFlags"]                               = {"ascify::cudaStreamCreateWithFlags",                      CONV_STREAM, API_RUNTIME, SEC::STREAM};

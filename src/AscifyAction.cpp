@@ -794,12 +794,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 93993)
+  if (contents.size() != 96938)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "d1ad59c649ffcb5a5b46693fb4116a241775c37c45069c0e41756cc387f76fee");
+      "70148deac6b2de9b7985412a8926984b0e18719a296fc10b7d3335127dd5784e");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -826,12 +826,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 93993)
+  if (invalidBuffer || contents.size() != 96938)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "d1ad59c649ffcb5a5b46693fb4116a241775c37c45069c0e41756cc387f76fee");
+      "70148deac6b2de9b7985412a8926984b0e18719a296fc10b7d3335127dd5784e");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -870,6 +870,10 @@ static bool allFunctionRedeclarationsComeFromInitiallyTrustedSystemFiles(
     const clang::FunctionDecl *callee,
     clang::SourceManager &sourceManager,
     const std::set<unsigned> &trustedSystemFileIds);
+
+static bool sdkCudaPriorityDeclaration(
+    const clang::FunctionDecl *function, clang::SourceManager &source,
+    const std::set<unsigned> &trusted);
 
 bool isAdmittedCudaRuntimeStatusCall(
     clang::SourceManager &sourceManager,
@@ -911,6 +915,7 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaDeviceSynchronize", "cudaDeviceReset",
       "cudaFuncGetAttributes", "cudaFuncSetAttribute",
       "cudaStreamCreate", "cudaStreamCreateWithFlags",
+      "cudaDeviceGetStreamPriorityRange", "cudaStreamCreateWithPriority",
       "cudaStreamDestroy", "cudaStreamSynchronize",
       "cudaStreamQuery", "cudaStreamWaitEvent",
       "cudaEventCreate", "cudaEventDestroy", "cudaEventRecord",
@@ -927,6 +932,10 @@ bool isAdmittedCudaRuntimeStatusCall(
   if (mapped == CUDA_RENAMES_MAP().end() ||
       mapped->second.apiType != API_RUNTIME ||
       !mapped->second.dppName.starts_with("ascify::"))
+    return false;
+  if ((name == "cudaDeviceGetStreamPriorityRange" ||
+       name == "cudaStreamCreateWithPriority") &&
+      !sdkCudaPriorityDeclaration(callee, sourceManager, trustedSystemFileIds))
     return false;
   const clang::SourceLocation declarationLocation = callee->getLocation();
   return declarationLocation.isValid() &&
@@ -2328,6 +2337,8 @@ static bool requiresCudaCompatHeader(llvm::StringRef name) {
          name == "__all_sync" ||
          name == "cudaStreamCreate" ||
          name == "cudaStreamCreateWithFlags" ||
+         name == "cudaDeviceGetStreamPriorityRange" ||
+         name == "cudaStreamCreateWithPriority" ||
          name == "cudaStreamDefault" ||
          name == "cudaStreamNonBlocking" ||
          name == "cudaStreamLegacy" ||
@@ -3146,6 +3157,66 @@ static bool allFunctionRedeclarationsComeFromInitiallyTrustedSystemFiles(
     if (!functionDeclarationComesFromInitiallyTrustedSystemFile(
             redecl, sourceManager, trustedSystemFileIds))
       return false;
+  }
+  return true;
+}
+
+// Exact SDK status/prototype proof for the two added priority entrypoints.
+// This does not broaden Runtime-header projection or any caller-source seal.
+static bool sdkCudaPriorityDeclaration(
+    const clang::FunctionDecl *function, clang::SourceManager &source,
+    const std::set<unsigned> &trusted) {
+  if (!function || !function->getIdentifier() ||
+      !function->getDeclContext()->getRedeclContext()->isTranslationUnit() ||
+      function->getQualifiedNameAsString() != function->getNameAsString() ||
+      function->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      !function->isExternC() || function->isVariadic() ||
+      !allFunctionRedeclarationsComeFromInitiallyTrustedSystemFiles(function,source,trusted))
+    return false;
+  const bool range=function->getName()=="cudaDeviceGetStreamPriorityRange";
+  if (!range && function->getName()!="cudaStreamCreateWithPriority") return false;
+  auto &context=function->getASTContext();
+  const auto physicalSdk=[&](clang::SourceLocation at) {
+    if (at.isInvalid() || !at.isFileID()) return false;
+    const auto *entry=source.getFileEntryForID(source.getFileID(at));
+    const auto path=source.getFilename(at);
+    return entry && trusted.count(source.getFileID(at).getHashValue()) &&
+        pathIsWithinConfiguredCudaInclude(path) && physicalSourceFileMatches(path,*entry,source);
+  };
+  for (const auto *declaration:function->getCanonicalDecl()->redecls()) {
+    if (declaration->doesThisDeclarationHaveABody() || declaration->isVariadic() ||
+        declaration->getNumParams()!=(range?2U:3U) ||
+        !physicalSdk(declaration->getLocation()) ||
+        !isConfiguredCudaRuntimeApiPath(source.getFilename(declaration->getLocation()),source))
+      return false;
+    const auto *type=declaration->getReturnType()->getAs<clang::EnumType>();
+    const auto *status=type?type->getDecl():nullptr;
+    if (!status || !status->getIdentifier() || status->getName()!="cudaError" ||
+        !status->getDeclContext()->getRedeclContext()->isTranslationUnit()) return false;
+    for (const auto *redecl:status->redecls())
+      if (!physicalSdk(redecl->getLocation())) return false;
+    if (range) {
+      for (const auto *parameter:declaration->parameters()) {
+        auto pointer=parameter->getType();
+        if (pointer.isNull() || pointer.getCVRQualifiers() || !pointer->isPointerType() ||
+            !context.hasSameType(pointer->getPointeeType(),context.IntTy)) return false;
+      }
+    } else {
+      auto pointer=declaration->getParamDecl(0)->getType();
+      for (unsigned level=0;level!=2;++level) {
+        if (pointer.isNull() || pointer.getCVRQualifiers() || !pointer->isPointerType()) return false;
+        pointer=pointer->getPointeeType();
+      }
+      const auto *type=pointer.isNull()?nullptr:pointer->getAs<clang::RecordType>();
+      const auto *stream=type?type->getDecl():nullptr;
+      if (!stream || pointer.getCVRQualifiers() || !stream->getIdentifier() ||
+          stream->getName()!="CUstream_st" || stream->getDefinition() ||
+          !stream->getDeclContext()->getRedeclContext()->isTranslationUnit() ||
+          !context.hasSameType(declaration->getParamDecl(1)->getType(),context.UnsignedIntTy) ||
+          !context.hasSameType(declaration->getParamDecl(2)->getType(),context.IntTy)) return false;
+      for (const auto *redecl:stream->redecls())
+        if (!physicalSdk(redecl->getLocation())) return false;
+    }
   }
   return true;
 }

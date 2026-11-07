@@ -1197,6 +1197,68 @@ inline aclError cudaStreamCreateWithFlags(
   return cudaStreamCreate(stream);
 }
 
+// Exact fragment inserted in namespace ascify, after cudaStreamCreateWithFlags.
+// CPU units include this same fragment after the unchanged public d9 header.
+inline aclError cudaDeviceGetStreamPriorityRange(int* least_priority,
+                                                int* greatest_priority) {
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3) && \
+    defined(ACL_MAJOR_VERSION) && defined(ACL_MINOR_VERSION) && \
+    defined(ACL_PATCH_VERSION) && ACL_MAJOR_VERSION == 1 && \
+    ACL_MINOR_VERSION == 17 && ACL_PATCH_VERSION == 0
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  int32_t least = -1;
+  int32_t greatest = -1;
+  const aclError status = aclrtDeviceGetStreamPriorityRange(&least, &greatest);
+  if (status != ACL_SUCCESS) { return status; }
+  // The reviewed 9.1 ABI supports 0..7, with smaller values higher priority.
+  // Commit neither caller output if the native range is invalid or unavailable.
+  if (greatest < 0 || least < greatest || least > 7) {
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  }
+  if (least_priority != nullptr) { *least_priority = static_cast<int>(least); }
+  if (greatest_priority != nullptr) { *greatest_priority = static_cast<int>(greatest); }
+  return ACL_SUCCESS;
+#else
+  (void)least_priority;
+  (void)greatest_priority;
+  return ACL_ERROR_FEATURE_UNSUPPORTED;
+#endif
+}
+
+inline aclError cudaStreamCreateWithPriority(aclrtStream* stream,
+                                            unsigned int flags, int priority) {
+  if (stream == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
+  *stream = nullptr;
+  // This new entry admits named nonblocking streams only. It does not add
+  // legacy-default ordering to the existing ordinary runtime profile.
+  if (flags == cudaStreamDefault) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  if (flags != cudaStreamNonBlocking) { return ACL_ERROR_RT_PARAM_INVALID; }
+#if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3) && \
+    defined(ACL_MAJOR_VERSION) && defined(ACL_MINOR_VERSION) && \
+    defined(ACL_PATCH_VERSION) && ACL_MAJOR_VERSION == 1 && \
+    ACL_MINOR_VERSION == 17 && ACL_PATCH_VERSION == 0
+  int least = -1;
+  int greatest = -1;
+  const aclError range_status = cudaDeviceGetStreamPriorityRange(&least, &greatest);
+  if (range_status != ACL_SUCCESS) { return range_status; }
+  if (priority < greatest) { priority = greatest; }
+  if (priority > least) { priority = least; }
+  aclrtStream created = nullptr;
+  // All streams in this reviewed Runtime are nonblocking. CUDA flag 1 is
+  // never copied to ACL bit 0, which denotes FAST_LAUNCH, not ordering.
+  const aclError status = aclrtCreateStreamWithConfig(
+      &created, static_cast<uint32_t>(priority), 0U);
+  if (status != ACL_SUCCESS) { return status; }
+  if (created == nullptr) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  *stream = created;
+  return ACL_SUCCESS;
+#else
+  (void)priority;
+  return ACL_ERROR_FEATURE_UNSUPPORTED;
+#endif
+}
+
 inline aclError cudaStreamDestroy(aclrtStream stream) {
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
