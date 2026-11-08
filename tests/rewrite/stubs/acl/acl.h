@@ -88,6 +88,15 @@ enum aclrtEventRecordedStatus {
 typedef void* aclrtBinary;
 typedef void* aclrtBinHandle;
 typedef void* aclrtFuncHandle;
+enum aclrtCallbackBlockType { ACL_CALLBACK_NO_BLOCK, ACL_CALLBACK_BLOCK };
+typedef void* aclrtContext;
+// The counting stub models a context-creation failure so the runtime-manager
+// fallback (plain per-thread SetDevice) stays exercised; real targets take
+// the shared-context path above.
+inline aclError aclrtCreateContext(aclrtContext*, int32_t) {
+  return ACL_ERROR_FEATURE_UNSUPPORTED;
+}
+inline aclError aclrtSetCurrentContext(aclrtContext) { return ACL_SUCCESS; }
 extern int ascify_test_binary_load_calls;
 extern int ascify_test_binary_get_function_calls;
 extern const char* ascify_test_get_function_name;
@@ -335,6 +344,27 @@ inline aclError aclrtDestroyBinary(aclrtBinary binary) {
   return binary == nullptr ? ACL_ERROR_RT_PARAM_INVALID : ACL_SUCCESS;
 }
 
+extern int ascify_test_launch_callback_calls;
+extern int ascify_test_subscribe_report_calls;
+extern void* ascify_test_callback_user_data;
+extern aclError ascify_test_callback_status;
+typedef void (*aclrtCallback)(void*);
+inline aclError aclrtSubscribeReport(uint64_t, aclrtStream stream) {
+  ++ascify_test_subscribe_report_calls;
+  return stream == nullptr ? ACL_ERROR_RT_PARAM_INVALID
+                           : ascify_test_callback_status;
+}
+
+inline aclError aclrtProcessReport(int32_t) { return ascify_test_callback_status; }
+
+inline aclError aclrtLaunchCallback(aclrtCallback fn, void* userData,
+                                    aclrtCallbackBlockType, aclrtStream stream) {
+  ++ascify_test_launch_callback_calls;
+  ascify_test_callback_user_data = userData;
+  if (fn == nullptr || stream == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  return ascify_test_callback_status;
+}
+
 inline aclError aclrtBinaryGetFunction(aclrtBinHandle handle,
                                        const char* kernel_name,
                                        aclrtFuncHandle* function) {
@@ -439,6 +469,9 @@ inline aclError aclrtHostGetDevicePointer(void* host_pointer,
   return ACL_SUCCESS;
 }
 inline aclrtBinary aclrtCreateBinary(const void*, size_t) { return (aclrtBinary)0x1; }
+inline aclError aclrtSubscribeReport(uint64_t, aclrtStream) { return ACL_SUCCESS; }
+inline aclError aclrtProcessReport(int32_t) { return ACL_SUCCESS; }
+inline aclError aclrtLaunchCallback(void (*fn)(void*), void*, aclrtCallbackBlockType, aclrtStream) { (void)fn; return ACL_SUCCESS; }
 inline aclError aclrtBinaryLoad(aclrtBinary, aclrtBinHandle* handle) { *handle = (aclrtBinHandle)0x2; return ACL_SUCCESS; }
 inline aclError aclrtBinaryUnLoad(aclrtBinHandle) { return ACL_SUCCESS; }
 inline aclError aclrtDestroyBinary(aclrtBinary) { return ACL_SUCCESS; }

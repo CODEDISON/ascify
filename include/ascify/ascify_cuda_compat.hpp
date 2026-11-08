@@ -1,6 +1,10 @@
 #ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP
 #define ASCIFY_ASCIFY_CUDA_COMPAT_HPP
 
+// Host-thread creation for the stream-callback worker, declared before any
+// standard include so the C signatures cannot interact with later headers.
+
+
 #include <algorithm>
 #include <atomic>
 #include <fstream>
@@ -13,9 +17,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <type_traits>
+#include <pthread.h>
 
 #include <acl/acl.h>
 #include <acl/acl_prof.h>
+
 
 #if defined(ASCIFY_TEST_CONTROLLABLE_EXIT_REGISTRATION)
 extern int ascify_test_register_exit_cleanup(void (*callback)());
@@ -558,6 +564,19 @@ class RuntimeManager {
     if (initialization_status_ != ACL_SUCCESS) {
       return initialization_status_;
     }
+    // CUDA's primary context is shared with every host thread; the native
+    // rtSetDevice blocks when many sample threads re-bind concurrently. Bind
+    // once, then hand additional threads the same context explicitly.
+    for (size_t index = 0; index < active_device_count_; ++index) {
+      if (active_devices_[index].device == device) {
+        if (active_devices_[index].context != nullptr) {
+          return aclrtSetCurrentContext(active_devices_[index].context);
+        }
+        // No explicit context exists (creation unsupported): fall back to a
+        // plain re-bind, which is the original per-thread behaviour.
+        return aclrtSetDevice(device);
+      }
+    }
     const aclError status = aclrtSetDevice(device);
     if (!device_cleanup_registered_) {
       // CANN's profiling singleton can be constructed lazily by SetDevice,
@@ -585,7 +604,7 @@ class RuntimeManager {
     }
     if (status != ACL_SUCCESS) { return status; }
     for (size_t index = 0; index < active_device_count_; ++index) {
-      if (active_devices_[index] == device) { return ACL_SUCCESS; }
+      if (active_devices_[index].device == device) { return ACL_SUCCESS; }
     }
 
     if (active_device_count_ == kTrackedDeviceCapacity) {
@@ -595,7 +614,9 @@ class RuntimeManager {
       const aclError rollback = aclrtResetDevice(device);
       return rollback == ACL_SUCCESS ? ACL_ERROR_BAD_ALLOC : rollback;
     }
-    active_devices_[active_device_count_++] = device;
+    aclrtContext created = nullptr;
+    if (aclrtCreateContext(&created, device) != ACL_SUCCESS) { created = nullptr; }
+    active_devices_[active_device_count_++] = {device, created};
     return ACL_SUCCESS;
   }
 
@@ -611,7 +632,7 @@ class RuntimeManager {
     const aclError status = aclrtResetDevice(device);
     if (status == ACL_SUCCESS) {
       for (size_t index = 0; index < active_device_count_; ++index) {
-        if (active_devices_[index] == device) {
+        if (active_devices_[index].device == device) {
           for (size_t next = index + 1; next < active_device_count_; ++next) {
             active_devices_[next - 1] = active_devices_[next];
           }
@@ -633,7 +654,7 @@ class RuntimeManager {
       shutdown_ = true;
       device_count = active_device_count_;
       for (size_t index = 0; index < device_count; ++index) {
-        devices[index] = active_devices_[index];
+        devices[index] = active_devices_[index].device;
       }
       active_device_count_ = 0;
       finalize = owns_acl_initialization_;
@@ -673,7 +694,8 @@ class RuntimeManager {
   bool cleanup_registered_ = false;
   bool device_cleanup_registered_ = false;
   aclError initialization_status_ = ACL_SUCCESS;
-  int32_t active_devices_[kTrackedDeviceCapacity] = {};
+  struct BoundDevice { int32_t device = -1; aclrtContext context = nullptr; };
+  BoundDevice active_devices_[kTrackedDeviceCapacity] = {};
   size_t active_device_count_ = 0;
 };
 
@@ -2129,6 +2151,146 @@ inline constexpr CUdevice_attribute CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT = 3
 inline constexpr CUdevice_attribute CU_DEVICE_ATTRIBUTE_CLOCK_RATE = 4;
 inline constexpr CUdevice_attribute CU_DEVICE_ATTRIBUTE_INTEGRATED = 5;
 inline constexpr CUdevice_attribute CU_DEVICE_ATTRIBUTE_COMPUTE_MODE = 6;
+
+// ---- CUDA legacy stream callbacks (simpleCallback line) --------------------
+// cudaStreamAddCallback schedules a host callback that runs after all work
+// already submitted to the stream, with the status of the preceding stream
+// operations. The native surface is aclrtSubscribeReport (a dedicated
+// reporting thread per stream) plus aclrtLaunchCallback (a callback task in
+// the stream queue); the trampoline below preserves the CUDA callback
+// signature and forwards a non-consuming last-error snapshot exactly like
+// the CUDA status parameter contract documents for successful streams.
+typedef void (*cudaStreamCallback_t)(aclrtStream stream, int status,
+                                     void *userData);
+
+extern "C" unsigned long pthread_self(void);
+
+namespace detail {
+
+struct StreamCallbackTicket {
+  aclrtStream stream;
+  cudaStreamCallback_t callback;
+  void *userData;
+};
+
+inline void streamCallbackTrampoline(void *data) {
+  StreamCallbackTicket *const ticket =
+      static_cast<StreamCallbackTicket *>(data);
+  const aclrtStream stream = ticket->stream;
+  const cudaStreamCallback_t callback = ticket->callback;
+  void *const userData = ticket->userData;
+  free(ticket);
+  // CUDA hands the callback the status of the preceding stream work. The
+  // consuming thread-level query is the real last-error surface here; a
+  // completed clean stream reports SUCCESS exactly like CUDA.
+  callback(stream, cudaGetLastError(), userData);
+}
+
+// CUDA executes stream callbacks on an internal thread automatically. The
+// native surface instead needs one subscribed thread that keeps calling
+// aclrtProcessReport. A dedicated process-wide worker thread owns every
+// stream subscription; producer threads only enqueue the stream once. The
+// worker subscribes with its own thread id and then drains callback reports
+// with a bounded poll, so sample main threads never block on reports.
+struct CallbackWorker {
+  detail::RuntimeLock lock;
+  bool started = false;
+  bool stopping = false;
+  aclrtStream pending[64] = {};
+  size_t pendingCount = 0;
+  aclrtStream subscribedByWorker[64] = {};
+  size_t subscribedByWorkerCount = 0;
+};
+inline CallbackWorker &callbackWorker() {
+  static CallbackWorker worker;
+  return worker;
+}
+inline void *callbackWorkerLoop(void *) {
+  const uint64_t self = static_cast<uint64_t>(pthread_self());
+  while (true) {
+    aclrtStream todo[64];
+    size_t count = 0;
+    bool stopping = false;
+    {
+      detail::RuntimeLockGuard guard(callbackWorker().lock);
+      stopping = callbackWorker().stopping;
+      for (size_t i = 0; i < callbackWorker().pendingCount && count < 64; ++i)
+        todo[count++] = callbackWorker().pending[i];
+      callbackWorker().pendingCount = 0;
+    }
+    if (stopping && count == 0 &&
+        callbackWorker().subscribedByWorkerCount == 0) break;
+    for (size_t i = 0; i < count; ++i) {
+      bool known = false;
+      for (size_t k = 0; k < callbackWorker().subscribedByWorkerCount; ++k)
+        known = known ||
+            callbackWorker().subscribedByWorker[k] == todo[i];
+      if (known) continue;
+      if (callbackWorker().subscribedByWorkerCount == 64) break;
+      if (aclrtSubscribeReport(self, todo[i]) == 0) {
+        detail::RuntimeLockGuard guard(callbackWorker().lock);
+        callbackWorker().subscribedByWorker[
+            callbackWorker().subscribedByWorkerCount++] = todo[i];
+      }
+    }
+    aclrtProcessReport(100);
+  }
+  return nullptr;
+}
+
+inline aclError ensureStreamCallbackSubscription(aclrtStream stream) {
+  detail::RuntimeLockGuard guard(callbackWorker().lock);
+  if (!callbackWorker().started) {
+    callbackWorker().started = true;
+    pthread_t thread = 0;
+    if (pthread_create(&thread, nullptr, callbackWorkerLoop, nullptr) != 0) {
+      callbackWorker().started = false;
+      return ACL_ERROR_BAD_ALLOC;
+    }
+    pthread_detach(thread);
+  }
+  if (callbackWorker().pendingCount == 64) return ACL_ERROR_BAD_ALLOC;
+  callbackWorker().pending[callbackWorker().pendingCount++] = stream;
+  // The native launch checks that the stream is already registered, so wait
+  // bounded for the worker's subscription to complete before returning.
+  for (int spin = 0; spin < 2000000; ++spin) {
+    bool ready = false;
+    {
+      detail::RuntimeLockGuard guard(callbackWorker().lock);
+      for (size_t k = 0; k < callbackWorker().subscribedByWorkerCount; ++k)
+        ready = ready ||
+            callbackWorker().subscribedByWorker[k] == stream;
+    }
+    if (ready) return ACL_SUCCESS;
+    struct timespec pause = {0, 1000};
+    nanosleep(&pause, nullptr);
+  }
+  return ACL_ERROR_RT_PARAM_INVALID;
+}
+
+}  // namespace detail
+
+inline aclError cudaStreamAddCallback(aclrtStream stream,
+                                      cudaStreamCallback_t callback,
+                                      void *userData, unsigned int flags) {
+  if (callback == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
+  if (flags != 0U) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  const aclError subscribed =
+      detail::ensureStreamCallbackSubscription(stream);
+  if (subscribed != ACL_SUCCESS) { return subscribed; }
+  detail::StreamCallbackTicket *ticket = static_cast<detail::StreamCallbackTicket *>(
+      calloc(1, sizeof(detail::StreamCallbackTicket)));
+  if (ticket == nullptr) { return ACL_ERROR_BAD_ALLOC; }
+  ticket->stream = stream;
+  ticket->callback = callback;
+  ticket->userData = userData;
+  const aclError status = aclrtLaunchCallback(
+      detail::streamCallbackTrampoline, ticket, ACL_CALLBACK_NO_BLOCK, stream);
+  if (status != ACL_SUCCESS) { free(ticket); }
+  return status;
+}
 
 // helper_cuda_drvapi.h checkCudaErrors analogue: the DRV macro is a plain
 // three-argument wrapper, mirrored here with the same exit behaviour.

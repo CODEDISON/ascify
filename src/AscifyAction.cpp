@@ -826,12 +826,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 125550)
+  if (contents.size() != 132328)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "05ef38f3dde2e50ef94864854665c4378ca2d5489ab7b5a1f8c657f1ba8c269f");
+      "ba71595ff2049892202a81d918f521a6f619608671a3ebe90181e35fa5a1f011");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -858,12 +858,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 125550)
+  if (invalidBuffer || contents.size() != 132328)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "05ef38f3dde2e50ef94864854665c4378ca2d5489ab7b5a1f8c657f1ba8c269f");
+      "ba71595ff2049892202a81d918f521a6f619608671a3ebe90181e35fa5a1f011");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -955,7 +955,7 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cuMemcpyHtoD_v2", "cuMemcpyDtoH_v2",
       "cuMemcpyHtoD_v2_ptds", "cuMemcpyDtoH_v2_ptds",
       "cudaProfilerStart", "cudaProfilerStop",
-      "cudaLaunchHostFunc",
+      "cudaLaunchHostFunc", "cudaStreamAddCallback",
       "cudaFreeHost", "cudaGetDevice", "cudaSetDevice",
       "cudaGetDeviceCount", "cudaDeviceGetAttribute",
       "cudaDeviceCanAccessPeer", "cudaDeviceEnablePeerAccess",
@@ -4333,6 +4333,51 @@ static bool isAdmittedHostRuntimeStatusForwarder(
 // The original sortingNetworks host stores each Runtime result immediately
 // before checking it. Prove that one definition-to-use edge; the variable's
 // spelling or enum type alone does not establish an ACL return domain.
+// A CUDA stream-callback body checks its own cudaError_t status parameter:
+// `void CUDART_CB myStreamCallback(cudaStream_t, cudaError_t, void*)` with
+// `checkCudaErrors(status)`. The value domain of that parameter is exactly
+// what our rewritten cudaStreamAddCallback trampoline passes (a last-error
+// snapshot), so admitting precisely the (stream, cudaError, data) callback
+// shape's second parameter is an honest status-domain proof.
+static bool isAdmittedStreamCallbackStatusParameter(
+    const clang::CallExpr *check, clang::ASTContext &context,
+    clang::SourceManager &sourceManager,
+    const std::set<unsigned> &trustedSystemFileIds) {
+  if (check == nullptr || check->getNumArgs() == 0)
+    return false;
+  const auto *reference = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
+      stripParenAndImplicitCasts(check->getArg(0)));
+  const auto *parameter = reference == nullptr ? nullptr :
+      llvm::dyn_cast_or_null<clang::ParmVarDecl>(reference->getDecl());
+  if (parameter == nullptr || parameter->hasAttrs() ||
+      !sourceManager.isWrittenInMainFile(parameter->getLocation()))
+    return false;
+  const auto *enumeration = parameter->getType()->getAs<clang::EnumType>();
+  if (enumeration == nullptr ||
+      enumeration->getDecl()->getName() != "cudaError" ||
+      !locationComesFromInitiallyTrustedSystemFile(
+          sourceManager, enumeration->getDecl()->getLocation(),
+          trustedSystemFileIds))
+    return false;
+  const clang::FunctionDecl *owner = llvm::dyn_cast_or_null<clang::FunctionDecl>(
+      parameter->getDeclContext());
+  if (owner == nullptr || !owner->hasBody() ||
+      owner->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      owner->hasAttr<clang::CUDADeviceAttr>() ||
+      owner->hasAttr<clang::CUDAGlobalAttr>() ||
+      owner->getNumParams() != 3 ||
+      parameter != owner->getParamDecl(1) ||
+      !sourceManager.isWrittenInMainFile(owner->getLocation()))
+    return false;
+  // (cudaStream_t -> pointer, cudaError_t, void*) shape after rewrites.
+  const clang::Type *streamParameter =
+      owner->getParamDecl(0)->getType().getTypePtrOrNull();
+  const clang::Type *dataParameter =
+      owner->getParamDecl(2)->getType().getTypePtrOrNull();
+  return streamParameter != nullptr && streamParameter->isPointerType() &&
+         dataParameter != nullptr && dataParameter->isVoidPointerType();
+}
+
 static bool isAdmittedNvidiaLocalStatusUse(
     const clang::CallExpr *check, clang::ASTContext &context,
     clang::SourceManager &sourceManager,
@@ -4736,7 +4781,9 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
         candidate->statusDomainProven = isAdmittedCudaRuntimeStatusCall(
               sourceManager, expression->getArg(0), trustedSystemFileIds) ||
             isAdmittedNvidiaLocalStatusUse(
-              expression, astContext, sourceManager, trustedSystemFileIds, preprocessor, localHeaders);
+              expression, astContext, sourceManager, trustedSystemFileIds, preprocessor, localHeaders) ||
+            isAdmittedStreamCallbackStatusParameter(
+              expression, astContext, sourceManager, trustedSystemFileIds);
       // A dependent check/cudaMemcpy/cudaFree lookup cannot be proved by its
       // spelling. Remember the pattern and audit its instantiated ASTs below;
       // any accepted template receives an explicit output type-domain guard.

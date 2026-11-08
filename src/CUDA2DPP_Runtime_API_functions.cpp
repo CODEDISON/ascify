@@ -47,6 +47,7 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   m["cudaProfilerStart"] = {"ascify::cudaProfilerStart", CONV_PROFILER, API_RUNTIME, 0};
   m["cudaProfilerStop"] = {"ascify::cudaProfilerStop", CONV_PROFILER, API_RUNTIME, 0};
   m["cudaLaunchHostFunc"] = {"ascify::cudaLaunchHostFunc", CONV_EXECUTION, API_RUNTIME, 0};
+  m["cudaStreamAddCallback"] = {"ascify::cudaStreamAddCallback", CONV_EXECUTION, API_RUNTIME, 0};
   m["cudaFreeHost"]                                            = {"ascify::cudaFreeHost",                                   CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   // Mapped/pinned host memory (CUDA zero-copy) and device flags; see
   // ascify_cuda_compat.hpp for the native ACL mapping contracts.
