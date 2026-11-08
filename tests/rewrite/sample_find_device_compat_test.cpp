@@ -62,9 +62,13 @@ int main(int argc, char** argv) {
     (void)ascify::sampleFindCudaDevice(1, sample_argv);
   }
   if (std::strcmp(argv[1], "multiple-devices") == 0) {
+    // Multi-visible environments now select logical device zero (the epoch
+    // performance tier) instead of failing; zero visible devices still does.
     ascify_test_device_count = 2;
     const char* sample_argv[] = {"sample"};
-    (void)ascify::sampleFindCudaDevice(1, sample_argv);
+    const int selected = ascify::sampleFindCudaDevice(1, sample_argv);
+    assertSuccessfulSelection(selected);
+    return 0;
   }
   if (std::strcmp(argv[1], "other-device") == 0) {
     const char* sample_argv[] = {"sample", "--device=1"};

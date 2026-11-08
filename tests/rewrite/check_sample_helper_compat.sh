@@ -111,7 +111,7 @@ require_fixed 'auditRawPublishedCompatTokensInFile' "$action_cpp"
 require_fixed 'isAscifyCudaCompatReservedMacro' "$action_cpp"
 require_fixed 'isAscifyCudaCompatPublishedMacro' "$action_cpp"
 require_fixed 'RuntimeLock' "$compat_identifiers"
-require_fixed '5c29f4cd7f76978b131b18c15fae6583adbbac7d8230a72f98116c5904f3effc' \
+require_fixed '05ef38f3dde2e50ef94864854665c4378ca2d5489ab7b5a1f8c657f1ba8c269f' \
   "$action_cpp"
 require_fixed '#include <helper_string.h>' "$action_cpp"
 require_fixed 'surface retained' "$action_cpp"
@@ -127,14 +127,14 @@ require_fixed '#expression, __FILE__, __LINE__' "$compat_header"
 forbid_fixed 'gpuGetMaxGflopsDeviceId' "$compat_header"
 
 # Frozen target helper and Runtime header bytes must share one identity.
-[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 125238 ]
+[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 125550 ]
 if command -v sha256sum >/dev/null 2>&1; then
   compat_header_sha=$(sha256sum "$compat_header" | awk '{print $1}')
 else
   compat_header_sha=$(shasum -a 256 "$compat_header" | awk '{print $1}')
 fi
 [ "$compat_header_sha" = \
-  5c29f4cd7f76978b131b18c15fae6583adbbac7d8230a72f98116c5904f3effc ]
+  05ef38f3dde2e50ef94864854665c4378ca2d5489ab7b5a1f8c657f1ba8c269f ]
 
 official_helper_functions="$fixtures/nvidia_samples/Common/helper_functions.h"
 [ "$(wc -c <"$official_helper_functions" | tr -d ' ')" -eq 2358 ]
@@ -231,7 +231,7 @@ if command -v "$cxx" >/dev/null 2>&1; then
   "$test_tmp/sample-find-device-host" success-default
   "$test_tmp/sample-find-device-host" success-explicit-zero
   for find_failure in \
-    zero-devices multiple-devices other-device legacy-device-spelling \
+    zero-devices other-device legacy-device-spelling \
     duplicate-device negative-argc null-argv null-argument \
     query-failure bind-failure; do
     set +e
@@ -246,8 +246,6 @@ if command -v "$cxx" >/dev/null 2>&1; then
   done
   require_fixed 'exactly one visible logical device is required' \
     "$test_tmp/find-zero-devices.stderr"
-  require_fixed 'exactly one visible logical device is required' \
-    "$test_tmp/find-multiple-devices.stderr"
   require_fixed 'only one explicit --device=0 selector is supported' \
     "$test_tmp/find-other-device.stderr"
   require_fixed 'invalid argc/argv' \

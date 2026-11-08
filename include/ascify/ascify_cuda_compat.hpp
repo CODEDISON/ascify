@@ -1887,10 +1887,14 @@ inline int sampleFindCudaDevice(int argc, const char** argv) {
     detail::sampleFindCudaDeviceFailure(
         "device-count query failed", count_status);
   }
-  if (count != 1) {
+  if (count < 1) {
     detail::sampleFindCudaDeviceFailure(
         "exactly one visible logical device is required", ACL_SUCCESS);
   }
+  // The original helper ranks visible devices by GFLOPS and picks the fastest.
+  // This porting layer documents one uniform epoch performance tier, so any
+  // non-empty visible set selects logical device zero; --device=0 stays the
+  // one explicit selector, and other ordinals keep failing exactly as before.
 
   const aclError bind_status = cudaSetDevice(0);
   if (bind_status != ACL_SUCCESS) {
