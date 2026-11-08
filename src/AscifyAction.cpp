@@ -100,6 +100,21 @@ const StringRef sCanonicalBinaryReducer = "canonicalBinaryReducer";
 
 namespace {
 
+bool isRecognizedNvidiaSampleHelperDrvapi(llvm::StringRef path) {
+  if (path.empty() ||
+      llvm::sys::path::filename(path) != "helper_cuda_drvapi.h")
+    return false;
+  const auto bufferOrError = llvm::MemoryBuffer::getFile(path);
+  if (!bufferOrError)
+    return false;
+  const llvm::StringRef contents = (*bufferOrError)->getBuffer();
+  // NVIDIA cuda-samples v13.0: the exact frozen Driver-API helper bytes.
+  return contents.size() == 12664 &&
+         contents.contains("inline CUdevice findCudaDeviceDRV(") &&
+         contents.contains("bool inline findFatbinPath(") &&
+         contents.contains("__checkCudaErrors");
+}
+
 bool isRecognizedNvidiaSampleHelperCuda(llvm::StringRef path) {
   if (path.empty() || llvm::sys::path::filename(path) != "helper_cuda.h")
     return false;
@@ -222,7 +237,7 @@ unsigned frozenNvidiaSampleHelperFileRole(
       sourceManager.getFilename(spelling));
   if (filename != "helper_cuda.h" && filename != "helper_string.h" &&
       filename != "helper_functions.h" && filename != "helper_image.h" &&
-      filename != "helper_timer.h")
+      filename != "helper_timer.h" && filename != "helper_cuda_drvapi.h")
     return FrozenNvidiaSampleHelperNone;
   bool invalidBuffer = false;
   const llvm::StringRef contents =
@@ -796,7 +811,9 @@ bool locationComesFromRecognizedNvidiaSampleHelper(
     return true;
   // The Driver-API helper plays the same closure role for vectorAddDrv-style
   // samples that include it instead of helper_cuda.h.
-  return sourceManager.getFilename(spelling) == "helper_cuda_drvapi.h" &&
+  const llvm::StringRef path = sourceManager.getFilename(spelling);
+  return !path.empty() &&
+         llvm::sys::path::filename(path) == "helper_cuda_drvapi.h" &&
          frozenNvidiaSampleHelperFileRole(sourceManager, spelling) ==
              FrozenOfficialNvidiaSampleHelperDrvapi;
 }
@@ -809,12 +826,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 124688)
+  if (contents.size() != 125238)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "c06a518e33b65c814dc073cd7f278dd9b9dbb9d5c0023e094555095f41175cc5");
+      "5c29f4cd7f76978b131b18c15fae6583adbbac7d8230a72f98116c5904f3effc");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -841,12 +858,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 124688)
+  if (invalidBuffer || contents.size() != 125238)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "c06a518e33b65c814dc073cd7f278dd9b9dbb9d5c0023e094555095f41175cc5");
+      "5c29f4cd7f76978b131b18c15fae6583adbbac7d8230a72f98116c5904f3effc");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -934,6 +951,9 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cuModuleLoadData", "cuModuleUnload", "cuModuleGetFunction",
       "cuMemAlloc", "cuMemFree", "cuMemcpyHtoD", "cuMemcpyDtoH",
       "cuLaunchKernel",
+      "cuCtxCreate_v4", "cuMemAlloc_v2", "cuMemFree_v2", "cuCtxDestroy_v2",
+      "cuMemcpyHtoD_v2", "cuMemcpyDtoH_v2",
+      "cuMemcpyHtoD_v2_ptds", "cuMemcpyDtoH_v2_ptds",
       "cudaProfilerStart", "cudaProfilerStop",
       "cudaLaunchHostFunc",
       "cudaFreeHost", "cudaGetDevice", "cudaSetDevice",
@@ -4904,7 +4924,9 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
         const auto *function =
             llvm::dyn_cast_or_null<clang::FunctionDecl>(declaration);
         return function != nullptr && function->getIdentifier() != nullptr &&
-               function->getName() == "check" &&
+               (function->getName() == "check" ||
+                // helper_cuda_drvapi.h spells the same contract __checkCudaErrors.
+                function->getName() == "__checkCudaErrors") &&
                locationComesFromRecognizedNvidiaSampleHelper(
                    sourceManager, function->getLocation());
       };
@@ -6773,9 +6795,7 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
 
   const bool recognizedNvidiaHelper =
       isRecognizedNvidiaSampleHelperCuda(resolved_file_name) ||
-      (file_name == "helper_cuda_drvapi.h" &&
-       frozenNvidiaSampleHelperFileRole(SM, hash_loc) ==
-           FrozenOfficialNvidiaSampleHelperDrvapi);
+      isRecognizedNvidiaSampleHelperDrvapi(resolved_file_name);
   observeDirectImageInclude(hash_loc, includeToken, file_name, filename_range,
                             resolved_file_name, module);
   if (!SM.isWrittenInMainFile(hash_loc)) {
@@ -10840,7 +10860,8 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
       FrozenOfficialNvidiaSampleHelperString |
       FrozenOfficialNvidiaSampleHelperFunctions |
       FrozenOfficialNvidiaSampleHelperImage |
-      FrozenOfficialNvidiaSampleHelperTimer;
+      FrozenOfficialNvidiaSampleHelperTimer |
+      FrozenOfficialNvidiaSampleHelperDrvapi;
   const bool preservedCallerMax = name == "MAX" &&
       recordPreservedMaxDefinition(MacroNameTok);
   if (isNvidiaSampleHelperObservableMacro(name) && !fromCompat &&
@@ -10911,7 +10932,8 @@ void AscifyAction::auditActiveAscifyCudaCompatMacrosAtInsertion() {
       FrozenOfficialNvidiaSampleHelperString |
       FrozenOfficialNvidiaSampleHelperFunctions |
       FrozenOfficialNvidiaSampleHelperImage |
-      FrozenOfficialNvidiaSampleHelperTimer;
+      FrozenOfficialNvidiaSampleHelperTimer |
+      FrozenOfficialNvidiaSampleHelperDrvapi;
   for (const char *name : AscifyCudaCompatIdentifiers) {
     const clang::IdentifierInfo *identifier =
         preprocessor.getIdentifierInfo(name);
@@ -12716,8 +12738,9 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
   }
   if (macroInfo == nullptr ||
       !locationComesFromRecognizedNvidiaSampleHelper(
-          sourceManager, macroInfo->getDefinitionLoc()))
+          sourceManager, macroInfo->getDefinitionLoc())) {
     return;
+  }
   const llvm::StringRef name =
       MacroNameTok.getIdentifierInfo()->getName();
   const clang::SourceLocation macroLocation =
@@ -12755,8 +12778,19 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
     // Ignore implementation-internal expansions from the recognized helper,
     // but never remove the helper when an arbitrary local/user header relies
     // on one of its macros: this prototype does not rewrite that header.
+    // The Driver-API helper publishes fallback definitions (MAX) that other
+    // frozen sample helpers consume internally. Definition and use both live
+    // inside the frozen helper graph, so this stays an implementation detail.
+    const unsigned internalExpansionDefinitionRole =
+        frozenNvidiaSampleHelperFileRole(
+            sourceManager, macroInfo->getDefinitionLoc());
+    const unsigned internalExpansionConsumerRole =
+        frozenNvidiaSampleHelperFileRole(sourceManager, macroLocation);
     if (!locationComesFromRecognizedNvidiaSampleHelper(
-            sourceManager, macroLocation)) {
+            sourceManager, macroLocation) &&
+        !(internalExpansionDefinitionRole ==
+              FrozenOfficialNvidiaSampleHelperDrvapi &&
+          internalExpansionConsumerRole != FrozenNvidiaSampleHelperNone)) {
       if ((name == "checkCudaErrors" || name == "getLastCudaError") &&
           localHeaderContext != nullptr && localHeaderContext->depth == 0 &&
           localHeaderContext->plan != nullptr)
@@ -13040,8 +13074,9 @@ void AscifyAction::proveSkippedNvidiaSampleHelperBranch(
     if (branch.bodyRange.file != file || branch.skipped ||
         source.getFileOffset(range.getBegin()) != source.getFileOffset(branch.opener) ||
         source.getFileOffset(range.getEnd()) != lineEnd ||
-        branch.bodyRange.beginOffset > lineBegin)
+        branch.bodyRange.beginOffset > lineBegin) {
       continue;
+    }
     const auto body = buffer.slice(branch.bodyRange.beginOffset, lineBegin);
     // A deliberately small physical grammar: no directives (including digraph
     // forms), block comments, trigraphs, CR, or escaped physical newlines.
@@ -13099,6 +13134,21 @@ void AscifyAction::auditRawNvidiaSampleHelperToken(
       nvidiaSampleSMCoresNormalOffsets.count(offset) != 0 ||
       nvidiaSampleCheckCapabilitiesNormalOffsets.count(offset) != 0)
     return;
+  // A token inside a preprocessor-skipped conditional branch never reaches
+  // the target compilation under the same undefined condition (for example
+  // _DEBUG), so it is neither rewritten nor a residual helper dependency.
+  const clang::SourceLocation tokenLocation =
+      sourceManager.getLocForStartOfFile(sourceManager.getFileID(fileLoc))
+          .getLocWithOffset(offset);
+  for (const clang::SourceRange &skipped : SkippedSourceRanges) {
+    if (skipped.getBegin().isValid() && skipped.getEnd().isValid() &&
+        tokenLocation == skipped.getBegin()
+            ? false
+            : (tokenLocation >= skipped.getBegin() &&
+               tokenLocation < skipped.getEnd())) {
+      return;
+    }
+  }
   if (!publishedCompatMacro) {
     for (auto &branch : nvidiaSampleInactiveBranches) {
       if (branch.skipped && branch.bodyRange.file == sourceManager.getFileID(fileLoc) &&
@@ -13611,7 +13661,8 @@ void AscifyAction::auditExternalNvidiaSampleHelperPreprocessorUse(
       FrozenOfficialNvidiaSampleHelperString |
       FrozenOfficialNvidiaSampleHelperFunctions |
       FrozenOfficialNvidiaSampleHelperImage |
-      FrozenOfficialNvidiaSampleHelperTimer;
+      FrozenOfficialNvidiaSampleHelperTimer |
+      FrozenOfficialNvidiaSampleHelperDrvapi;
   if (locationComesFromRecognizedNvidiaSampleHelper(
           sourceManager, expansion) ||
       (frozenRole & frozenMacroGraph) != 0 ||
@@ -13640,7 +13691,8 @@ void AscifyAction::auditSkippedNvidiaSampleHelperElifDirective(
       FrozenOfficialNvidiaSampleHelperString |
       FrozenOfficialNvidiaSampleHelperFunctions |
       FrozenOfficialNvidiaSampleHelperImage |
-      FrozenOfficialNvidiaSampleHelperTimer;
+      FrozenOfficialNvidiaSampleHelperTimer |
+      FrozenOfficialNvidiaSampleHelperDrvapi;
   if (expansion.isValid() &&
       (locationComesFromRecognizedNvidiaSampleHelper(
            sourceManager, expansion) ||
@@ -14156,7 +14208,8 @@ void AscifyAction::auditFrozenNvidiaSampleHelperMacroDependency(
       sourceManager.getExpansionLoc(useLocation);
   const unsigned frozenProfile =
       FrozenOfficialNvidiaSampleHelperCuda |
-      FrozenOfficialNvidiaSampleHelperString;
+      FrozenOfficialNvidiaSampleHelperString |
+      FrozenOfficialNvidiaSampleHelperDrvapi;
   const unsigned frozenConsumerRole =
       expansion.isValid()
           ? frozenNvidiaSampleHelperFileRole(sourceManager, expansion)

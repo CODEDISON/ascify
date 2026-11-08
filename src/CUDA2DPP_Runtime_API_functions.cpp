@@ -74,6 +74,17 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   m["cuMemcpyHtoD"] = {"ascify::cuMemcpyHtoD", CONV_MEMORY, API_DRIVER, 0};
   m["cuMemcpyDtoH"] = {"ascify::cuMemcpyDtoH", CONV_MEMORY, API_DRIVER, 0};
   m["cuLaunchKernel"] = {"ascify::cuLaunchKernel", CONV_EXECUTION, API_DRIVER, 0};
+  // CUDA SDK version macros (cuda.h) rename several Driver entry points at
+  // preprocessing time; the AST therefore sees these _v2/_v4 spellings. Map
+  // each to the same reviewed implementation.
+  m["cuCtxCreate_v4"] = {"ascify::cuCtxCreate", CONV_DEVICE, API_DRIVER, 0};
+  m["cuMemAlloc_v2"] = {"ascify::cuMemAlloc", CONV_MEMORY, API_DRIVER, 0};
+  m["cuMemFree_v2"] = {"ascify::cuMemFree", CONV_MEMORY, API_DRIVER, 0};
+  m["cuMemcpyHtoD_v2"] = {"ascify::cuMemcpyHtoD", CONV_MEMORY, API_DRIVER, 0};
+  m["cuMemcpyDtoH_v2"] = {"ascify::cuMemcpyDtoH", CONV_MEMORY, API_DRIVER, 0};
+  m["cuCtxDestroy_v2"] = {"ascify::cuCtxDestroy", CONV_DEVICE, API_DRIVER, 0};
+  m["cuMemcpyHtoD_v2_ptds"] = {"ascify::cuMemcpyHtoD", CONV_MEMORY, API_DRIVER, 0};
+  m["cuMemcpyDtoH_v2_ptds"] = {"ascify::cuMemcpyDtoH", CONV_MEMORY, API_DRIVER, 0};
   // Bounded texture/storage surface, guarded by CudaTextureBoundary.
   m["cudaMallocPitch"] = {"ascify::cudaMallocPitch", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["cudaMallocArray"] = {"ascify::cudaMallocArray", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};

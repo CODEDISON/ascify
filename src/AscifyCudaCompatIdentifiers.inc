@@ -634,6 +634,7 @@
     "distance",
     "double",
     "dpitch",
+    "drained",
     "drv",
     "dst",
     "dstArray",

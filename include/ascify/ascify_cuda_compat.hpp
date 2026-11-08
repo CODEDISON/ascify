@@ -2323,10 +2323,17 @@ inline aclError cuMemAlloc(CUdeviceptr *pointer, size_t bytes) {
 
 inline aclError cuMemFree(CUdeviceptr pointer) { return cudaFree(pointer); }
 
+// CUDA's synchronous Driver copies are ordered against the legacy default
+// stream: a copy observes every task that was submitted before it. The ACL
+// synchronous memcpy does not promise that ordering against pending kernels,
+// so drain the device first; samples on the NULL stream keep their
+// single-stream sequential semantics exactly.
 inline aclError cuMemcpyHtoD(CUdeviceptr destination, const void *source,
                              size_t bytes) {
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
+  const aclError drained = aclrtSynchronizeDevice();
+  if (drained != ACL_SUCCESS) { return drained; }
   return aclrtMemcpy(destination, bytes, source, bytes,
                      ACL_MEMCPY_HOST_TO_DEVICE);
 }
@@ -2335,6 +2342,8 @@ inline aclError cuMemcpyDtoH(void *destination, CUdeviceptr source,
                              size_t bytes) {
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
+  const aclError drained = aclrtSynchronizeDevice();
+  if (drained != ACL_SUCCESS) { return drained; }
   return aclrtMemcpy(destination, bytes, source, bytes,
                      ACL_MEMCPY_DEVICE_TO_HOST);
 }
