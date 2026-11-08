@@ -206,6 +206,7 @@ private:
   std::vector<NvidiaSampleFindDeviceCandidate>
       nvidiaSampleFindDeviceCandidates;
   std::vector<NvidiaSampleSMCoresCandidate> nvidiaSampleSMCoresCandidates;
+  std::vector<NvidiaSampleSMCoresCandidate> nvidiaSampleCheckCapabilitiesCandidates;
   std::vector<NvidiaSampleExpandedMacroCandidate> nvidiaSampleExpandedMacros;
   std::vector<SemanticRewriteRange> nvidiaSampleMacroObservationRanges;
   struct PreservedMaxFallback {
@@ -290,6 +291,7 @@ private:
   std::set<unsigned> nvidiaSampleHelperNormalMacroOffsets;
   std::set<unsigned> nvidiaSampleFindDeviceNormalOffsets;
   std::set<unsigned> nvidiaSampleSMCoresNormalOffsets;
+  std::set<unsigned> nvidiaSampleCheckCapabilitiesNormalOffsets;
   bool nvidiaSampleSMCoresUnsupportedUse = false;
   std::vector<bool> nvidiaSampleHelperCudaFileStack;
   std::vector<clang::FileID> nvidiaSampleRetainedFileIds;

@@ -2039,6 +2039,60 @@ inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) 
   return ACL_SUCCESS;
 }
 
+// NVIDIA sample-helper _ConvertSMVer2ArchName informational table, kept for
+// the ported checkCudaCapabilities printf. Values are the original sample
+// table; on this layer they only label the reported epoch pair.
+inline const char* sampleSMVersionArchName(int major, int minor) {
+  switch ((major << 4) + minor) {
+    case 0x30: case 0x32: case 0x35: case 0x37: return "Kepler";
+    case 0x50: case 0x52: case 0x53: return "Maxwell";
+    case 0x60: case 0x61: case 0x62: return "Pascal";
+    case 0x70: return "Volta";
+    case 0x72: return "Xavier";
+    case 0x75: return "Turing";
+    case 0x80: case 0x86: case 0x87: return "Ampere";
+    case 0x89: return "Ada";
+    case 0x90: return "Hopper";
+    case 0xa0: case 0xa1: case 0xa3: case 0xb0: case 0xc0: case 0xc1:
+      return "Blackwell";
+    default: return "Graphics Device";
+  }
+}
+
+// NVIDIA sample-helper checkCudaCapabilities, ported to the epoch surface:
+// the decision compares the same reviewed epoch fields exposed by
+// cudaGetDeviceProperties (never a fabricated NVIDIA SM readout) and keeps
+// the helper's informational printfs.
+inline bool sampleCheckCudaCapabilities(int major_version, int minor_version) {
+  int device = 0;
+  const aclError device_status = cudaGetDevice(&device);
+  if (device_status != ACL_SUCCESS) {
+    sampleCheckCudaErrors(device_status, "cudaGetDevice", __FILE__, __LINE__);
+    return false;
+  }
+  cudaDeviceProp properties = {};
+  const aclError status = cudaGetDeviceProperties(&properties, device);
+  if (status != ACL_SUCCESS) {
+    sampleCheckCudaErrors(status, "cudaGetDeviceProperties", __FILE__,
+                          __LINE__);
+    return false;
+  }
+  if ((properties.major > major_version) ||
+      (properties.major == major_version &&
+       properties.minor >= minor_version)) {
+    printf("  Device %d: <%16s >, Compute SM %d.%d detected\n", device,
+           sampleSMVersionArchName(properties.major, properties.minor),
+           properties.major, properties.minor);
+    return true;
+  }
+  printf(
+      "  No GPU device was found that can support "
+      "CUDA compute capability %d.%d.\n",
+      major_version, minor_version);
+  return false;
+}
+
+
 // CUDA's API has no arguments. CANN requires the error scope explicitly.
 inline aclError cudaPeekAtLastError() {
   const aclError pending = detail::pendingLifecycleErrorForThread();

@@ -794,12 +794,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 105302)
+  if (contents.size() != 107472)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "644968143b2ba5ca3eb67b01e67c7535fe5eb3093792fe3b6d5bdd2e06e5b740");
+      "e783779af873a6ffdedee73c9ac7c8fa6740e4d5146baea77574ed73fb5dad08");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -826,12 +826,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 105302)
+  if (invalidBuffer || contents.size() != 107472)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "644968143b2ba5ca3eb67b01e67c7535fe5eb3093792fe3b6d5bdd2e06e5b740");
+      "e783779af873a6ffdedee73c9ac7c8fa6740e4d5146baea77574ed73fb5dad08");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -4053,6 +4053,58 @@ static bool proveNvidiaSMCoresCall(
   return end > begin;
 }
 
+// NVIDIA sample-helper checkCudaCapabilities(major, minor) gate. The ported
+// target keeps the original informational printfs and compares against the
+// same reviewed epoch surface exposed by cudaGetDeviceProperties; it never
+// fabricates an NVIDIA SM readout. Prove: TU-scope inline non-template bool
+// definition from the frozen helper profile, two integer-literal arguments,
+// and a plain file-spelled name token.
+static bool proveNvidiaCheckCudaCapabilitiesCall(
+    const clang::CallExpr *call, clang::ASTContext &context,
+    clang::Preprocessor &pp, const std::set<unsigned> &trusted,
+    clang::SourceLocation &nameLocation, clang::FileID &file,
+    unsigned &begin, unsigned &end) {
+  if (call == nullptr || call->getNumArgs() != 2) return false;
+  for (const clang::Expr *argument : call->arguments()) {
+    if (llvm::dyn_cast_or_null<clang::IntegerLiteral>(
+            argument->IgnoreParenImpCasts()) == nullptr)
+      return false;
+  }
+  auto &source = context.getSourceManager();
+  const auto *callee = call->getDirectCallee();
+  const clang::FunctionDecl *definition = nullptr;
+  if (callee == nullptr || callee->getIdentifier() == nullptr ||
+      callee->getName() != "checkCudaCapabilities" ||
+      !callee->getDeclContext()->isTranslationUnit() ||
+      callee->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      !callee->hasBody(definition) || definition == nullptr ||
+      !callee->isInlineSpecified() || callee->isVariadic() ||
+      callee->getNumParams() != 2 ||
+      !context.hasSameType(callee->getReturnType(), context.BoolTy) ||
+      !context.hasSameType(callee->getParamDecl(0)->getType(), context.IntTy) ||
+      !context.hasSameType(callee->getParamDecl(1)->getType(), context.IntTy))
+    return false;
+  if (!allFunctionRedeclarationsComeFromFrozenHelperProfile(
+          callee, source, FrozenOfficialNvidiaSampleHelperCuda, trusted))
+    return false;
+  nameLocation = source.getFileLoc(call->getExprLoc());
+  if (nameLocation.isInvalid() || nameLocation.isMacroID()) return false;
+  bool invalid = false;
+  if (clang::Lexer::getSourceText(
+          clang::CharSourceRange::getTokenRange(nameLocation, nameLocation),
+          source, pp.getLangOpts(), &invalid) != "checkCudaCapabilities" ||
+      invalid)
+    return false;
+  const auto after =
+      clang::Lexer::getLocForEndOfToken(nameLocation, 0, source, pp.getLangOpts());
+  if (!after.isFileID() || source.getFileID(after) != source.getFileID(nameLocation))
+    return false;
+  file = source.getFileID(nameLocation);
+  begin = source.getFileOffset(nameLocation);
+  end = source.getFileOffset(after);
+  return end > begin;
+}
+
 // Ignored leading attributes need not belong to Decl::getSourceRange(). Find
 // a conservative physical prefix from lexical declaration boundaries instead.
 // A directive is skippable only before any pending declaration tokens; an
@@ -4542,6 +4594,7 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
             std::vector<NvidiaSampleHelperMacroCandidate> &candidates,
             std::vector<NvidiaSampleFindDeviceCandidate> &findCandidates,
             std::vector<NvidiaSampleSMCoresCandidate> &smCandidates,
+            std::vector<NvidiaSampleSMCoresCandidate> &checkCapabilitiesCandidates,
             std::vector<NvidiaSampleTemplateGuard> &templateGuards,
             clang::Preprocessor &preprocessor,
             const LocalHeaderRewriteContext *localHeaders)
@@ -4550,6 +4603,7 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
           trustedSystemFileIds(trustedSystemFileIds),
           supportedRanges(supportedRanges),
           candidates(candidates), findCandidates(findCandidates), smCandidates(smCandidates),
+          checkCapabilitiesCandidates(checkCapabilitiesCandidates),
           templateGuards(templateGuards), preprocessor(preprocessor), localHeaders(localHeaders) {}
 
     bool VisitCallExpr(clang::CallExpr *expression) {
@@ -4568,6 +4622,21 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
                                   trustedSystemFileIds, location, file,
                                   begin, end, target))
           smCandidates.push_back({location, {file, begin, end}, target});
+        return true;
+      }
+      if (callee != nullptr && callee->getIdentifier() != nullptr &&
+          callee->getName() == "checkCudaCapabilities" &&
+          sourceManager.isWrittenInMainFile(
+              sourceManager.getExpansionLoc(expression->getExprLoc()))) {
+        clang::SourceLocation location;
+        clang::FileID file;
+        unsigned begin = 0, end = 0;
+        if (proveNvidiaCheckCudaCapabilitiesCall(
+                expression, astContext, preprocessor, trustedSystemFileIds,
+                location, file, begin, end))
+          checkCapabilitiesCandidates.push_back(
+              {location, {file, begin, end},
+               "::ascify::sampleCheckCudaCapabilities"});
         return true;
       }
       if (callee != nullptr && callee->getIdentifier() != nullptr &&
@@ -4992,6 +5061,11 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
         if (range.file == decomposed.first && decomposed.second >= range.beginOffset &&
             decomposed.second < range.endOffset) return true;
       }
+      for (const auto &candidate : checkCapabilitiesCandidates) {
+        const auto &range = candidate.rewriteRange;
+        if (range.file == decomposed.first && decomposed.second >= range.beginOffset &&
+            decomposed.second < range.endOffset) return true;
+      }
       return false;
     }
 
@@ -5035,6 +5109,7 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
     std::vector<NvidiaSampleHelperMacroCandidate> &candidates;
     std::vector<NvidiaSampleFindDeviceCandidate> &findCandidates;
     std::vector<NvidiaSampleSMCoresCandidate> &smCandidates;
+    std::vector<NvidiaSampleSMCoresCandidate> &checkCapabilitiesCandidates;
     std::vector<NvidiaSampleTemplateGuard> &templateGuards;
     clang::Preprocessor &preprocessor;
     const LocalHeaderRewriteContext *localHeaders;
@@ -5050,6 +5125,7 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
             nvidiaSampleHelperMacroCandidates,
             nvidiaSampleFindDeviceCandidates,
             nvidiaSampleSMCoresCandidates,
+            nvidiaSampleCheckCapabilitiesCandidates,
             nvidiaSampleTemplateGuards,
             getCompilerInstance().getPreprocessor(), localHeaderContext);
 
@@ -5066,6 +5142,9 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
   for (const auto &candidate : nvidiaSampleSMCoresCandidates)
     nvidiaSampleSMCoresNormalOffsets.insert(
         getCompilerInstance().getSourceManager().getFileOffset(candidate.nameLocation));
+  for (const auto &candidate : nvidiaSampleCheckCapabilitiesCandidates)
+    nvidiaSampleCheckCapabilitiesNormalOffsets.insert(
+        getCompilerInstance().getSourceManager().getFileOffset(candidate.nameLocation));
   if (visitor.hasUnprovedSMCoresUse()) {
     nvidiaSampleSMCoresUnsupportedUse = true;
     const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
@@ -5077,7 +5156,8 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
   const bool helperNeedsCompat =
       !nvidiaSampleHelperMacroCandidates.empty() ||
       !nvidiaSampleFindDeviceCandidates.empty() ||
-      !nvidiaSampleSMCoresCandidates.empty();
+      !nvidiaSampleSMCoresCandidates.empty() ||
+      !nvidiaSampleCheckCapabilitiesCandidates.empty();
   if (helperNeedsCompat && ascifyCudaCompatActiveMacroConflict) {
     nvidiaSampleHelperUnsupportedMacroUse = true;
     // A proved SM callee is still conditional on the complete helper
@@ -12956,7 +13036,8 @@ void AscifyAction::auditRawNvidiaSampleHelperToken(
       !hasCudaCompatHeaderBeforeNvidiaHelper &&
       isAscifyCudaCompatPublishedMacro(name);
   if (!isNvidiaSampleHelperObservableMacro(name) &&
-      name != "findCudaDevice" && name != "_ConvertSMVer2Cores" && !publishedCompatMacro)
+      name != "findCudaDevice" && name != "_ConvertSMVer2Cores" &&
+      name != "checkCudaCapabilities" && !publishedCompatMacro)
     return;
   const clang::SourceLocation fileLoc =
       sourceManager.getFileLoc(token.getLocation());
@@ -12968,7 +13049,8 @@ void AscifyAction::auditRawNvidiaSampleHelperToken(
     return;
   if (nvidiaSampleHelperNormalMacroOffsets.count(offset) != 0 ||
       nvidiaSampleFindDeviceNormalOffsets.count(offset) != 0 ||
-      nvidiaSampleSMCoresNormalOffsets.count(offset) != 0)
+      nvidiaSampleSMCoresNormalOffsets.count(offset) != 0 ||
+      nvidiaSampleCheckCapabilitiesNormalOffsets.count(offset) != 0)
     return;
   if (!publishedCompatMacro) {
     for (auto &branch : nvidiaSampleInactiveBranches) {
@@ -14276,6 +14358,24 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
     committedMacroLocations.push_back(candidate.nameLocation);
     stagedSemanticRanges.push_back(candidate.rewriteRange);
   }
+  for (const auto &candidate : nvidiaSampleCheckCapabilitiesCandidates) {
+    if (!stagingError.empty()) break;
+    for (const auto &existing : SemanticRewriteRanges)
+      if (overlaps(candidate.rewriteRange, existing))
+        stagingError = "capability check overlaps an existing rewrite";
+    for (const auto &pending : stagedSemanticRanges)
+      if (overlaps(candidate.rewriteRange, pending))
+        stagingError = "capability check overlaps helper transaction";
+    if (!stagingError.empty()) break;
+    const ct::Replacement replacement(
+        sourceManager, candidate.nameLocation,
+        candidate.rewriteRange.endOffset - candidate.rewriteRange.beginOffset,
+        candidate.target);
+    if (!llcompat::insertReplacement(staged, replacement, &stagingError)) break;
+    committedMacroReplacements.push_back(replacement);
+    committedMacroLocations.push_back(candidate.nameLocation);
+    stagedSemanticRanges.push_back(candidate.rewriteRange);
+  }
   for (const auto &candidate : nvidiaSampleExpandedMacros) {
     if (!stagingError.empty()) break;
     for (const auto &existing : SemanticRewriteRanges)
@@ -14364,7 +14464,8 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
   const bool helperNeedsCompat =
       !nvidiaSampleHelperMacroCandidates.empty() ||
       !nvidiaSampleFindDeviceCandidates.empty() ||
-      !nvidiaSampleSMCoresCandidates.empty();
+      !nvidiaSampleSMCoresCandidates.empty() ||
+      !nvidiaSampleCheckCapabilitiesCandidates.empty();
   if (stagingError.empty() &&
       (needsCudaCompatHeader || helperNeedsCompat) &&
       !compatInsertedByClosure) {
