@@ -135,6 +135,7 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   m["cudaStreamWaitEvent"] = {"ascify::cudaStreamWaitEvent", CONV_STREAM, API_RUNTIME, SEC::STREAM};
   // Event management
   m["cudaEventCreate"]                                         = {"ascify::cudaEventCreate",                                CONV_EVENT, API_RUNTIME, SEC::EVENT};
+  m["cudaEventCreateWithFlags"] = {"ascify::cudaEventCreateWithFlags", CONV_EVENT, API_RUNTIME, SEC::EVENT};
   m["cudaEventDestroy"]                                        = {"ascify::cudaEventDestroy",                               CONV_EVENT, API_RUNTIME, SEC::EVENT};
   m["cudaEventRecord"]                                         = {"ascify::cudaEventRecord",                                CONV_EVENT, API_RUNTIME, SEC::EVENT};
   m["cudaEventQuery"]                                          = {"ascify::cudaEventQuery",                                 CONV_EVENT, API_RUNTIME, SEC::EVENT};

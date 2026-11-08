@@ -826,12 +826,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 132328)
+  if (contents.size() != 135415)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "ba71595ff2049892202a81d918f521a6f619608671a3ebe90181e35fa5a1f011");
+      "9238f16df259e43e4a566d7a591097e97ba3fe9ecf42714e07e626459eb98b7d");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -858,12 +858,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 132328)
+  if (invalidBuffer || contents.size() != 135415)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "ba71595ff2049892202a81d918f521a6f619608671a3ebe90181e35fa5a1f011");
+      "9238f16df259e43e4a566d7a591097e97ba3fe9ecf42714e07e626459eb98b7d");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -968,7 +968,7 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaDeviceGetStreamPriorityRange", "cudaStreamCreateWithPriority",
       "cudaStreamDestroy", "cudaStreamSynchronize",
       "cudaStreamQuery", "cudaStreamWaitEvent",
-      "cudaEventCreate", "cudaEventDestroy", "cudaEventRecord",
+      "cudaEventCreate", "cudaEventCreateWithFlags", "cudaEventDestroy", "cudaEventRecord",
       "cudaEventSynchronize", "cudaEventElapsedTime", "cudaEventQuery",
       "cudaGetLastError", "cudaPeekAtLastError",
       "cudaOccupancyMaxActiveBlocksPerMultiprocessor",
@@ -4117,6 +4117,8 @@ static llvm::StringRef nvidiaSampleHelperRewriteTarget(llvm::StringRef name) {
       .Case("checkCudaCapabilities", "::ascify::sampleCheckCudaCapabilities")
       .Case("findCudaDeviceDRV", "::ascify::sampleFindCudaDeviceDRV")
       .Case("findFatbinPath", "::ascify::sampleFindFatbinPath")
+      .Case("gpuDeviceInit", "::ascify::sampleGpuDeviceInit")
+      .Case("gpuGetMaxGflopsDeviceId", "::ascify::sampleGpuGetMaxGflopsDeviceId")
       .Default(llvm::StringRef());
 }
 
@@ -13166,7 +13168,8 @@ void AscifyAction::auditRawNvidiaSampleHelperToken(
   if (!isNvidiaSampleHelperObservableMacro(name) &&
       name != "findCudaDevice" && name != "_ConvertSMVer2Cores" &&
       name != "checkCudaCapabilities" && name != "findCudaDeviceDRV" &&
-      name != "findFatbinPath" && !publishedCompatMacro)
+      name != "findFatbinPath" && name != "gpuDeviceInit" &&
+      name != "gpuGetMaxGflopsDeviceId" && !publishedCompatMacro)
     return;
   const clang::SourceLocation fileLoc =
       sourceManager.getFileLoc(token.getLocation());

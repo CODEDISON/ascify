@@ -1557,6 +1557,25 @@ inline aclError cudaLaunchHostFunc(aclrtStream stream, cudaHostFn_t function,
 #endif
 }
 
+// CUDA event creation flags: the default and blocking-sync spellings both
+// describe how a host wait is implemented (spin vs sleep). The ACL event
+// wait already blocks the host, so both admitted flags map to the same
+// event kind; any other bit stays unsupported.
+inline constexpr unsigned int cudaEventDefault = 0U;
+inline constexpr unsigned int cudaEventBlockingSync = 0x01U;
+inline constexpr unsigned int cudaEventDisableTiming = 0x02U;
+
+inline aclError cudaEventCreateWithFlags(aclrtEvent* event, unsigned int flags) {
+  if (event == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
+  const unsigned int supported =
+      cudaEventDefault | cudaEventBlockingSync | cudaEventDisableTiming;
+  if ((flags & ~supported) != 0U) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  *event = nullptr;
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  return aclrtCreateEvent(event);
+}
+
 inline aclError cudaEventCreate(aclrtEvent* event) {
   if (event == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
   *event = nullptr;
@@ -1586,6 +1605,13 @@ inline aclError cudaEventRecord(
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   if (stream == nullptr) {
+    // CUDA's legacy default stream implicitly synchronizes with every
+    // blocking stream: a default-stream record observes all prior named-
+    // stream work. The native default stream has no such edge, so drain the
+    // device before recording; samples keep single-device sequential
+    // semantics exactly, at the cost of the implicit barrier CUDA documents.
+    const aclError drained = aclrtSynchronizeDevice();
+    if (drained != ACL_SUCCESS) { return drained; }
 #if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3) && \
     defined(ACL_MAJOR_VERSION) && defined(ACL_MINOR_VERSION) && \
     ((ACL_MAJOR_VERSION > 1) || \
@@ -2559,6 +2585,52 @@ inline aclError cuLaunchKernel(CUfunction function,
   function->launch(gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
                    blockDimZ, sharedMemBytes, stream, kernelParams);
   return ACL_SUCCESS;
+}
+
+// helper_cuda.h gpuDeviceInit / gpuGetMaxGflopsDeviceId, ported with the
+// same epoch policy as sampleFindCudaDevice: one uniform performance tier,
+// --device validated against the visible count, logical zero otherwise.
+inline int sampleGpuGetMaxGflopsDeviceId() {
+  int device_count = 0;
+  const aclError counted = cudaGetDeviceCount(&device_count);
+  if (counted != ACL_SUCCESS) {
+    sampleCheckCudaErrors(counted, "cudaGetDeviceCount", __FILE__, __LINE__);
+  }
+  return device_count > 0 ? 0 : -1;
+}
+
+inline int sampleGpuDeviceInit(int argc, const char **argv) {
+  int dev_id = 0;
+  if (argc > 1 && argv != nullptr) {
+    for (int index = 1; index < argc; ++index) {
+      const char *argument = argv[index];
+      if (argument == nullptr) continue;
+      const std::string text(argument);
+      const std::string flag = "--device=";
+      if (text.rfind(flag, 0) == 0 && text.size() > flag.size()) {
+        dev_id = atoi(text.c_str() + flag.size());
+      } else if (text == "--device" && index + 1 < argc &&
+                 argv[index + 1] != nullptr) {
+        dev_id = atoi(argv[index + 1]);
+        ++index;
+      }
+    }
+  }
+  int device_count = 0;
+  const aclError counted = cudaGetDeviceCount(&device_count);
+  if (counted != ACL_SUCCESS) {
+    sampleCheckCudaErrors(counted, "cudaGetDeviceCount", __FILE__, __LINE__);
+  }
+  if (dev_id < 0 || dev_id >= device_count) {
+    fprintf(stderr, "\ngpuDeviceInit() CUDA Device [%d]: \"Device number invalid\n",
+            dev_id);
+    return -1;
+  }
+  const aclError bound = cudaSetDevice(dev_id);
+  if (bound != ACL_SUCCESS) {
+    sampleCheckCudaErrors(bound, "cudaSetDevice", __FILE__, __LINE__);
+  }
+  return dev_id;
 }
 
 // helper_cuda_drvapi.h findCudaDeviceDRV, ported to the epoch surface: one

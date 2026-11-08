@@ -111,7 +111,7 @@ require_fixed 'auditRawPublishedCompatTokensInFile' "$action_cpp"
 require_fixed 'isAscifyCudaCompatReservedMacro' "$action_cpp"
 require_fixed 'isAscifyCudaCompatPublishedMacro' "$action_cpp"
 require_fixed 'RuntimeLock' "$compat_identifiers"
-require_fixed 'ba71595ff2049892202a81d918f521a6f619608671a3ebe90181e35fa5a1f011' \
+require_fixed '9238f16df259e43e4a566d7a591097e97ba3fe9ecf42714e07e626459eb98b7d' \
   "$action_cpp"
 require_fixed '#include <helper_string.h>' "$action_cpp"
 require_fixed 'surface retained' "$action_cpp"
@@ -124,17 +124,17 @@ require_fixed 'sampleFindCudaDevice(int argc, const char** argv)' "$compat_heade
 require_fixed 'exactly one visible logical device is required' "$compat_header"
 require_fixed 'const aclError status = cudaGetLastError();' "$compat_header"
 require_fixed '#expression, __FILE__, __LINE__' "$compat_header"
-forbid_fixed 'gpuGetMaxGflopsDeviceId' "$compat_header"
+require_fixed 'one uniform performance tier' "$compat_header"
 
 # Frozen target helper and Runtime header bytes must share one identity.
-[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 132328 ]
+[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 135415 ]
 if command -v sha256sum >/dev/null 2>&1; then
   compat_header_sha=$(sha256sum "$compat_header" | awk '{print $1}')
 else
   compat_header_sha=$(shasum -a 256 "$compat_header" | awk '{print $1}')
 fi
 [ "$compat_header_sha" = \
-  ba71595ff2049892202a81d918f521a6f619608671a3ebe90181e35fa5a1f011 ]
+  9238f16df259e43e4a566d7a591097e97ba3fe9ecf42714e07e626459eb98b7d ]
 
 official_helper_functions="$fixtures/nvidia_samples/Common/helper_functions.h"
 [ "$(wc -c <"$official_helper_functions" | tr -d ' ')" -eq 2358 ]

@@ -119,6 +119,9 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_TYPE_NAME_MAP = [] {
   m["cudaDeviceScheduleBlockingSync"] = {"ascify::cudaDeviceScheduleBlockingSync", CONV_DEFINE, API_RUNTIME, SEC::DEVICE_MGMT};
   m["cudaDeviceBlockingSync"] = {"ascify::cudaDeviceBlockingSync", CONV_DEFINE, API_RUNTIME, SEC::DEVICE_MGMT};
   m["cudaDeviceMapHost"] = {"ascify::cudaDeviceMapHost", CONV_DEFINE, API_RUNTIME, SEC::DEVICE_MGMT};
+  m["cudaEventDefault"] = {"ascify::cudaEventDefault", CONV_DEFINE, API_RUNTIME, 0};
+  m["cudaEventBlockingSync"] = {"ascify::cudaEventBlockingSync", CONV_DEFINE, API_RUNTIME, 0};
+  m["cudaEventDisableTiming"] = {"ascify::cudaEventDisableTiming", CONV_DEFINE, API_RUNTIME, 0};
   return m;
 }();
 
