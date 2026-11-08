@@ -55,6 +55,25 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   m["cudaHostUnregister"] = {"ascify::cudaHostUnregister", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["cudaHostGetDevicePointer"] = {"ascify::cudaHostGetDevicePointer", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["cudaSetDeviceFlags"] = {"ascify::cudaSetDeviceFlags", CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
+  // CUDA Driver API line (vectorAddDrv/simpleDrvRuntime): real runtime module
+  // loading plus typed <<<>>> launch thunks; see ascify_cuda_compat.hpp.
+  m["cuInit"] = {"ascify::cuInit", CONV_DEVICE, API_DRIVER, 0};
+  m["cuDeviceGetCount"] = {"ascify::cuDeviceGetCount", CONV_DEVICE, API_DRIVER, 0};
+  m["cuDeviceGet"] = {"ascify::cuDeviceGet", CONV_DEVICE, API_DRIVER, 0};
+  m["cuDeviceGetName"] = {"ascify::cuDeviceGetName", CONV_DEVICE, API_DRIVER, 0};
+  m["cuDeviceGetAttribute"] = {"ascify::cuDeviceGetAttribute", CONV_DEVICE, API_DRIVER, 0};
+  m["cuGetErrorString"] = {"ascify::cuGetErrorString", CONV_DEVICE, API_DRIVER, 0};
+  m["cuCtxCreate"] = {"ascify::cuCtxCreate", CONV_DEVICE, API_DRIVER, 0};
+  m["cuCtxDestroy"] = {"ascify::cuCtxDestroy", CONV_DEVICE, API_DRIVER, 0};
+  m["cuCtxSynchronize"] = {"ascify::cuCtxSynchronize", CONV_DEVICE, API_DRIVER, 0};
+  m["cuModuleLoadData"] = {"ascify::cuModuleLoadData", CONV_MEMORY, API_DRIVER, 0};
+  m["cuModuleUnload"] = {"ascify::cuModuleUnload", CONV_MEMORY, API_DRIVER, 0};
+  m["cuModuleGetFunction"] = {"ascify::cuModuleGetFunction", CONV_EXECUTION, API_DRIVER, 0};
+  m["cuMemAlloc"] = {"ascify::cuMemAlloc", CONV_MEMORY, API_DRIVER, 0};
+  m["cuMemFree"] = {"ascify::cuMemFree", CONV_MEMORY, API_DRIVER, 0};
+  m["cuMemcpyHtoD"] = {"ascify::cuMemcpyHtoD", CONV_MEMORY, API_DRIVER, 0};
+  m["cuMemcpyDtoH"] = {"ascify::cuMemcpyDtoH", CONV_MEMORY, API_DRIVER, 0};
+  m["cuLaunchKernel"] = {"ascify::cuLaunchKernel", CONV_EXECUTION, API_DRIVER, 0};
   // Bounded texture/storage surface, guarded by CudaTextureBoundary.
   m["cudaMallocPitch"] = {"ascify::cudaMallocPitch", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["cudaMallocArray"] = {"ascify::cudaMallocArray", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};

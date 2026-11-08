@@ -23,6 +23,10 @@ int ascify_test_host_get_device_pointer_calls = 0;
 void* ascify_test_host_register_pointer = nullptr;
 void* ascify_test_host_unregister_pointer = nullptr;
 aclrtHostRegisterType ascify_test_host_register_type = ACL_HOST_REGISTER_MAPPED;
+int ascify_test_binary_load_calls = 0;
+int ascify_test_binary_get_function_calls = 0;
+const char* ascify_test_get_function_name = nullptr;
+aclError ascify_test_binary_status = ACL_SUCCESS;
 int ascify_test_memcpy_calls = 0;
 int ascify_test_memcpy_async_calls = 0;
 int ascify_test_memset_calls = 0;
@@ -329,11 +333,104 @@ void testMappedHostContracts() {
          ACL_ERROR_FEATURE_UNSUPPORTED);
 }
 
+void testDriverContracts() {
+  // Module image: a minimal synthetic ELF64 header whose section-header
+  // table ends at a known offset (the loader derives the image size).
+  unsigned char elf[64 + 2 * 64];
+  memset(elf, 0, sizeof(elf));
+  elf[0] = 0x7f; elf[1] = 'E'; elf[2] = 'L'; elf[3] = 'F';
+  elf[4] = 2;  // ELFCLASS64
+  const uint64_t shoff = 64;
+  const uint16_t shentsize = 64, shnum = 2;
+  memcpy(elf + 0x28, &shoff, 8);
+  memcpy(elf + 0x3a, &shentsize, 2);
+  memcpy(elf + 0x3c, &shnum, 2);
+
+  ascify_test_binary_status = ACL_SUCCESS;
+  ascify::CUmodule module = nullptr;
+  assert(ascify::cuModuleLoadData(&module, elf) == ACL_SUCCESS);
+  assert(module != nullptr);
+  assert(ascify_test_binary_load_calls == 1);
+
+  // Registry: one synthetic entry with a matching mangled name cross-check.
+  static bool launched = false;
+  struct Local {
+    static void thunk(unsigned, unsigned, unsigned, unsigned, unsigned,
+                      unsigned, unsigned, aclrtStream, void**) { launched = true; }
+  };
+  static const ascify::drv::KernelEntry entry = {"VecAdd_kernel",
+                                                 "_Z13VecAdd_kernelPKfS0_Pfi",
+                                                 &Local::thunk};
+  assert(ascify::drv::registerKernel(&entry));
+  assert(ascify::drv::findKernel("VecAdd_kernel") == &entry);
+  assert(ascify::drv::findKernel("missing") == nullptr);
+
+  ascify::CUfunction function = nullptr;
+  assert(ascify::cuModuleGetFunction(&function, module, "VecAdd_kernel") ==
+         ACL_SUCCESS);
+  assert(function == &entry);
+  assert(ascify_test_binary_get_function_calls == 1);
+  ascify_test_get_function_name = nullptr;
+  function = nullptr;
+  assert(ascify::cuModuleGetFunction(&function, module, "nope") ==
+         ACL_ERROR_FEATURE_UNSUPPORTED);
+  assert(function == nullptr);
+
+  // Launch dispatches through the typed thunk with validated geometry.
+  int one = 1; void* args[] = {&one};
+  assert(ascify::cuLaunchKernel(&entry, 1, 1, 1, 64, 1, 1, 0, nullptr, args,
+                                nullptr) == ACL_SUCCESS);
+  assert(launched);
+  assert(ascify::cuLaunchKernel(nullptr, 1, 1, 1, 64, 1, 1, 0, nullptr, args,
+                                nullptr) == ACL_ERROR_RT_PARAM_INVALID);
+  assert(ascify::cuLaunchKernel(&entry, 0, 1, 1, 64, 1, 1, 0, nullptr, args,
+                                nullptr) == ACL_ERROR_RT_PARAM_INVALID);
+
+  // Device surface: count/ordinal/name and the epoch attribute contract.
+  int count = 0;
+  assert(ascify::cuDeviceGetCount(&count) == ACL_SUCCESS && count == 1);
+  ascify::CUdevice device = -1;
+  assert(ascify::cuDeviceGet(&device, 0) == ACL_SUCCESS && device == 0);
+  assert(ascify::cuDeviceGet(&device, 5) == ACL_ERROR_RT_INVALID_DEVICEID);
+  char name[100] = {};
+  assert(ascify::cuDeviceGetName(name, sizeof(name), 0) == ACL_SUCCESS);
+  int value = 0;
+  assert(ascify::cuDeviceGetAttribute(
+             &value, ascify::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, 0) ==
+         ACL_SUCCESS);
+  assert(value == 7);
+  assert(ascify::cuDeviceGetAttribute(
+             &value, ascify::CU_DEVICE_ATTRIBUTE_INTEGRATED, 0) ==
+         ACL_SUCCESS);
+  assert(value == 0);
+  assert(ascify::cuDeviceGetAttribute(&value, 999, 0) ==
+         ACL_ERROR_FEATURE_UNSUPPORTED);
+
+  // Context epoch binding and error-string surface.
+  ascify::CUcontext context = nullptr;
+  assert(ascify::cuCtxCreate(&context, nullptr, 0, 0) == ACL_SUCCESS);
+  assert(context != nullptr);
+  assert(ascify::cuCtxDestroy(context) == ACL_SUCCESS);
+  const char* text = nullptr;
+  assert(ascify::cuGetErrorString(ACL_SUCCESS, &text) == ACL_SUCCESS);
+  assert(text != nullptr);
+
+  // Non-ELF images are refused without touching the loader.
+  const int loads = ascify_test_binary_load_calls;
+  ascify::CUmodule hostile = nullptr;
+  assert(ascify::cuModuleLoadData(&hostile, "not-an-elf") ==
+         ACL_ERROR_FEATURE_UNSUPPORTED);
+  assert(hostile == nullptr);
+  assert(ascify_test_binary_load_calls == loads);
+  assert(ascify::cuModuleUnload(module) == ACL_SUCCESS);
+}
+
 }  // namespace
 
 int main() {
   testAllocationContracts();
   testMappedHostContracts();
+  testDriverContracts();
   testCopyContracts();
   testDefaultStreamCopyOrdering();
   testMemsetAndErrorContracts();

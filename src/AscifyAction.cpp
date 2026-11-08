@@ -128,6 +128,7 @@ enum FrozenNvidiaSampleHelperFileRole : unsigned {
   FrozenOfficialNvidiaSampleHelperFunctions = 1U << 2,
   FrozenOfficialNvidiaSampleHelperImage = 1U << 3,
   FrozenOfficialNvidiaSampleHelperTimer = 1U << 4,
+  FrozenOfficialNvidiaSampleHelperDrvapi = 1U << 5,
 };
 
 std::string contextualInputSha256(llvm::StringRef contents) {
@@ -244,6 +245,15 @@ unsigned frozenNvidiaSampleHelperFileRole(
             contents,
             "0494246768a4e3dbfcd688d79f4abad1fa39fc9f2d9dc3264a894f1c96d3785d"))
       return FrozenOfficialNvidiaSampleHelperCuda;
+  } else if (filename == "helper_cuda_drvapi.h") {
+    // NVIDIA cuda-samples v13.0 commit b7c5481c556c3fe98db060207ecaa41a4b9a9abc:
+    // the Driver-API helper surface (findCudaDeviceDRV, findFatbinPath and the
+    // __checkCudaErrors macro guarded by __cuda_cuda_h__).
+    if (contents.size() == 12664 &&
+        sha256Equals(
+            contents,
+            "016f4d7ef6ee9493835e7a142e87125fe64181ac1f5ce549dca8b919df088e05"))
+      return FrozenOfficialNvidiaSampleHelperDrvapi;
   } else if (filename == "helper_string.h") {
     // Reviewed v13.0 commit 3f1c50965017932fc81e6d94a3fc9e04c105b312:
     // sdkFindFilePath retains the original Samples/ search paths. This header
@@ -782,8 +792,13 @@ bool locationComesFromRecognizedNvidiaSampleHelper(
       sourceManager.getSpellingLoc(location);
   if (spelling.isInvalid())
     return false;
-  return isRecognizedNvidiaSampleHelperCuda(
-      sourceManager.getFilename(spelling));
+  if (isRecognizedNvidiaSampleHelperCuda(sourceManager.getFilename(spelling)))
+    return true;
+  // The Driver-API helper plays the same closure role for vectorAddDrv-style
+  // samples that include it instead of helper_cuda.h.
+  return sourceManager.getFilename(spelling) == "helper_cuda_drvapi.h" &&
+         frozenNvidiaSampleHelperFileRole(sourceManager, spelling) ==
+             FrozenOfficialNvidiaSampleHelperDrvapi;
 }
 
 bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
@@ -794,12 +809,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 107472)
+  if (contents.size() != 124688)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "e783779af873a6ffdedee73c9ac7c8fa6740e4d5146baea77574ed73fb5dad08");
+      "c06a518e33b65c814dc073cd7f278dd9b9dbb9d5c0023e094555095f41175cc5");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -826,12 +841,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 107472)
+  if (invalidBuffer || contents.size() != 124688)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "e783779af873a6ffdedee73c9ac7c8fa6740e4d5146baea77574ed73fb5dad08");
+      "c06a518e33b65c814dc073cd7f278dd9b9dbb9d5c0023e094555095f41175cc5");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -857,6 +872,13 @@ bool activeNvidiaSampleHelperMacroBodyMatches(
   if (name == "checkCudaErrors") {
     expected = {"check", "(", "(", parameterName, ")", ",", "#",
                 parameterName, ",", "__FILE__", ",", "__LINE__", ")"};
+    // helper_cuda_drvapi.h defines the same macro name with a Driver-API
+    // body: __checkCudaErrors(err, __FILE__, __LINE__). Both bodies carry the
+    // value plus file/line and exit on failure; admit the exact spelling.
+    if (actual != expected) {
+      expected = {"__checkCudaErrors", "(", parameterName, ",",
+                  "__FILE__", ",", "__LINE__", ")"};
+    }
   } else if (name == "getLastCudaError") {
     expected = {"__getLastCudaError", "(", parameterName, ",",
                 "__FILE__", ",", "__LINE__", ")"};
@@ -906,6 +928,12 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaMemset", "cudaMemsetAsync", "cudaMallocHost",
       "cudaHostAlloc", "cudaHostRegister", "cudaHostUnregister",
       "cudaHostGetDevicePointer", "cudaSetDeviceFlags",
+      "cuInit", "cuDeviceGetCount", "cuDeviceGet", "cuDeviceGetName",
+      "cuDeviceGetAttribute", "cuGetErrorString",
+      "cuCtxCreate", "cuCtxDestroy", "cuCtxSynchronize",
+      "cuModuleLoadData", "cuModuleUnload", "cuModuleGetFunction",
+      "cuMemAlloc", "cuMemFree", "cuMemcpyHtoD", "cuMemcpyDtoH",
+      "cuLaunchKernel",
       "cudaProfilerStart", "cudaProfilerStop",
       "cudaLaunchHostFunc",
       "cudaFreeHost", "cudaGetDevice", "cudaSetDevice",
@@ -932,9 +960,14 @@ bool isAdmittedCudaRuntimeStatusCall(
     return false;
   const auto mapped = CUDA_RENAMES_MAP().find(name);
   if (mapped == CUDA_RENAMES_MAP().end() ||
-      mapped->second.apiType != API_RUNTIME ||
+      (mapped->second.apiType != API_RUNTIME &&
+       mapped->second.apiType != API_DRIVER) ||
       !mapped->second.dppName.starts_with("ascify::"))
     return false;
+  // API_DRIVER entries are the reviewed ascify::cu* Driver line: each returns
+  // a real aclError exactly like the Runtime names above, so the checkCudaErrors
+  // status domain is proven for them too. Anything else Driver-shaped that is
+  // not in the map keeps failing at the find() above.
   if ((name == "cudaDeviceGetStreamPriorityRange" ||
        name == "cudaStreamCreateWithPriority") &&
       !sdkCudaPriorityDeclaration(callee, sourceManager, trustedSystemFileIds))
@@ -4059,41 +4092,50 @@ static bool proveNvidiaSMCoresCall(
 // fabricates an NVIDIA SM readout. Prove: TU-scope inline non-template bool
 // definition from the frozen helper profile, two integer-literal arguments,
 // and a plain file-spelled name token.
-static bool proveNvidiaCheckCudaCapabilitiesCall(
+static llvm::StringRef nvidiaSampleHelperRewriteTarget(llvm::StringRef name) {
+  return llvm::StringSwitch<llvm::StringRef>(name)
+      .Case("checkCudaCapabilities", "::ascify::sampleCheckCudaCapabilities")
+      .Case("findCudaDeviceDRV", "::ascify::sampleFindCudaDeviceDRV")
+      .Case("findFatbinPath", "::ascify::sampleFindFatbinPath")
+      .Default(llvm::StringRef());
+}
+
+// Shared proof for the fully-replaced NVIDIA sample-helper functions: the
+// definition is TU-scope inline non-template from a frozen helper profile,
+// the invocation is in the main file, and the name token is spelled plainly.
+// The whole body is replaced by the compat implementation, so argument
+// expression forms are unconstrained by this proof.
+static bool proveNvidiaSampleHelperFunctionCall(
     const clang::CallExpr *call, clang::ASTContext &context,
     clang::Preprocessor &pp, const std::set<unsigned> &trusted,
-    clang::SourceLocation &nameLocation, clang::FileID &file,
-    unsigned &begin, unsigned &end) {
-  if (call == nullptr || call->getNumArgs() != 2) return false;
-  for (const clang::Expr *argument : call->arguments()) {
-    if (llvm::dyn_cast_or_null<clang::IntegerLiteral>(
-            argument->IgnoreParenImpCasts()) == nullptr)
-      return false;
-  }
+    unsigned expectedArguments, clang::SourceLocation &nameLocation,
+    clang::FileID &file, unsigned &begin, unsigned &end) {
+  if (call == nullptr || call->getNumArgs() != expectedArguments) return false;
   auto &source = context.getSourceManager();
   const auto *callee = call->getDirectCallee();
   const clang::FunctionDecl *definition = nullptr;
   if (callee == nullptr || callee->getIdentifier() == nullptr ||
-      callee->getName() != "checkCudaCapabilities" ||
+      nvidiaSampleHelperRewriteTarget(callee->getName()).empty() ||
       !callee->getDeclContext()->isTranslationUnit() ||
       callee->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
       !callee->hasBody(definition) || definition == nullptr ||
       !callee->isInlineSpecified() || callee->isVariadic() ||
-      callee->getNumParams() != 2 ||
-      !context.hasSameType(callee->getReturnType(), context.BoolTy) ||
-      !context.hasSameType(callee->getParamDecl(0)->getType(), context.IntTy) ||
-      !context.hasSameType(callee->getParamDecl(1)->getType(), context.IntTy))
+      callee->getNumParams() != static_cast<unsigned>(expectedArguments))
     return false;
+  // checkCudaCapabilities lives in helper_cuda.h; the Driver helpers live in
+  // helper_cuda_drvapi.h. Both are frozen profiles, and the function must
+  // come entirely from whichever one defines it.
   if (!allFunctionRedeclarationsComeFromFrozenHelperProfile(
-          callee, source, FrozenOfficialNvidiaSampleHelperCuda, trusted))
+          callee, source, FrozenOfficialNvidiaSampleHelperCuda, trusted) &&
+      !allFunctionRedeclarationsComeFromFrozenHelperProfile(
+          callee, source, FrozenOfficialNvidiaSampleHelperDrvapi, trusted))
     return false;
   nameLocation = source.getFileLoc(call->getExprLoc());
   if (nameLocation.isInvalid() || nameLocation.isMacroID()) return false;
   bool invalid = false;
   if (clang::Lexer::getSourceText(
           clang::CharSourceRange::getTokenRange(nameLocation, nameLocation),
-          source, pp.getLangOpts(), &invalid) != "checkCudaCapabilities" ||
-      invalid)
+          source, pp.getLangOpts(), &invalid) != callee->getName() || invalid)
     return false;
   const auto after =
       clang::Lexer::getLocForEndOfToken(nameLocation, 0, source, pp.getLangOpts());
@@ -4625,18 +4667,18 @@ bool AscifyAction::hasUnsupportedNvidiaSampleHelperDeclarationUse() {
         return true;
       }
       if (callee != nullptr && callee->getIdentifier() != nullptr &&
-          callee->getName() == "checkCudaCapabilities" &&
+          !nvidiaSampleHelperRewriteTarget(callee->getName()).empty() &&
           sourceManager.isWrittenInMainFile(
               sourceManager.getExpansionLoc(expression->getExprLoc()))) {
         clang::SourceLocation location;
         clang::FileID file;
         unsigned begin = 0, end = 0;
-        if (proveNvidiaCheckCudaCapabilitiesCall(
+        if (proveNvidiaSampleHelperFunctionCall(
                 expression, astContext, preprocessor, trustedSystemFileIds,
-                location, file, begin, end))
+                callee->getNumParams(), location, file, begin, end))
           checkCapabilitiesCandidates.push_back(
               {location, {file, begin, end},
-               "::ascify::sampleCheckCudaCapabilities"});
+               nvidiaSampleHelperRewriteTarget(callee->getName()).str()});
         return true;
       }
       if (callee != nullptr && callee->getIdentifier() != nullptr &&
@@ -6730,7 +6772,10 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
   }
 
   const bool recognizedNvidiaHelper =
-      isRecognizedNvidiaSampleHelperCuda(resolved_file_name);
+      isRecognizedNvidiaSampleHelperCuda(resolved_file_name) ||
+      (file_name == "helper_cuda_drvapi.h" &&
+       frozenNvidiaSampleHelperFileRole(SM, hash_loc) ==
+           FrozenOfficialNvidiaSampleHelperDrvapi);
   observeDirectImageInclude(hash_loc, includeToken, file_name, filename_range,
                             resolved_file_name, module);
   if (!SM.isWrittenInMainFile(hash_loc)) {
@@ -6874,7 +6919,8 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
     }
   }
   if (recognizedNvidiaHelper) {
-    if (file_name == "helper_cuda.h" && directRange && directSpelling) {
+    if ((file_name == "helper_cuda.h" || file_name == "helper_cuda_drvapi.h") &&
+        directRange && directSpelling) {
       nvidiaSampleHelperIncludes.push_back({hash_loc, filenameEnd});
       recognizedNvidiaSampleHelperPaths.insert(resolved_file_name.str());
       auditActiveAscifyCudaCompatMacrosAtInsertion();
@@ -13037,7 +13083,8 @@ void AscifyAction::auditRawNvidiaSampleHelperToken(
       isAscifyCudaCompatPublishedMacro(name);
   if (!isNvidiaSampleHelperObservableMacro(name) &&
       name != "findCudaDevice" && name != "_ConvertSMVer2Cores" &&
-      name != "checkCudaCapabilities" && !publishedCompatMacro)
+      name != "checkCudaCapabilities" && name != "findCudaDeviceDRV" &&
+      name != "findFatbinPath" && !publishedCompatMacro)
     return;
   const clang::SourceLocation fileLoc =
       sourceManager.getFileLoc(token.getLocation());

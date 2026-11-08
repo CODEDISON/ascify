@@ -127,6 +127,20 @@ const std::map<llvm::StringRef, dppCounter> CUDA_DRIVER_TYPE_NAME_MAP = [] {
   std::map<llvm::StringRef, dppCounter> m;
   // Driver API error types
   m["CUresult"]       = {"aclError",              CONV_TYPE, API_DRIVER, 0};
+  m["CUdevice"] = {"ascify::CUdevice", CONV_TYPE, API_DRIVER, 0};
+  m["CUcontext"] = {"ascify::CUcontext", CONV_TYPE, API_DRIVER, 0};
+  m["CUmodule"] = {"ascify::CUmodule", CONV_TYPE, API_DRIVER, 0};
+  m["CUfunction"] = {"ascify::CUfunction", CONV_TYPE, API_DRIVER, 0};
+  m["CUdeviceptr"] = {"ascify::CUdeviceptr", CONV_TYPE, API_DRIVER, 0};
+  m["CUstream"] = {"ascify::CUstream", CONV_TYPE, API_DRIVER, 0};
+  m["CUctxCreateParams"] = {"ascify::CUctxCreateParams", CONV_TYPE, API_DRIVER, 0};
+  m["CUdevice_attribute"] = {"ascify::CUdevice_attribute", CONV_TYPE, API_DRIVER, 0};
+  m["CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR"] = {"ascify::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR", CONV_DEFINE, API_DRIVER, 0};
+  m["CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR"] = {"ascify::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR", CONV_DEFINE, API_DRIVER, 0};
+  m["CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT"] = {"ascify::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT", CONV_DEFINE, API_DRIVER, 0};
+  m["CU_DEVICE_ATTRIBUTE_CLOCK_RATE"] = {"ascify::CU_DEVICE_ATTRIBUTE_CLOCK_RATE", CONV_DEFINE, API_DRIVER, 0};
+  m["CU_DEVICE_ATTRIBUTE_INTEGRATED"] = {"ascify::CU_DEVICE_ATTRIBUTE_INTEGRATED", CONV_DEFINE, API_DRIVER, 0};
+  m["CU_DEVICE_ATTRIBUTE_COMPUTE_MODE"] = {"ascify::CU_DEVICE_ATTRIBUTE_COMPUTE_MODE", CONV_DEFINE, API_DRIVER, 0};
   m["CUDA_SUCCESS"]   = {"ACL_SUCCESS",            CONV_DEFINE, API_DRIVER, 0};
   return m;
 }();

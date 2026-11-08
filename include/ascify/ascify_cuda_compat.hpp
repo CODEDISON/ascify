@@ -3,6 +3,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <limits.h>
 #include <math.h>
 #include <stddef.h>
@@ -2038,6 +2041,433 @@ inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) 
   *properties = result;
   return ACL_SUCCESS;
 }
+
+// ---- CUDA Driver API compatibility (vectorAddDrv / simpleDrvRuntime line) --
+// Architecture: the translated host TU keeps the NVIDIA helper logic and the
+// runtime module-loading contract. cuModuleLoadData really loads the compiled
+// kernel image through aclrtCreateBinary/aclrtBinaryLoad (device-segment
+// verified) and cross-checks every registry kernel through
+// aclrtBinaryGetFunction with the Itanium-mangled name. Kernel launch goes
+// through a typed <<<>>> thunk registered beside the kernel definition, which
+// is the proven code-generation path for this layer; the runtime handle ABI
+// (aclrtLaunchKernel/KernelArgs*) expects a different metadata layout and is
+// not used for these SIMT kernels.
+namespace drv {
+
+struct ModuleHandle {
+  aclrtBinary binary = nullptr;
+  aclrtBinHandle handle = nullptr;
+  void *image = nullptr;
+  size_t size = 0;
+};
+
+// A typed launch thunk unpacks the CUDA kernelParams void* array by the
+// kernel's own signature and performs the <<<>>> launch.
+using KernelLaunchThunk = void (*)(unsigned, unsigned, unsigned,
+                                   unsigned, unsigned, unsigned,
+                                   unsigned, aclrtStream, void **);
+
+struct KernelEntry {
+  const char *plain;
+  const char *mangled;
+  KernelLaunchThunk launch;
+};
+
+struct KernelRegistry {
+  detail::RuntimeLock lock;
+  const KernelEntry *entries[64] = {};
+  size_t count = 0;
+};
+inline KernelRegistry &kernelRegistry() {
+  static KernelRegistry registry;
+  return registry;
+}
+inline bool registerKernel(const KernelEntry *entry) {
+  if (entry == nullptr || entry->plain == nullptr || entry->mangled == nullptr ||
+      entry->launch == nullptr)
+    return false;
+  detail::RuntimeLockGuard guard(kernelRegistry().lock);
+  if (kernelRegistry().count == 64) return false;
+  kernelRegistry().entries[kernelRegistry().count++] = entry;
+  return true;
+}
+inline const KernelEntry *findKernel(const char *plain) {
+  if (plain == nullptr) return nullptr;
+  detail::RuntimeLockGuard guard(kernelRegistry().lock);
+  for (size_t i = 0; i < kernelRegistry().count; ++i)
+    if (__builtin_strcmp(kernelRegistry().entries[i]->plain, plain) == 0)
+      return kernelRegistry().entries[i];
+  return nullptr;
+}
+
+}  // namespace drv
+
+// CUDA Driver type surface kept at the ascify namespace level; translated
+// declarations and helper signatures use these after type rewrites.
+using CUdevice = int32_t;
+using CUcontext = void *;
+using CUmodule = drv::ModuleHandle *;
+using CUfunction = const drv::KernelEntry *;
+using CUdeviceptr = void *;
+using CUstream = aclrtStream;
+// CUDA 13 context-creation parameter block; the epoch context needs none of
+// it, so the translated sample object is an inert carrier.
+struct CUctxCreateParams {};
+
+// Driver device attributes: a small, explicitly reviewed epoch surface.
+// Same policy as cudaDeviceProp: real queries where CANN exposes the fact,
+// the documented 7.0 capability epoch for SM selectors, and explicit failure
+// for everything else (no fabricated NVIDIA attributes).
+using CUdevice_attribute = int;
+inline constexpr CUdevice_attribute CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 1;
+inline constexpr CUdevice_attribute CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 2;
+inline constexpr CUdevice_attribute CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT = 3;
+inline constexpr CUdevice_attribute CU_DEVICE_ATTRIBUTE_CLOCK_RATE = 4;
+inline constexpr CUdevice_attribute CU_DEVICE_ATTRIBUTE_INTEGRATED = 5;
+inline constexpr CUdevice_attribute CU_DEVICE_ATTRIBUTE_COMPUTE_MODE = 6;
+
+// helper_cuda_drvapi.h checkCudaErrors analogue: the DRV macro is a plain
+// three-argument wrapper, mirrored here with the same exit behaviour.
+inline void sampleCheckCudaErrorsDrv(aclError status, const char *file, int line) {
+  if (status == ACL_SUCCESS) { return; }
+  const char *text = cudaGetErrorString(status);
+  fprintf(stderr,
+          "checkCudaErrors() Driver API error = %04d \"%s\" from file <%s>, "
+          "line %i.\n",
+          static_cast<int>(status), text == nullptr ? "" : text,
+          file == nullptr ? "" : file, line);
+  exit(EXIT_FAILURE);
+}
+
+inline aclError cuInit(unsigned int) { return cudaRuntimeEnsureReady(); }
+
+inline aclError cuDeviceGetCount(int *count) {
+  if (count == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
+  *count = 0;
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  uint32_t devices = 0;
+  const aclError status = aclrtGetDeviceCount(&devices);
+  if (status == ACL_SUCCESS) {
+    if (devices > static_cast<uint32_t>(INT32_MAX)) return ACL_ERROR_FEATURE_UNSUPPORTED;
+    *count = static_cast<int>(devices);
+  }
+  return status;
+}
+
+inline aclError cuDeviceGet(CUdevice *device, int ordinal) {
+  if (device == nullptr || ordinal < 0) { return ACL_ERROR_RT_PARAM_INVALID; }
+  int count = 0;
+  const aclError status = cuDeviceGetCount(&count);
+  if (status != ACL_SUCCESS) { return status; }
+  if (ordinal >= count) { return ACL_ERROR_RT_INVALID_DEVICEID; }
+  *device = ordinal;
+  return ACL_SUCCESS;
+}
+
+inline aclError cuDeviceGetName(char *name, int length, CUdevice device) {
+  if (name == nullptr || length <= 0 || device < 0) {
+    return ACL_ERROR_RT_PARAM_INVALID;
+  }
+  const char *const soc_name = aclrtGetSocName();
+  if (soc_name == nullptr || soc_name[0] == '\0') {
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  }
+  __builtin_snprintf(name, static_cast<size_t>(length), "%s", soc_name);
+  return ACL_SUCCESS;
+}
+
+inline aclError cuDeviceGetAttribute(int *value, CUdevice_attribute attribute,
+                                     CUdevice device) {
+  if (value == nullptr || device < 0) { return ACL_ERROR_RT_PARAM_INVALID; }
+  switch (attribute) {
+    case CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR:
+      // Capability epoch 7.0 (see cudaDeviceProp comment), never an NVIDIA
+      // SM hardware readout; CANN exposes no compute-capability query.
+      *value = 7;
+      return ACL_SUCCESS;
+    case CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR:
+      *value = 0;
+      return ACL_SUCCESS;
+    case CU_DEVICE_ATTRIBUTE_INTEGRATED:
+      // A discrete Ascend device is not an integrated GPU.
+      *value = 0;
+      return ACL_SUCCESS;
+    case CU_DEVICE_ATTRIBUTE_COMPUTE_MODE:
+      // No compute-mode restriction exists on this runtime.
+      *value = 0;
+      return ACL_SUCCESS;
+    case CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT:
+    case CU_DEVICE_ATTRIBUTE_CLOCK_RATE: {
+      const aclError ready = cudaRuntimeEnsureReady();
+      if (ready != ACL_SUCCESS) { return ready; }
+      int64_t raw = 0;
+      const aclrtDevAttr what = attribute == CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT
+                                    ? ACL_DEV_ATTR_VECTOR_CORE_NUM
+                                    : static_cast<aclrtDevAttr>(100U);
+      if (attribute == CU_DEVICE_ATTRIBUTE_CLOCK_RATE) {
+        // Documented 1 GHz epoch clock (same reviewed value as the runtime
+        // clockRate mapping); no CANN kHz readout exists.
+        *value = 1000 * 1000;
+        return ACL_SUCCESS;
+      }
+      const aclError status =
+          aclrtGetDeviceInfo(static_cast<uint32_t>(device), what, &raw);
+      if (status == ACL_SUCCESS) { *value = static_cast<int>(raw); }
+      return status;
+    }
+    default:
+      return ACL_ERROR_FEATURE_UNSUPPORTED;
+  }
+}
+
+inline aclError cuGetErrorString(aclError error, const char **text) {
+  if (text == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
+  *text = cudaGetErrorString(error);
+  return ACL_SUCCESS;
+}
+
+// The epoch context is the runtime device binding; CUcontext is an inert
+// token so translated ownership code keeps its shape.
+inline aclError cuCtxCreate(CUcontext *context, CUctxCreateParams *,
+                            unsigned int, CUdevice device) {
+  if (context == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
+  *context = nullptr;
+  int count = 0;
+  const aclError counted = cuDeviceGetCount(&count);
+  if (counted != ACL_SUCCESS) { return counted; }
+  if (device < 0 || device >= count) { return ACL_ERROR_RT_INVALID_DEVICEID; }
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  const aclError status = aclrtSetDevice(device);
+  if (status != ACL_SUCCESS) { return status; }
+  *context = reinterpret_cast<CUcontext>(static_cast<uintptr_t>(device + 1));
+  return ACL_SUCCESS;
+}
+
+inline aclError cuCtxDestroy(CUcontext) {
+  // Device reset stays with the runtime manager's exit ordering; the CUDA
+  // primary-context destroy maps to releasing our epoch binding lazily.
+  return ACL_SUCCESS;
+}
+
+inline aclError cuCtxSynchronize(CUcontext) {
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  return aclrtSynchronizeDevice();
+}
+
+namespace detail {
+
+// A compiled kernel module for this layer is a complete ELF64 relocatable
+// object; its size is exactly the end of the section header table, which the
+// loader derives from the ELF header (cuModuleLoadData has no length
+// parameter because CUDA fatbins are self-describing in that runtime).
+inline bool elf64ModuleImageSize(const void *image, size_t &size) {
+  const unsigned char *bytes = static_cast<const unsigned char *>(image);
+  if (bytes == nullptr) return false;
+  if (bytes[0] != 0x7f || bytes[1] != 'E' || bytes[2] != 'L' || bytes[3] != 'F')
+    return false;
+  if (bytes[4] != 2) return false;  // ELFCLASS64
+  uint64_t shoff = 0;
+  __builtin_memcpy(&shoff, bytes + 0x28, 8);
+  uint16_t shentsize = 0, shnum = 0;
+  __builtin_memcpy(&shentsize, bytes + 0x3a, 2);
+  __builtin_memcpy(&shnum, bytes + 0x3c, 2);
+  if (shentsize == 0 || shnum == 0) return false;
+  const uint64_t end = shoff + static_cast<uint64_t>(shentsize) * shnum;
+  if (end < shoff || end > (256ull << 20)) return false;
+  size = static_cast<size_t>(end);
+  return true;
+}
+
+}  // namespace detail
+
+inline aclError cuModuleLoadData(CUmodule *module, const void *image) {
+  if (module == nullptr || image == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
+  *module = nullptr;
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  size_t size = 0;
+  if (!detail::elf64ModuleImageSize(image, size)) {
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  }
+  drv::ModuleHandle *handle = static_cast<drv::ModuleHandle *>(
+      calloc(1, sizeof(drv::ModuleHandle)));
+  if (handle == nullptr) { return ACL_ERROR_BAD_ALLOC; }
+  handle->image = calloc(1, size);
+  if (handle->image == nullptr) { free(handle); return ACL_ERROR_BAD_ALLOC; }
+  __builtin_memcpy(handle->image, image, size);
+  handle->size = size;
+  handle->binary = aclrtCreateBinary(handle->image, size);
+  if (handle->binary == nullptr) {
+    free(handle->image);
+    free(handle);
+    return ACL_ERROR_RT_MEMORY_ALLOCATION;
+  }
+  const aclError loaded = aclrtBinaryLoad(handle->binary, &handle->handle);
+  if (loaded != ACL_SUCCESS) {
+    aclrtDestroyBinary(handle->binary);
+    free(handle->image);
+    free(handle);
+    return loaded;
+  }
+  *module = handle;
+  return ACL_SUCCESS;
+}
+
+inline aclError cuMemAlloc(CUdeviceptr *pointer, size_t bytes) {
+  if (pointer == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
+  return cudaMalloc(pointer, bytes);
+}
+
+inline aclError cuMemFree(CUdeviceptr pointer) { return cudaFree(pointer); }
+
+inline aclError cuMemcpyHtoD(CUdeviceptr destination, const void *source,
+                             size_t bytes) {
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  return aclrtMemcpy(destination, bytes, source, bytes,
+                     ACL_MEMCPY_HOST_TO_DEVICE);
+}
+
+inline aclError cuMemcpyDtoH(void *destination, CUdeviceptr source,
+                             size_t bytes) {
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  return aclrtMemcpy(destination, bytes, source, bytes,
+                     ACL_MEMCPY_DEVICE_TO_HOST);
+}
+
+inline aclError cuModuleUnload(CUmodule module) {
+  if (module == nullptr || module->handle == nullptr) {
+    return ACL_ERROR_RT_PARAM_INVALID;
+  }
+  const aclError unloaded = aclrtBinaryUnLoad(module->handle);
+  if (unloaded != ACL_SUCCESS) { return unloaded; }
+  if (module->binary != nullptr) { aclrtDestroyBinary(module->binary); }
+  free(module->image);
+  free(module);
+  return ACL_SUCCESS;
+}
+
+inline aclError cuModuleGetFunction(CUfunction *function, CUmodule module,
+                                    const char *name) {
+  if (function == nullptr || module == nullptr || name == nullptr) {
+    return ACL_ERROR_RT_PARAM_INVALID;
+  }
+  *function = nullptr;
+  const drv::KernelEntry *entry = drv::findKernel(name);
+  if (entry == nullptr) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  // Cross-check the registry identity against the actually loaded module.
+  aclrtFuncHandle verified = nullptr;
+  const aclError status =
+      aclrtBinaryGetFunction(module->handle, entry->mangled, &verified);
+  if (status != ACL_SUCCESS) { return status; }
+  *function = entry;
+  return ACL_SUCCESS;
+}
+
+inline aclError cuLaunchKernel(CUfunction function,
+                               unsigned int gridDimX, unsigned int gridDimY,
+                               unsigned int gridDimZ, unsigned int blockDimX,
+                               unsigned int blockDimY, unsigned int blockDimZ,
+                               unsigned int sharedMemBytes, CUstream stream,
+                               void **kernelParams, void *) {
+  if (function == nullptr || kernelParams == nullptr) {
+    return ACL_ERROR_RT_PARAM_INVALID;
+  }
+  if (gridDimX == 0 || gridDimY == 0 || gridDimZ == 0 || blockDimX == 0 ||
+      blockDimY == 0 || blockDimZ == 0) {
+    return ACL_ERROR_RT_PARAM_INVALID;
+  }
+  function->launch(gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
+                   blockDimZ, sharedMemBytes, stream, kernelParams);
+  return ACL_SUCCESS;
+}
+
+// helper_cuda_drvapi.h findCudaDeviceDRV, ported to the epoch surface: one
+// visible logical device, selected by --device= when present (validated
+// against cuDeviceGetCount) and logical zero otherwise, with the helper's
+// original informational print. No GFLOPS ranking is reproduced: this layer
+// exposes exactly one visible device.
+inline CUdevice sampleFindCudaDeviceDRV(int argc, const char **argv) {
+  int device_count = 0;
+  const aclError counted = cuDeviceGetCount(&device_count);
+  if (counted != ACL_SUCCESS) {
+    sampleCheckCudaErrorsDrv(counted, __FILE__, __LINE__);
+  }
+  int dev_id = 0;
+  if (argc > 1 && argv != nullptr) {
+    for (int index = 1; index < argc; ++index) {
+      const char *argument = argv[index];
+      if (argument == nullptr) continue;
+      const std::string text(argument);
+      const std::string flag = "--device=";
+      if (text.rfind(flag, 0) == 0 && text.size() > flag.size()) {
+        dev_id = atoi(text.c_str() + flag.size());
+      } else if (text == "--device" && index + 1 < argc &&
+                 argv[index + 1] != nullptr) {
+        dev_id = atoi(argv[index + 1]);
+        ++index;
+      }
+    }
+  }
+  if (dev_id < 0 || dev_id >= device_count) {
+    fprintf(stderr, "Device number %d is invalid, will use default device 0.\n",
+            dev_id);
+    dev_id = 0;
+  }
+  CUdevice device = 0;
+  sampleCheckCudaErrorsDrv(cuDeviceGet(&device, dev_id), __FILE__, __LINE__);
+  char name[100] = {};
+  sampleCheckCudaErrorsDrv(cuDeviceGetName(name, static_cast<int>(sizeof(name)),
+                                           device),
+                           __FILE__, __LINE__);
+  printf("> Using CUDA Device [%d]: %s\n", dev_id, name);
+  return device;
+}
+
+// helper_cuda_drvapi.h findFatbinPath, ported with the same observable
+// behaviour: locate the compiled module image beside the executable or in the
+// working directory, print the same findModulePath lines, and stream the file
+// bytes into the caller's ostringstream when it is a module image.
+inline bool sampleFindFatbinPath(const char *module_file,
+                                 std::string &module_path, char **argv,
+                                 std::ostringstream &ostrm) {
+  std::string found;
+  const char *directories[3] = {"./", nullptr, nullptr};
+  std::string executable_directory;
+  if (argv != nullptr && argv[0] != nullptr) {
+    const std::string executable(argv[0]);
+    const size_t slash = executable.find_last_of('/');
+    if (slash != std::string::npos) {
+      executable_directory = executable.substr(0, slash + 1);
+      directories[1] = executable_directory.c_str();
+    }
+  }
+  for (const char *directory : directories) {
+    if (directory == nullptr) continue;
+    const std::string candidate = std::string(directory) + module_file;
+    std::ifstream probe(candidate.c_str(), std::ios::binary);
+    if (probe.good()) {
+      found = candidate;
+      break;
+    }
+  }
+  if (found.empty()) {
+    printf("> findModulePath file not found: <%s> \n", module_file);
+    return false;
+  }
+  module_path = found;
+  printf("> findModulePath found file at <%s>\n", module_path.c_str());
+  if (module_path.rfind("fatbin") != std::string::npos) {
+    std::ifstream file_in(module_path.c_str(), std::ios::binary);
+    ostrm << file_in.rdbuf();
+  }
+  return true;
+}
+
 
 // NVIDIA sample-helper _ConvertSMVer2ArchName informational table, kept for
 // the ported checkCudaCapabilities printf. Values are the original sample

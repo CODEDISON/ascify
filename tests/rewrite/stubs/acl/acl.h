@@ -85,6 +85,13 @@ enum aclrtEventRecordedStatus {
   ACL_EVENT_RECORDED_STATUS_NOT_READY = 0,
   ACL_EVENT_RECORDED_STATUS_COMPLETE = 1
 };
+typedef void* aclrtBinary;
+typedef void* aclrtBinHandle;
+typedef void* aclrtFuncHandle;
+extern int ascify_test_binary_load_calls;
+extern int ascify_test_binary_get_function_calls;
+extern const char* ascify_test_get_function_name;
+extern aclError ascify_test_binary_status;
 enum aclrtHostRegisterType {
   ACL_HOST_REGISTER_MAPPED = 0,
   ACL_HOST_REGISTER_IOMEMORY = 0x04,
@@ -307,6 +314,38 @@ inline aclError aclrtHostGetDevicePointer(void* host_pointer,
   return ascify_test_runtime_status;
 }
 
+inline aclrtBinary aclrtCreateBinary(const void* image, size_t size) {
+  if (image != nullptr && size > 0) return (aclrtBinary)0x1;
+  return nullptr;
+}
+
+inline aclError aclrtBinaryLoad(aclrtBinary binary, aclrtBinHandle* handle) {
+  ++ascify_test_binary_load_calls;
+  if (binary == nullptr || handle == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  if (ascify_test_binary_status == ACL_SUCCESS) *handle = (aclrtBinHandle)0x2;
+  return ascify_test_binary_status;
+}
+
+inline aclError aclrtBinaryUnLoad(aclrtBinHandle handle) {
+  return handle == nullptr ? ACL_ERROR_RT_PARAM_INVALID
+                           : ascify_test_binary_status;
+}
+
+inline aclError aclrtDestroyBinary(aclrtBinary binary) {
+  return binary == nullptr ? ACL_ERROR_RT_PARAM_INVALID : ACL_SUCCESS;
+}
+
+inline aclError aclrtBinaryGetFunction(aclrtBinHandle handle,
+                                       const char* kernel_name,
+                                       aclrtFuncHandle* function) {
+  ++ascify_test_binary_get_function_calls;
+  ascify_test_get_function_name = kernel_name;
+  if (handle == nullptr || kernel_name == nullptr || function == nullptr)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  if (ascify_test_binary_status == ACL_SUCCESS) *function = (aclrtFuncHandle)0x3;
+  return ascify_test_binary_status;
+}
+
 inline aclError aclrtMemcpy(void* destination, size_t destination_max,
                             const void* source, size_t count,
                             aclrtMemcpyKind kind) {
@@ -399,6 +438,12 @@ inline aclError aclrtHostGetDevicePointer(void* host_pointer,
   *device_pointer = host_pointer;
   return ACL_SUCCESS;
 }
+inline aclrtBinary aclrtCreateBinary(const void*, size_t) { return (aclrtBinary)0x1; }
+inline aclError aclrtBinaryLoad(aclrtBinary, aclrtBinHandle* handle) { *handle = (aclrtBinHandle)0x2; return ACL_SUCCESS; }
+inline aclError aclrtBinaryUnLoad(aclrtBinHandle) { return ACL_SUCCESS; }
+inline aclError aclrtDestroyBinary(aclrtBinary) { return ACL_SUCCESS; }
+inline aclError aclrtBinaryGetFunction(aclrtBinHandle, const char*,
+                                       aclrtFuncHandle* function) { *function = (aclrtFuncHandle)0x3; return ACL_SUCCESS; }
 
 inline aclError aclrtMemcpy(void*, size_t, const void*, size_t,
                             aclrtMemcpyKind) {
