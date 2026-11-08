@@ -104,6 +104,21 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_TYPE_NAME_MAP = [] {
   m["cudaMemcpyDeviceToDevice"]  = {"ACL_MEMCPY_DEVICE_TO_DEVICE",      CONV_DEFINE, API_RUNTIME, SEC::MEMORY};
   m["cudaMemcpyHostToHost"]      = {"ACL_MEMCPY_HOST_TO_HOST",          CONV_DEFINE, API_RUNTIME, SEC::MEMORY};
   m["cudaMemcpyKind"]            = {"aclrtMemcpyKind",                  CONV_TYPE, API_RUNTIME, SEC::MEMORY};
+  // Host-allocation / registration / device flags keep their CUDA numeric
+  // values; the compat implementations interpret them.
+  m["cudaHostAllocDefault"] = {"ascify::cudaHostAllocDefault", CONV_DEFINE, API_RUNTIME, SEC::MEMORY};
+  m["cudaHostAllocPortable"] = {"ascify::cudaHostAllocPortable", CONV_DEFINE, API_RUNTIME, SEC::MEMORY};
+  m["cudaHostAllocMapped"] = {"ascify::cudaHostAllocMapped", CONV_DEFINE, API_RUNTIME, SEC::MEMORY};
+  m["cudaHostAllocWriteCombined"] = {"ascify::cudaHostAllocWriteCombined", CONV_DEFINE, API_RUNTIME, SEC::MEMORY};
+  m["cudaHostRegisterDefault"] = {"ascify::cudaHostRegisterDefault", CONV_DEFINE, API_RUNTIME, SEC::MEMORY};
+  m["cudaHostRegisterPortable"] = {"ascify::cudaHostRegisterPortable", CONV_DEFINE, API_RUNTIME, SEC::MEMORY};
+  m["cudaHostRegisterMapped"] = {"ascify::cudaHostRegisterMapped", CONV_DEFINE, API_RUNTIME, SEC::MEMORY};
+  m["cudaDeviceScheduleAuto"] = {"ascify::cudaDeviceScheduleAuto", CONV_DEFINE, API_RUNTIME, SEC::DEVICE_MGMT};
+  m["cudaDeviceScheduleSpin"] = {"ascify::cudaDeviceScheduleSpin", CONV_DEFINE, API_RUNTIME, SEC::DEVICE_MGMT};
+  m["cudaDeviceScheduleYield"] = {"ascify::cudaDeviceScheduleYield", CONV_DEFINE, API_RUNTIME, SEC::DEVICE_MGMT};
+  m["cudaDeviceScheduleBlockingSync"] = {"ascify::cudaDeviceScheduleBlockingSync", CONV_DEFINE, API_RUNTIME, SEC::DEVICE_MGMT};
+  m["cudaDeviceBlockingSync"] = {"ascify::cudaDeviceBlockingSync", CONV_DEFINE, API_RUNTIME, SEC::DEVICE_MGMT};
+  m["cudaDeviceMapHost"] = {"ascify::cudaDeviceMapHost", CONV_DEFINE, API_RUNTIME, SEC::DEVICE_MGMT};
   return m;
 }();
 

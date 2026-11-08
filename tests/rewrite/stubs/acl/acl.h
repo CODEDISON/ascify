@@ -85,6 +85,11 @@ enum aclrtEventRecordedStatus {
   ACL_EVENT_RECORDED_STATUS_NOT_READY = 0,
   ACL_EVENT_RECORDED_STATUS_COMPLETE = 1
 };
+enum aclrtHostRegisterType {
+  ACL_HOST_REGISTER_MAPPED = 0,
+  ACL_HOST_REGISTER_IOMEMORY = 0x04,
+  ACL_HOST_REGISTER_READONLY = 0x08
+};
 aclError aclrtQueryEventStatus(aclrtEvent, aclrtEventRecordedStatus*);
 
 #ifdef ASCIFY_TEST_ACL_CONTROLLABLE_RUNTIME_LIFECYCLE
@@ -209,6 +214,12 @@ extern int ascify_test_get_last_error_calls;
 #endif
 extern int ascify_test_malloc_calls;
 extern int ascify_test_malloc_host_calls;
+extern int ascify_test_host_register_calls;
+extern int ascify_test_host_unregister_calls;
+extern int ascify_test_host_get_device_pointer_calls;
+extern void* ascify_test_host_register_pointer;
+extern void* ascify_test_host_unregister_pointer;
+extern aclrtHostRegisterType ascify_test_host_register_type;
 extern int ascify_test_free_calls;
 extern int ascify_test_free_host_calls;
 extern int ascify_test_memcpy_calls;
@@ -262,6 +273,37 @@ inline aclError aclrtFree(void* pointer) {
 inline aclError aclrtFreeHost(void* pointer) {
   ++ascify_test_free_host_calls;
   ascify_test_destination = pointer;
+  return ascify_test_runtime_status;
+}
+
+inline aclError aclrtHostRegister(void* pointer, uint64_t,
+                                  aclrtHostRegisterType type,
+                                  void** device_pointer) {
+  ++ascify_test_host_register_calls;
+  ascify_test_host_register_pointer = pointer;
+  ascify_test_host_register_type = type;
+  if (device_pointer != nullptr &&
+      ascify_test_runtime_status == ACL_SUCCESS) {
+    // Identity mapping, matching the reviewed device behaviour.
+    *device_pointer = pointer;
+  }
+  return ascify_test_runtime_status;
+}
+
+inline aclError aclrtHostUnregister(void* pointer) {
+  ++ascify_test_host_unregister_calls;
+  ascify_test_host_unregister_pointer = pointer;
+  return ascify_test_runtime_status;
+}
+
+inline aclError aclrtHostGetDevicePointer(void* host_pointer,
+                                          void** device_pointer,
+                                          uint32_t) {
+  ++ascify_test_host_get_device_pointer_calls;
+  if (device_pointer != nullptr &&
+      ascify_test_runtime_status == ACL_SUCCESS) {
+    *device_pointer = host_pointer;
+  }
   return ascify_test_runtime_status;
 }
 
@@ -346,6 +388,17 @@ inline aclError aclrtMallocHost(void** pointer, size_t) {
 
 inline aclError aclrtFree(void*) { return ACL_SUCCESS; }
 inline aclError aclrtFreeHost(void*) { return ACL_SUCCESS; }
+inline aclError aclrtHostRegister(void* pointer, uint64_t,
+                                  aclrtHostRegisterType, void** device_pointer) {
+  *device_pointer = pointer;
+  return ACL_SUCCESS;
+}
+inline aclError aclrtHostUnregister(void*) { return ACL_SUCCESS; }
+inline aclError aclrtHostGetDevicePointer(void* host_pointer,
+                                          void** device_pointer, uint32_t) {
+  *device_pointer = host_pointer;
+  return ACL_SUCCESS;
+}
 
 inline aclError aclrtMemcpy(void*, size_t, const void*, size_t,
                             aclrtMemcpyKind) {

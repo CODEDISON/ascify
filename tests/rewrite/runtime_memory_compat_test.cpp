@@ -17,6 +17,12 @@ int ascify_test_malloc_calls = 0;
 int ascify_test_malloc_host_calls = 0;
 int ascify_test_free_calls = 0;
 int ascify_test_free_host_calls = 0;
+int ascify_test_host_register_calls = 0;
+int ascify_test_host_unregister_calls = 0;
+int ascify_test_host_get_device_pointer_calls = 0;
+void* ascify_test_host_register_pointer = nullptr;
+void* ascify_test_host_unregister_pointer = nullptr;
+aclrtHostRegisterType ascify_test_host_register_type = ACL_HOST_REGISTER_MAPPED;
 int ascify_test_memcpy_calls = 0;
 int ascify_test_memcpy_async_calls = 0;
 int ascify_test_memset_calls = 0;
@@ -40,6 +46,8 @@ aclError ascify_test_sync_status = ACL_SUCCESS;
 namespace {
 
 void resetRecordedCall() {
+  ascify_test_host_register_pointer = nullptr;
+  ascify_test_host_unregister_pointer = nullptr;
   ascify_test_destination = nullptr;
   ascify_test_source = nullptr;
   ascify_test_destination_max = 0;
@@ -245,10 +253,87 @@ void testMemsetAndErrorContracts() {
                      "ACL runtime error") == 0);
 }
 
+void testMappedHostContracts() {
+  alignas(int) unsigned char allocation[64] = {};
+  ascify_test_allocation_result = allocation;
+  ascify_test_runtime_status = ACL_SUCCESS;
+
+  // Default and Portable allocations stay pinned-only: no registration.
+  void* pinned = nullptr;
+  assert(ascify::cudaHostAlloc(&pinned, 32, ascify::cudaHostAllocPortable) ==
+         ACL_SUCCESS);
+  assert(pinned == allocation);
+  assert(ascify_test_host_register_calls == 0);
+  assert(ascify::cudaFreeHost(pinned) == ACL_SUCCESS);
+  assert(ascify_test_host_unregister_calls == 0);
+
+  // Mapped allocation registers the range; FreeHost unregisters it first.
+  void* mapped = nullptr;
+  assert(ascify::cudaHostAlloc(&mapped, 64, ascify::cudaHostAllocMapped) ==
+         ACL_SUCCESS);
+  assert(mapped == allocation);
+  assert(ascify_test_host_register_calls == 1);
+  assert(ascify_test_host_register_type == ACL_HOST_REGISTER_MAPPED);
+  void* device_alias = nullptr;
+  assert(ascify::cudaHostGetDevicePointer(&device_alias, mapped, 0) ==
+         ACL_SUCCESS);
+  assert(device_alias == mapped);
+  assert(ascify_test_host_get_device_pointer_calls == 1);
+  assert(ascify::cudaHostGetDevicePointer(&device_alias, mapped, 1) ==
+         ACL_ERROR_FEATURE_UNSUPPORTED);
+  assert(ascify::cudaFreeHost(mapped) == ACL_SUCCESS);
+  assert(ascify_test_host_unregister_calls == 1);
+  assert(ascify_test_host_unregister_pointer == mapped);
+
+  // Explicit registration ledger, unmapped lookup passthrough, and flags.
+  int buffer[16] = {};
+  void* alias = nullptr;
+  assert(ascify::cudaHostGetDevicePointer(&alias, buffer, 0) == ACL_SUCCESS);
+  assert(alias == buffer);
+  assert(ascify::cudaHostRegister(buffer, sizeof(buffer),
+                                  ascify::cudaHostRegisterMapped) ==
+         ACL_SUCCESS);
+  assert(ascify_test_host_register_calls == 2);
+  assert(ascify::cudaHostRegister(buffer, sizeof(buffer), 0xffffffffu) ==
+         ACL_ERROR_FEATURE_UNSUPPORTED);
+  assert(ascify::cudaHostUnregister(buffer) == ACL_SUCCESS);
+  assert(ascify_test_host_unregister_pointer == buffer);
+
+  // WriteCombined and unknown host-alloc flags stay unsupported; null and
+  // zero-size arguments fail closed without reaching the runtime.
+  const int registers = ascify_test_host_register_calls;
+  void* hostile = reinterpret_cast<void*>(1);
+  assert(ascify::cudaHostAlloc(&hostile, 32,
+                               ascify::cudaHostAllocWriteCombined) ==
+         ACL_ERROR_FEATURE_UNSUPPORTED);
+  assert(hostile == nullptr);
+  assert(ascify::cudaHostAlloc(&hostile, 32, 0xffffffffu) ==
+         ACL_ERROR_FEATURE_UNSUPPORTED);
+  assert(ascify_test_host_register_calls == registers);
+  assert(ascify::cudaHostAlloc(static_cast<void**>(nullptr), 1, 0) ==
+         ACL_ERROR_RT_PARAM_INVALID);
+  assert(ascify::cudaHostRegister(nullptr, 8, 0) ==
+         ACL_ERROR_RT_PARAM_INVALID);
+  assert(ascify::cudaHostRegister(buffer, 0, 0) == ACL_ERROR_RT_PARAM_INVALID);
+
+  // Device flags: schedule hints and MapHost are accepted epoch-wide; any
+  // unknown bit is refused instead of being silently reinterpreted.
+  assert(ascify::cudaSetDeviceFlags(ascify::cudaDeviceMapHost) == ACL_SUCCESS);
+  assert(ascify::cudaSetDeviceFlags(ascify::cudaDeviceBlockingSync |
+                                    ascify::cudaDeviceScheduleSpin) ==
+         ACL_SUCCESS);
+  assert(ascify::cudaSetDeviceFlags(ascify::cudaDeviceScheduleAuto) ==
+         ACL_SUCCESS);
+  assert(ascify::cudaSetDeviceFlags(0x10u) == ACL_ERROR_FEATURE_UNSUPPORTED);
+  assert(ascify::cudaSetDeviceFlags(0xffffffffu) ==
+         ACL_ERROR_FEATURE_UNSUPPORTED);
+}
+
 }  // namespace
 
 int main() {
   testAllocationContracts();
+  testMappedHostContracts();
   testCopyContracts();
   testDefaultStreamCopyOrdering();
   testMemsetAndErrorContracts();

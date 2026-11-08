@@ -48,6 +48,13 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   m["cudaProfilerStop"] = {"ascify::cudaProfilerStop", CONV_PROFILER, API_RUNTIME, 0};
   m["cudaLaunchHostFunc"] = {"ascify::cudaLaunchHostFunc", CONV_EXECUTION, API_RUNTIME, 0};
   m["cudaFreeHost"]                                            = {"ascify::cudaFreeHost",                                   CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  // Mapped/pinned host memory (CUDA zero-copy) and device flags; see
+  // ascify_cuda_compat.hpp for the native ACL mapping contracts.
+  m["cudaHostAlloc"] = {"ascify::cudaHostAlloc", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaHostRegister"] = {"ascify::cudaHostRegister", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaHostUnregister"] = {"ascify::cudaHostUnregister", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaHostGetDevicePointer"] = {"ascify::cudaHostGetDevicePointer", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaSetDeviceFlags"] = {"ascify::cudaSetDeviceFlags", CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
   // Bounded texture/storage surface, guarded by CudaTextureBoundary.
   m["cudaMallocPitch"] = {"ascify::cudaMallocPitch", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   m["cudaMallocArray"] = {"ascify::cudaMallocArray", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};

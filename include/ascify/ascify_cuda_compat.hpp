@@ -1078,10 +1078,191 @@ inline aclError cudaMallocHost(T** host_pointer, size_t bytes,
   return status;
 }
 
+// ---- Mapped pinned host memory (CUDA zero-copy) ---------------------------
+// CUDA flag constants keep their CUDA numeric values so caller-side flag
+// arithmetic is unchanged; the mappings below interpret them.
+inline constexpr unsigned int cudaHostAllocDefault = 0U;
+inline constexpr unsigned int cudaHostAllocPortable = 0x01U;
+inline constexpr unsigned int cudaHostAllocMapped = 0x02U;
+inline constexpr unsigned int cudaHostAllocWriteCombined = 0x04U;
+inline constexpr unsigned int cudaHostRegisterDefault = 0U;
+inline constexpr unsigned int cudaHostRegisterPortable = 0x01U;
+inline constexpr unsigned int cudaHostRegisterMapped = 0x02U;
+inline constexpr unsigned int cudaDeviceScheduleAuto = 0U;
+inline constexpr unsigned int cudaDeviceScheduleSpin = 0x01U;
+inline constexpr unsigned int cudaDeviceScheduleYield = 0x02U;
+inline constexpr unsigned int cudaDeviceScheduleBlockingSync = 0x04U;
+inline constexpr unsigned int cudaDeviceBlockingSync = 0x04U;
+inline constexpr unsigned int cudaDeviceMapHost = 0x08U;
+
+namespace detail {
+
+// Ledger of live mapped host ranges, mirroring RuntimeAllocationRegistry:
+// fixed capacity, lock protected, no dynamic allocation. cudaHostAlloc(Mapped)
+// ranges are unregistered by cudaFreeHost; explicit cudaHostRegister callers
+// unregister through cudaHostUnregister.
+struct MappedHostRecord {
+  void *pointer = nullptr;
+  size_t bytes = 0;
+};
+struct MappedHostRegistry {
+  RuntimeLock lock;
+  MappedHostRecord records[64] = {};
+};
+inline MappedHostRegistry &mappedHostRegistry() {
+  static MappedHostRegistry registry;
+  return registry;
+}
+inline bool mappedHostRemember(void *pointer, size_t bytes) {
+  if (pointer == nullptr || bytes == 0) return false;
+  RuntimeLockGuard guard(mappedHostRegistry().lock);
+  MappedHostRecord *slot = nullptr;
+  for (auto &record : mappedHostRegistry().records) {
+    if (record.pointer == pointer) return false;
+    if (slot == nullptr && record.pointer == nullptr) slot = &record;
+  }
+  if (slot == nullptr) return false;
+  slot->pointer = pointer;
+  slot->bytes = bytes;
+  return true;
+}
+inline bool mappedHostForget(const void *pointer) {
+  if (pointer == nullptr) return false;
+  RuntimeLockGuard guard(mappedHostRegistry().lock);
+  for (auto &record : mappedHostRegistry().records) {
+    if (record.pointer == pointer) {
+      record.pointer = nullptr;
+      record.bytes = 0;
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace detail
+
+// The reviewed target runtime provides real mapped-host semantics: registering
+// a host range with ACL_HOST_REGISTER_MAPPED turns that host address into a
+// valid device virtual address (aclrtHostGetDevicePointer returns the same
+// address, verified on device). CUDA's zero-copy contract -- kernels
+// dereference the mapped pointer and host/device share one memory -- is
+// implemented natively; it is never silently replaced by explicit staging
+// copies. WriteCombined has no reviewed target mapping and stays refused.
+inline aclError cudaHostAlloc(void** host_pointer, size_t bytes,
+                              unsigned int flags) {
+  if (host_pointer == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
+  *host_pointer = nullptr;
+  const unsigned int supported =
+      cudaHostAllocDefault | cudaHostAllocPortable | cudaHostAllocMapped;
+  if ((flags & ~supported) != 0U) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  void* raw_pointer = nullptr;
+  const aclError status = aclrtMallocHost(&raw_pointer, bytes);
+  if (status != ACL_SUCCESS) { return status; }
+  if ((flags & cudaHostAllocMapped) != 0U) {
+    void* device_pointer = nullptr;
+    const aclError mapped = aclrtHostRegister(
+        raw_pointer, static_cast<uint64_t>(bytes), ACL_HOST_REGISTER_MAPPED,
+        &device_pointer);
+    if (mapped != ACL_SUCCESS) {
+      const aclError rollback = aclrtFreeHost(raw_pointer);
+      return rollback == ACL_SUCCESS ? mapped : rollback;
+    }
+    if (!detail::mappedHostRemember(raw_pointer, bytes)) {
+      const aclError rollback = aclrtHostUnregister(raw_pointer);
+      const aclError freed = aclrtFreeHost(raw_pointer);
+      (void)freed;
+      return rollback == ACL_SUCCESS ? ACL_ERROR_BAD_ALLOC : rollback;
+    }
+  }
+  *host_pointer = raw_pointer;
+  return ACL_SUCCESS;
+}
+
+template<typename T>
+inline aclError cudaHostAlloc(T** host_pointer, size_t bytes,
+                              unsigned int flags) {
+  if (host_pointer == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
+  *host_pointer = nullptr;
+  void* raw_pointer = nullptr;
+  const aclError status = cudaHostAlloc(&raw_pointer, bytes, flags);
+  if (status == ACL_SUCCESS) { *host_pointer = static_cast<T*>(raw_pointer); }
+  return status;
+}
+
+// Explicit registration of caller-allocated page-locked host memory. On this
+// target registration always establishes the mapped identity (a superset of
+// CUDA's pin-only default registration); the Portable bit adds no extra work
+// in the single-visible-device epoch.
+inline aclError cudaHostRegister(void* host_pointer, size_t bytes,
+                                 unsigned int flags) {
+  if (host_pointer == nullptr || bytes == 0) {
+    return ACL_ERROR_RT_PARAM_INVALID;
+  }
+  const unsigned int supported = cudaHostRegisterDefault |
+                                  cudaHostRegisterPortable |
+                                  cudaHostRegisterMapped;
+  if ((flags & ~supported) != 0U) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  void* device_pointer = nullptr;
+  const aclError status = aclrtHostRegister(
+      host_pointer, static_cast<uint64_t>(bytes), ACL_HOST_REGISTER_MAPPED,
+      &device_pointer);
+  if (status != ACL_SUCCESS) { return status; }
+  if (!detail::mappedHostRemember(host_pointer, bytes)) {
+    const aclError rollback = aclrtHostUnregister(host_pointer);
+    return rollback == ACL_SUCCESS ? ACL_ERROR_BAD_ALLOC : rollback;
+  }
+  return ACL_SUCCESS;
+}
+
+inline aclError cudaHostUnregister(void* host_pointer) {
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  detail::mappedHostForget(host_pointer);
+  return aclrtHostUnregister(host_pointer);
+}
+
+// A device alias exists only for a registered range; an unregistered host
+// pointer fails in the runtime, exactly like CUDA's contract.
+inline aclError cudaHostGetDevicePointer(void** device_pointer,
+                                         void* host_pointer,
+                                         unsigned int flags) {
+  if (device_pointer == nullptr || host_pointer == nullptr) {
+    return ACL_ERROR_RT_PARAM_INVALID;
+  }
+  *device_pointer = nullptr;
+  if (flags != 0U) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  return aclrtHostGetDevicePointer(host_pointer, device_pointer, 0U);
+}
+
 inline aclError cudaFreeHost(void* host_pointer) {
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
+  if (detail::mappedHostForget(host_pointer)) {
+    const aclError unregistered = aclrtHostUnregister(host_pointer);
+    if (unregistered != ACL_SUCCESS) { return unregistered; }
+  }
   return aclrtFreeHost(host_pointer);
+}
+
+// CUDA device flags are host-scheduling hints plus the legacy MapHost switch.
+// Mapped-host availability on this target is a per-registration property that
+// needs no mode switch, and the schedule hints have no ACL counterpart, so
+// each listed flag is accepted without changing runtime behaviour. Unknown
+// bits remain errors; nothing is silently reinterpreted.
+inline aclError cudaSetDeviceFlags(unsigned int flags) {
+  const unsigned int supported = cudaDeviceScheduleAuto |
+                                 cudaDeviceScheduleSpin |
+                                 cudaDeviceScheduleYield |
+                                 cudaDeviceScheduleBlockingSync |
+                                 cudaDeviceMapHost;
+  if ((flags & ~supported) != 0U) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  return cudaRuntimeEnsureReady();
 }
 
 namespace detail {
@@ -1771,6 +1952,10 @@ struct cudaDeviceProp {
   // conversion gates and never pass because of these fields.
   int major;
   int minor;
+  // Native mapped-host support (aclrtHostRegister/aclrtHostGetDevicePointer)
+  // exists on this target, so canMapHostMemory reports a real reviewed
+  // capability rather than a fabricated mode bit.
+  int canMapHostMemory;
   int warpSize;
   int maxThreadsPerMultiProcessor;
   size_t totalGlobalMem;
@@ -1817,6 +2002,9 @@ inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) 
   // compute-capability readout because CANN exposes none.
   result.major = 7;
   result.minor = 0;
+  // Real native mapped-host support (verified on device): samples gating on
+  // canMapHostMemory proceed truthfully.
+  result.canMapHostMemory = 1;
   // These are device-wide SIMT limits, not per-kernel occupancy or an SM
   // capability number. Keep the frozen RTS ABI values usable with headers
   // that predate the enum names. A missing/invalid query is an explicit
