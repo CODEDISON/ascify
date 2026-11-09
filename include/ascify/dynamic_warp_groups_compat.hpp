@@ -168,9 +168,16 @@ __SIMT_DEVICE_FUNCTIONS_DECL__ inline int reduce(
   return dynamic_detail::reduce_int(group, value, operation);
 }
 
-// Read-only coordinates do not depend on a CUDA cooperative-launch workspace.
-// No validity, grid barrier, synchronization or multidimensional domain is
-// exposed. Original samples use only 1D global rank/size from ordinary launches.
+// Cooperative grid-wide synchronization is backed by the device-global
+// sense-reversing barrier defined in ascify_cuda_compat.hpp (declared here
+// so this header stays self-contained in the merged TU include order).
+namespace ascify {
+__SIMT_DEVICE_FUNCTIONS_DECL__ void grid_barrier_sync(unsigned blocks);
+}
+
+// Grid coordinates stay read-only; synchronization is the documented
+// co-residency barrier above (admission contract: the cooperative occupancy
+// advice sizes grids that can be simultaneously resident).
 class grid_group final {
   __SIMT_DEVICE_FUNCTIONS_DECL__ explicit grid_group() {}
   friend __SIMT_DEVICE_FUNCTIONS_DECL__ grid_group this_grid();
@@ -187,7 +194,20 @@ class grid_group final {
     check_dimensions();
     return static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;
   }
+  __SIMT_DEVICE_FUNCTIONS_DECL__ void sync() const {
+    check_dimensions();
+    // CUDA grid-wide sync: every thread of every block must reach this call.
+    // The block rendezvous brackets the single ticket taken by thread 0, so
+    // all lanes of a block observe barrier completion together.
+    ::ascify_cg::this_thread_block().sync();
+    if (threadIdx.x == 0)
+      ::ascify::grid_barrier_sync(static_cast<unsigned>(gridDim.x));
+    ::ascify_cg::this_thread_block().sync();
+  }
 };
 __SIMT_DEVICE_FUNCTIONS_DECL__ inline grid_group this_grid() { return grid_group(); }
+__SIMT_DEVICE_FUNCTIONS_DECL__ inline void sync(const grid_group& group) {
+  group.sync();
+}
 }  // namespace ascify_cg
 #endif

@@ -2140,6 +2140,42 @@ struct ModuleHandle {
   size_t size = 0;
 };
 
+// Device-global, sense-reversing grid barrier state. Every observation and
+// update goes through device atomics, so all co-resident blocks observe a
+// coherent epoch without relying on plain-store visibility across cores.
+__aicore__ unsigned int asc_grid_barrier_count = 0;
+__aicore__ unsigned int asc_grid_barrier_sense = 0;
+
+// Cooperative grid-wide rendezvous for co-resident blocks (the cooperative
+// occupancy advice is the admission contract; a grid larger than what can be
+// co-resident would legitimately hang, same as on CUDA hardware). Each block
+// contributes one ticket; the last arriver resets the count and flips the
+// sense; every other block spins on an atomic read until the flip. The same
+// admitted pure-SIMT gate as the generic atomics owns the implementation.
+#if defined(ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS) && \
+    defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
+__aicore__ ASCIFY_FORCEINLINE void grid_barrier_sync(unsigned blocks) {
+  const unsigned int local_sense =
+      ::ascify::atomic_add_generic(&asc_grid_barrier_sense, 0u);
+  const unsigned int ticket =
+      ::ascify::atomic_add_generic(&asc_grid_barrier_count, 1u);
+  if (ticket == blocks - 1u) {
+    ::ascify::atomic_exch_generic(&asc_grid_barrier_count, 0u);
+    ::ascify::atomic_exch_generic(&asc_grid_barrier_sense, local_sense ^ 1u);
+  } else {
+    while (::ascify::atomic_add_generic(&asc_grid_barrier_sense, 0u) ==
+           local_sense) {
+    }
+  }
+}
+#else
+__aicore__ ASCIFY_FORCEINLINE void grid_barrier_sync(unsigned) {
+  // Non-target environments parse the headers without the pure-SIMT gate;
+  // no real definition of the barrier exists there and the dynamic-warp
+  // projection never selects this TU shape for device generation.
+}
+#endif
+
 // A typed launch thunk unpacks the CUDA kernelParams void* array by the
 // kernel's own signature and performs the <<<>>> launch.
 using KernelLaunchThunk = void (*)(unsigned, unsigned, unsigned,

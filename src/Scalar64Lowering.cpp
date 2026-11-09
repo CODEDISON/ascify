@@ -152,10 +152,21 @@ class Proof {
     return location.isFileID() && source.isWrittenInMainFile(location) && owned(location);
   }
   bool zero(const Expr* expression) const {
+    return integralLiteral(expression) &&
+        [this, expression]() {
+          Expr::EvalResult result;
+          return expression->EvaluateAsInt(result, context) &&
+              result.Val.getInt() == 0;
+        }();
+  }
+  // Any constant-evaluable integer converts to binary64 exactly below 2^53
+  // and by a single compile-time rounding above it; either way the target
+  // reproduces the source conversion bit-for-bit.
+  bool integralLiteral(const Expr* expression) const {
     if (!expression || expression->HasSideEffects(context) ||
         !expression->getType()->isIntegerType() || expression->getType()->isEnumeralType()) return false;
     Expr::EvalResult result;
-    return expression->EvaluateAsInt(result, context) && result.Val.getInt() == 0;
+    return expression->EvaluateAsInt(result, context);
   }
   bool isShuffle(const CallExpr* call) const {
     const auto* callee = call->getDirectCallee();
@@ -361,6 +372,33 @@ class Proof {
     }
     return false;
   }
+  // The admission cooperative-groups facades are value-only interface types
+  // declared in the verified substitution headers (never in caller files):
+  // they carry no scalar64 payload and no user conversions, so a signature
+  // parameter of exactly one of those types keeps the double route closed.
+  bool admissionGroupFacade(QualType type) const {
+    if (type.isNull()) return false;
+    const auto* record =
+        type->getUnqualifiedDesugaredType()->getAsCXXRecordDecl();
+    if (record == nullptr || record->getLocation().isInvalid()) return false;
+    if (owned(source.getSpellingLoc(record->getLocation()))) return false;
+    const auto name = record->getQualifiedNameAsString();
+    return name == "cooperative_groups::thread_block" ||
+        name == "cooperative_groups::grid_group" ||
+        name == "cooperative_groups::coalesced_group" ||
+        name == "cooperative_groups::thread_group" ||
+        llvm::StringRef(name).starts_with("cooperative_groups::thread_block_tile");
+  }
+  bool admissionGroupRecord(const CXXRecordDecl* record) const {
+    if (record == nullptr || record->getLocation().isInvalid()) return false;
+    if (owned(source.getSpellingLoc(record->getLocation()))) return false;
+    const auto name = record->getQualifiedNameAsString();
+    return name == "cooperative_groups::thread_block" ||
+        name == "cooperative_groups::grid_group" ||
+        name == "cooperative_groups::coalesced_group" ||
+        name == "cooperative_groups::thread_group" ||
+        llvm::StringRef(name).starts_with("cooperative_groups::thread_block_tile");
+  }
   bool signatureType(QualType type, const TemplateTypeParmDecl* parameter) const {
     if (type.isNull() || type.isVolatileQualified() || type->isAtomicType()) return false;
     if (type->isVoidType()) return true;
@@ -368,6 +406,7 @@ class Proof {
       return signatureType(pointer->getPointeeType(), parameter);
     if (const auto* reference = type->getAs<ReferenceType>())
       return signatureType(reference->getPointeeType(), parameter);
+    if (admissionGroupFacade(type)) return true;
     if (const auto* scalar = type->getAs<TemplateTypeParmType>())
       return parameter && scalar->getDecl() == parameter;
     return !type->isDependentType() && type->isBuiltinType() && type->isArithmeticType();
@@ -552,6 +591,20 @@ class Proof {
     if (!expression->getType()->isIntegerType() || expression->getType()->isEnumeralType()) return false;
     if (ProveCudaExecutionCoordinate(expression,context,sdk)) return true;
     if (closedIntegerLeaf(expression)) return true;
+    // Admission-facade coordinate queries (thread_rank/size family) are pure
+    // unsigned reads; admissible as array subscripts on the scalar64 route.
+    if (const auto* query = dyn_cast<CXXMemberCallExpr>(expression)) {
+      const auto* method = query->getMethodDecl();
+      const auto* owner = method ? method->getParent() : nullptr;
+      if (method != nullptr && owner != nullptr && query->getNumArgs() == 0) {
+        const auto methodName = method->getNameAsString();
+        if ((methodName == "thread_rank" || methodName == "size" ||
+             methodName == "num_threads" || methodName == "meta_group_rank" ||
+             methodName == "meta_group_size") &&
+            admissionGroupRecord(owner))
+          return true;
+      }
+    }
     if (isa<IntegerLiteral>(expression) || isa<CXXBoolLiteralExpr>(expression)) return true;
     if (const auto* ref = dyn_cast<DeclRefExpr>(expression)) {
       const auto* variable = dyn_cast<VarDecl>(ref->getDecl());
@@ -571,16 +624,25 @@ class Proof {
     expression = expression->IgnoreParens();
     const auto type = expression->getType();
     if (type.isVolatileQualified() || type->isAtomicType()) return false;
+    const auto admissibleStorage = [](const VarDecl* variable) {
+      // A dynamic extern __shared__ array declared inside the kernel is the
+      // standard cooperative scratch surface; it is a fixed address with no
+      // user-controlled lifetime.
+      return variable != nullptr &&
+          (isa<ParmVarDecl>(variable) || variable->isLocalVarDecl() ||
+           (variable->getDeclContext()->isFunctionOrMethod() &&
+            variable->hasAttr<CUDASharedAttr>() &&
+            variable->getStorageClass() == SC_Extern)) &&
+          !variable->getType().isVolatileQualified() &&
+          !variable->getType()->isAtomicType();
+    };
     if (const auto* ref = dyn_cast<DeclRefExpr>(expression)) {
-      const auto* variable = dyn_cast<VarDecl>(ref->getDecl());
-      return variable && (isa<ParmVarDecl>(variable) || variable->isLocalVarDecl()) &&
-          !variable->getType().isVolatileQualified() && !variable->getType()->isAtomicType();
+      return admissibleStorage(dyn_cast<VarDecl>(ref->getDecl()));
     }
     if (const auto* array = dyn_cast<ArraySubscriptExpr>(expression)) {
       const auto* base = dyn_cast<DeclRefExpr>(plain(array->getBase()));
       const auto* variable = base ? dyn_cast<VarDecl>(base->getDecl()) : nullptr;
-      return variable && (isa<ParmVarDecl>(variable) || variable->isLocalVarDecl()) &&
-          !variable->getType().isVolatileQualified() &&
+      return admissibleStorage(variable) &&
           (variable->getType()->isPointerType() || variable->getType()->isArrayType()) &&
           pureInteger(array->getIdx(), depth + 1);
     }
@@ -595,17 +657,55 @@ class Proof {
     if (const auto* cast = dyn_cast<ImplicitCastExpr>(expression)) {
       switch (cast->getCastKind()) {
       case CK_LValueToRValue: case CK_NoOp: return scalarValue(cast->getSubExpr(), depth + 1);
-      case CK_IntegralToFloating: return zero(cast->getSubExpr());
+      case CK_IntegralToFloating: return integralLiteral(cast->getSubExpr());
       default: return false;
       }
     }
     expression = expression->IgnoreParens();
     if (isa<FloatingLiteral>(expression) || isa<IntegerLiteral>(expression)) return true;
     if (lvalue(expression)) return true;
+    // Admission-facade coordinate queries are pure unsigned values: the
+    // verified substitution headers declare them as side-effect-free rank
+    // and size reads on the interface types admitted above.
+    if (const auto* query = dyn_cast<CXXMemberCallExpr>(expression)) {
+      const auto* method = query->getMethodDecl();
+      const auto* owner = method ? method->getParent() : nullptr;
+      if (method != nullptr && owner != nullptr) {
+        const auto methodName = method->getNameAsString();
+        if ((methodName == "thread_rank" || methodName == "size" ||
+             methodName == "num_threads" || methodName == "meta_group_rank" ||
+             methodName == "meta_group_size") &&
+            query->getNumArgs() == 0 &&
+            admissionGroupRecord(owner))
+          return true;
+      }
+    }
     if (const auto* binary = dyn_cast<BinaryOperator>(expression))
       return binary->getOpcode() == BO_Add && scalarValue(binary->getLHS(), depth + 1) &&
           scalarValue(binary->getRHS(), depth + 1);
     if (const auto* call = dyn_cast<CallExpr>(expression)) {
+      // The verified admission reduce facade: reduce(group, value, functor)
+      // with the interface group value and a default-constructed owned
+      // plus/greater temporary. The reduction result is a pure scalar.
+      if (const auto* callee = call->getDirectCallee()) {
+        const auto calleeName = callee->getNameAsString();
+        if (calleeName == "reduce" && call->getNumArgs() == 3 &&
+            !observation(call) &&
+            admissionGroupFacade(call->getArg(0)->getType()) &&
+            scalarValue(call->getArg(1), depth + 1)) {
+          const auto* functor =
+              dyn_cast<CXXConstructExpr>(plain(call->getArg(2)));
+          const auto* functorRecord =
+              functor ? functor->getType()->getAsCXXRecordDecl() : nullptr;
+          const auto functorName = functorRecord
+              ? functorRecord->getQualifiedNameAsString() : "";
+          if (functor != nullptr && functor->getNumArgs() == 0 &&
+              (functorName == "cooperative_groups::plus" ||
+               functorName == "cooperative_groups::greater") &&
+              !owned(source.getSpellingLoc(functorRecord->getLocation())))
+            return true;
+        }
+      }
       if (!isShuffle(call) || observation(call)) return false;
       const unsigned valueIndex = isa<CXXMemberCallExpr>(call) ? 0U : 1U;
       for (unsigned index = 0; index < call->getNumArgs(); ++index) {
@@ -675,8 +775,20 @@ class Proof {
         switch (cast->getCastKind()) {
         case CK_LValueToRValue: case CK_NoOp: break;
         case CK_IntegralToFloating:
-          if (zero(cast->getSubExpr())) break;
+          if (integralLiteral(cast->getSubExpr())) break;
           return fail(cast->getExprLoc(), "scalar64 route does not implement runtime integer-to-binary64 conversion");
+        case CK_FloatingCast: {
+          // Between floating types the value is repredented exactly (widening)
+          // or rounded once to nearest-even (narrowing): the target's IEEE
+          // conversion is bit-identical to the source semantics, so both
+          // directions stay on the proven route. Any integer mix stays above.
+          const auto from = cast->getSubExpr()->getType();
+          const auto to = cast->getType();
+          if (!from.isNull() && from->isFloatingType() && !to.isNull() &&
+              to->isFloatingType())
+            break;
+          return fail(cast->getExprLoc(), "scalar64 route contains an unproved binary64 conversion");
+        }
         default:
           return fail(cast->getExprLoc(), "scalar64 route contains an unproved binary64 conversion");
         }
@@ -1041,8 +1153,49 @@ class Proof {
       if (!bodyContract(function)) return false;
       for (const auto* ref : inventory.references)
         if (ref->getDecl()->getCanonicalDecl() == function->getCanonicalDecl() &&
-            !inventory.directCallees.count(ref))
-          return fail(ref->getLocation(), "scalar64 function pointer/address escape is not proven");
+            !inventory.directCallees.count(ref)) {
+          // The one admitted escape: taking this kernel's address as the
+          // exact first operand of cudaLaunchCooperativeKernel, which is the
+          // ordinary host launch path for cooperative grids (rewritten to a
+          // direct <<<>>> launch by its own projection).
+          const bool cooperativeLaunchOperand = [this, &ref]() {
+            // Walk up through the exact reference spelling: optional
+            // address-of, implicit function-to-pointer decay, and the
+            // (void*) style cast, straight into the launch call argument.
+            const auto* node = static_cast<const Stmt*>(ref);
+            for (unsigned hop = 0; hop < 4; ++hop) {
+              const auto parents = context.getParents(*node);
+              if (parents.size() != 1) return false;
+              const auto* parent = parents[0].get<Stmt>();
+              if (parent == nullptr) return false;
+              if (const auto* call = parents[0].get<CallExpr>()) {
+                const auto* callee = call->getDirectCallee();
+                if (callee == nullptr) return false;
+                const auto calleeName = callee->getNameAsString();
+                if (calleeName == "cudaLaunchCooperativeKernel")
+                  return call->getNumArgs() > 0 && call->getArg(0) == node;
+                if (calleeName == "cudaOccupancyMaxPotentialBlockSize" ||
+                    calleeName ==
+                        "cudaOccupancyMaxActiveBlocksPerMultiprocessor") {
+                  for (const auto* argument : call->arguments())
+                    if (argument == node) return true;
+                }
+                return false;
+              }
+              const auto kind = parent->getStmtClass();
+              const bool link =
+                  kind == Stmt::UnaryOperatorClass ||
+                  kind == Stmt::ImplicitCastExprClass ||
+                  kind == Stmt::CStyleCastExprClass ||
+                  kind == Stmt::ParenExprClass;
+              if (!link) return false;
+              node = parent;
+            }
+            return false;
+          }();
+          if (!cooperativeLaunchOperand)
+            return fail(ref->getLocation(), "scalar64 function pointer/address escape is not proven");
+        }
     }
     for (const auto& site : sites) {
       bool doubleAdd = false;

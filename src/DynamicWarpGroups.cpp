@@ -598,8 +598,14 @@ class Proof {
       if(!groupArgument(member->getBase(),entry.owner))return fail(call->getExprLoc(),"dynamic member object is not the unique local factory value");
       const auto* v=variable(member->getBase());const auto k=kind(v->getType());const auto name=f->getNameAsString();
       if(k==Kind::Grid) {
-        if((name!="thread_rank"&&name!="size")||call->getNumArgs()!=0||
-            !context.hasSameUnqualifiedType(call->getType(),context.UnsignedLongLongTy))return fail(call->getExprLoc(),"grid group exposes only ULL rank/size");
+        if(name=="sync") {
+          // Cooperative grid-wide rendezvous backed by the device-global
+          // sense-reversing barrier; the AST proof still pins the exact
+          // unique local factory value, zero arguments and void result.
+          if(call->getNumArgs()!=0||!call->getType()->isVoidType())
+            return fail(call->getExprLoc(),"grid sync requires a zero-argument void form");
+        }else if((name!="thread_rank"&&name!="size")||call->getNumArgs()!=0||
+            !context.hasSameUnqualifiedType(call->getType(),context.UnsignedLongLongTy))return fail(call->getExprLoc(),"grid group exposes only ULL rank/size/sync");
         ++stats.coordinateQueries;stats.scalarExpressions.insert(call);
       }else if((name=="thread_rank"||name=="size"||name=="num_threads"||name=="meta_group_rank"||name=="meta_group_size")&&call->getNumArgs()==0) {
         if(!context.hasSameUnqualifiedType(call->getType(),context.UnsignedIntTy))return fail(call->getExprLoc(),"coalesced query must preserve CUDA unsigned-int type");
@@ -611,6 +617,13 @@ class Proof {
             call->getArg(0)->HasSideEffects(context))return fail(call->getExprLoc(),"coalesced shuffle admits only builtin int/uint broadcast from literal rank0");
         ++stats.shuffles;
       }else return fail(call->getExprLoc(),"unproved dynamic group member (sync/escape/representation is not admitted)");
+    }else if(f->getQualifiedNameAsString()=="cooperative_groups::sync"&&call->getNumArgs()==1) {
+      // The free sync(group) form on the grid value is the same cooperative
+      // rendezvous as the member call: unique local factory argument only.
+      if(!groupArgument(call->getArg(0),entry.owner)||
+          kind(call->getArg(0)->getType())!=Kind::Grid||
+          !call->getType()->isVoidType())
+        return fail(call->getExprLoc(),"free grid sync requires the unique local grid value");
     }else if(f->getQualifiedNameAsString()=="cooperative_groups::reduce"&&call->getNumArgs()==3) {
       if(!groupArgument(call->getArg(0),entry.owner)||kind(call->getArg(0)->getType())!=Kind::Coalesced||
           !context.hasSameUnqualifiedType(call->getType(),context.IntTy)||

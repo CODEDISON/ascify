@@ -156,6 +156,9 @@ class grid_group {
   ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync() const;
 };
 ASCIFY_FRONTEND_COMPAT_DEVICE_ grid_group this_grid();
+ASCIFY_FRONTEND_COMPAT_DEVICE_ inline void sync(const grid_group& group) {
+  group.sync();
+}
 class coalesced_group {
  protected:
   ASCIFY_FRONTEND_COMPAT_DEVICE_ coalesced_group();

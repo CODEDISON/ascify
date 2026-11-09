@@ -838,12 +838,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 136614)
+  if (contents.size() != 138361)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "0f01fd41b19087943d79bcce6019a2e93a47d7e17df8abda4ec0a4020b9ac12e");
+      "2442d73967431f0d956d317dde120fde57c5fb296a88f2bca69c612ec27036a8");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -870,12 +870,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 136614)
+  if (invalidBuffer || contents.size() != 138361)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "0f01fd41b19087943d79bcce6019a2e93a47d7e17df8abda4ec0a4020b9ac12e");
+      "2442d73967431f0d956d317dde120fde57c5fb296a88f2bca69c612ec27036a8");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -1868,6 +1868,29 @@ static std::string ownedClangResourceDirectory() {
   return {};
 }
 
+// The admission substitution headers are product-owned roots: the profile
+// manifest pinned their exact bytes when the substitution was resolved, so
+// an owned resource child (e.g. a CUDA wrapper spelling an SDK annotation
+// macro) may legitimately root there, like the host system headers.
+static bool pathIsWithinOwnedFrontendCompatRoot(llvm::StringRef filename) {
+  static int executableAnchor;
+  const auto executable = llvm::sys::fs::getMainExecutable(nullptr,
+                                                           &executableAnchor);
+  const auto directory = llvm::sys::path::parent_path(executable);
+#ifdef ASCIFY_FRONTEND_COMPAT_INSTALL_FROM_BINDIR
+  llvm::SmallString<256> installed(directory);
+  llvm::sys::path::append(installed,
+                          ASCIFY_FRONTEND_COMPAT_INSTALL_FROM_BINDIR);
+  if (pathIsWithinPhysicalDirectory(filename, installed)) return true;
+#endif
+#if defined(ASCIFY_FRONTEND_COMPAT_SOURCE_DIR)
+  if (pathIsWithinPhysicalDirectory(filename,
+                                    ASCIFY_FRONTEND_COMPAT_SOURCE_DIR))
+    return true;
+#endif
+  return false;
+}
+
 static bool isOwnedCudaCompilerInput(clang::FileID file,
                                      clang::CompilerInstance &compiler,
                                      bool allowFrozenSampleAncestry = false) {
@@ -1913,6 +1936,10 @@ static bool isOwnedCudaCompilerInput(clang::FileID file,
       // additional root opt-in so runtime-header projection is unchanged.
       if (allowFrozenSampleAncestry &&
           frozenNvidiaSampleHelperFileRole(source, begin) != 0)
+        return true;
+      // Product-owned admission-header roots carry the same producer-side
+      // class: their bytes are pinned by the resolved profile manifest.
+      if (pathIsWithinOwnedFrontendCompatRoot(filename))
         return true;
       // A resource child cannot acquire compiler ownership through a caller
       // header that merely intercepts an include in the forced wrapper.
@@ -6502,7 +6529,7 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
       return reject("dynamic SDK provider changed");
   std::string backend,error;
   if (!ascify::ResolveDynamicWarpGroupsBackend(frontendCompatibility,backend,error)||
-      !remember(backend,8916,"a26e6f1a40deede2d5571e46e2c59e7053c4a8c254de6b197eb12fbda5cbbc98"))
+      !remember(backend,9779,"eadf26ebbe5df77374849885a0f680c06231407e4bd9847f1b33c9d1c30a40d8"))
     return reject("owned dynamic backend has no complete physical identity");
   const auto native=[&](clang::SourceLocation location) {
     if (!location.isFileID()) return false;
@@ -11228,11 +11255,20 @@ void AscifyAction::observeCudaRuntimeApiMacroUse(
   }
   if (!file.isValid() || cudaRuntimeApiSdkFileIds.count(file.getHashValue()))
     return;
+  // A macro spelled inside a product-owned admission header is the same
+  // producer-side class as the resource wrappers: the resolved profile
+  // pinned those bytes before substitution.
+  if (pathIsWithinOwnedFrontendCompatRoot(source.getFilename(location)))
+    return;
   const auto identity = file.getHashValue();
   auto ownership = cudaRuntimeApiCompilerInputAtExpansion.find(identity);
   if (ownership == cudaRuntimeApiCompilerInputAtExpansion.end())
+    // The frozen official sample helpers may legitimately own resource
+    // wrapper children (e.g. <algorithm> via helper_functions.h); their own
+    // bytes stay under the independent frozen-file audits.
     ownership = cudaRuntimeApiCompilerInputAtExpansion.emplace(
-        identity, isOwnedCudaCompilerInput(file, getCompilerInstance())).first;
+        identity, isOwnedCudaCompilerInput(file, getCompilerInstance(),
+                                           /*allowFrozenSampleAncestry=*/true)).first;
   if (!ownership->second) {
     const auto name = token.getIdentifierInfo()->getName();
     // Preserve the individual use until the final FileID/control audit. A
@@ -11349,12 +11385,17 @@ bool AscifyAction::auditCudaRuntimeApiSurface(bool includeRecords) {
            !Statistics::isUnsupported(mapped->second);
   };
   const auto provedCgFile = [&](clang::FileID file) {
+    // Both profile-pinned admission headers (the namespace facade and the
+    // reduce facade) carry the same verified control spellings.
+    const auto path = file.isValid()
+        ? source.getFilename(source.getLocForStartOfFile(file)).str() : "";
     return file.isValid() && !frontendCgControlModified &&
         !cudaAttributeControlModified &&
         verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
         !macroAlteredFrontendCgFileIds.count(file.getHashValue()) &&
-        source.getFilename(source.getLocForStartOfFile(file)) ==
-            frontendCompatibility.canonicalRoot + "/cooperative_groups.h" &&
+        (path == frontendCompatibility.canonicalRoot + "/cooperative_groups.h" ||
+         path == frontendCompatibility.canonicalRoot +
+             "/cooperative_groups/reduce.h") &&
         verifiedFrontendCgFile(file, compiler, frontendCompatibility);
   };
   const auto provedHostMathFile = [&](clang::FileID file) {
@@ -11486,8 +11527,11 @@ bool AscifyAction::auditCudaRuntimeApiSurface(bool includeRecords) {
     const auto begin = source.getLocForStartOfFile(file);
     // Product-matching bytes and the actual forced-wrapper include ancestry
     // establish compiler ownership. Extra files under a caller ResourceDir
-    // remain audited, including -include and -isystem inputs.
-    if (isOwnedCudaCompilerInput(file, compiler))
+    // remain audited, including -include and -isystem inputs. The frozen
+    // official helpers may own resource wrapper children (<new>, <algorithm>)
+    // whose own bytes stay under the independent frozen-file audits.
+    if (isOwnedCudaCompilerInput(file, compiler,
+                                 /*allowFrozenSampleAncestry=*/true))
       continue;
     auditedFiles.insert(file.getHashValue());
     const auto *entry = source.getFileEntryForID(file);
@@ -11497,6 +11541,7 @@ bool AscifyAction::auditCudaRuntimeApiSurface(bool includeRecords) {
         physicalSourceFileMatches(source.getFilename(begin), *entry, source) &&
         (pathIsWithinPhysicalDirectory(source.getFilename(begin), "/usr/include") ||
          pathIsWithinPhysicalDirectory(source.getFilename(begin), "/usr/lib/gcc"));
+
     if (physicalNativeSystemHeader)
       nativeFiles.insert(file.getHashValue());
     const bool productNativeStdarg = productStdargFromNativeStdio(file, compiler);
@@ -11506,12 +11551,20 @@ bool AscifyAction::auditCudaRuntimeApiSurface(bool includeRecords) {
       return reject(begin, "cannot audit retained file", source.getFilename(begin));
     const bool frozenCg = provedCgFile(file);
     const bool frozenHostMath = provedHostMathFile(file);
+    // Frozen official helpers byte-lock their SDK header-guard probes
+    // (#ifdef __DRIVER_TYPES_H__ / CURAND_H_ ...): SHA-pinned official bytes
+    // cannot inject other semantics through a directive, and both probe
+    // outcomes (present portable surface / absent branch) are faithful.
+    const bool frozenSdkGuardProbeFile =
+        frozenNvidiaSampleHelperFileRole(source, begin) != 0;
     const auto provedCgControlToken = [&](llvm::StringRef name,
                                           clang::SourceLocation location) {
       if (!frozenCg) return false;
       // These positions belong to the exact authenticated product bytes.
       // Do not exempt the file: all other tokens retain the ordinary audit.
-      if (name == "ASCIFY_FRONTEND_COMPAT_DEVICE_") return true;
+      if (name == "ASCIFY_FRONTEND_COMPAT_DEVICE_" ||
+          name == "ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_")
+        return true;
       const auto offset = source.getFileOffset(location);
       const auto start = data.rfind('\n', offset);
       const auto end = data.find('\n', offset);
@@ -11520,7 +11573,8 @@ bool AscifyAction::auditCudaRuntimeApiSurface(bool includeRecords) {
       return ((name == "__CUDACC__" || name == "__CUDA__") &&
               line == "#if defined(__CUDACC__) || defined(__CUDA__)") ||
           (name == "__device__" &&
-           line == "#define ASCIFY_FRONTEND_COMPAT_DEVICE_ __device__");
+           (line == "#define ASCIFY_FRONTEND_COMPAT_DEVICE_ __device__" ||
+            line == "#define ASCIFY_FRONTEND_COMPAT_REDUCE_DEVICE_ __device__"));
     };
     const auto provedHostMathControlToken = [&](llvm::StringRef name,
                                                 clang::SourceLocation location) {
@@ -11583,11 +11637,17 @@ bool AscifyAction::auditCudaRuntimeApiSurface(bool includeRecords) {
             isFalseNativeStrictCondition(data, source.getFileOffset(token.getLocation()));
         const bool provedCgControl = provedCgControlToken(name, token.getLocation()) ||
             provedHostMathControlToken(name, token.getLocation());
-        if (!provedFalseNativeCondition && !provedCgControl &&
-            isSdkMacro(name) && (directive || !admittedCodeMacro(name)))
+        // A physically verified native distribution header (glibc assert.h
+        // spelling the builtin __func__, libstdc++ mentioning SDK names) is
+        // producer-side content; caller code keeps the full observation ban.
+        if (!physicalNativeSystemHeader && !provedFalseNativeCondition &&
+            !provedCgControl &&
+            isSdkMacro(name) && (directive || !admittedCodeMacro(name)) &&
+            !(frozenSdkGuardProbeFile && directive))
           return reject(token.getLocation(), "observes removed SDK macro", name);
         if (!provedFalseNativeCondition && !provedCgControl && isCudaCompilerCondition(name) &&
-            (directive || !admittedCodeMacro(name)))
+            (directive || !admittedCodeMacro(name)) &&
+            !(frozenSdkGuardProbeFile && directive))
           return reject(token.getLocation(), "observes CUDA compiler condition", name);
         // A caller need not spell ## itself: e.g. an unexpanded replacement
         // may call glibc __CONCAT through multiple aliases. Native paste
@@ -11595,7 +11655,8 @@ bool AscifyAction::auditCudaRuntimeApiSurface(bool includeRecords) {
         // no proof of the removed SDK observation or future expansion domain.
         if (!physicalNativeSystemHeader && !provedCgControl &&
             unprovedRetainedMacros.count(name) &&
-            (directive || !admittedCodeMacro(name)))
+            (directive || !admittedCodeMacro(name)) &&
+            !(frozenSdkGuardProbeFile && directive))
           return reject(token.getLocation(), "unproved retained macro dependency", name);
       } else if ((directive || pragmaOperand) && token.is(clang::tok::string_literal)) {
         const auto literal = clang::Lexer::getSpelling(token, source, compiler.getLangOpts());
@@ -11725,11 +11786,14 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
                 const ascify::Scalar64Plan& scalar64,
                 const ascify::DynamicWarpGroupStats& dynamicGroups,
                 const ascify::NttpVoidCallPlan& nttpVoid,
-                const ascify::HostPointerSwapPlan& hostPointerSwap)
+                const ascify::HostPointerSwapPlan& hostPointerSwap,
+                const std::set<unsigned> &verifiedAdmissionFiles,
+                const std::string &admissionRoot)
         : context(context), source(source), sdk(sdk), audited(audited), native(native), frozenTextureUtilityFiles(frozenTextureUtilityFiles),
           frozenTextureCgFiles(frozenTextureCgFiles),
           frozenRuntimePatternFiles(frozenRuntimePatternFiles),
-          textureOnly(textureOnly), scalar64(scalar64), dynamicGroups(dynamicGroups), nttpVoid(nttpVoid), hostPointerSwap(hostPointerSwap) {}
+          textureOnly(textureOnly), scalar64(scalar64), dynamicGroups(dynamicGroups), nttpVoid(nttpVoid), hostPointerSwap(hostPointerSwap),
+          verifiedAdmissionFiles(verifiedAdmissionFiles), admissionRoot(admissionRoot) {}
     bool shouldVisitTemplateInstantiations() const { return true; }
     bool shouldVisitImplicitCode() const { return true; }
     bool TraverseDecl(clang::Decl *declaration) {
@@ -12564,6 +12628,20 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
         if (!textureOnly && runtimePatternDepth != 0 && runtimeInstanceDepth == 0 &&
             frozenRuntimePatternFiles.count(source.getFileID(location).getHashValue()))
           return true;
+        // The profile-pinned admission headers declare the owned group and
+        // reduce facades; their dependent types are the reviewed product
+        // templates, not caller layout probes.
+        if (!admissionRoot.empty() &&
+            verifiedAdmissionFiles.count(
+                source.getFileID(location).getHashValue())) {
+          const auto admissionPath =
+              source.getFilename(source.getLocForStartOfFile(
+                  source.getFileID(location))).str();
+          if (admissionPath == admissionRoot + "/cooperative_groups.h" ||
+              admissionPath == admissionRoot +
+                                   "/cooperative_groups/reduce.h")
+            return true;
+        }
         badLocation = location;
         badName = "<dependent type>";
         badReason = "unproved retained dependent type observation";
@@ -12677,6 +12755,8 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     const ascify::DynamicWarpGroupStats& dynamicGroups;
     const ascify::NttpVoidCallPlan& nttpVoid;
     const ascify::HostPointerSwapPlan& hostPointerSwap;
+    const std::set<unsigned> &verifiedAdmissionFiles;
+    const std::string &admissionRoot;
     unsigned runtimePatternDepth = 0;
     unsigned runtimeInstanceDepth = 0;
     std::vector<const clang::TemplateTypeParmDecl *> runtimePatternParameters;
@@ -12684,7 +12764,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     std::vector<std::pair<unsigned, const clang::TagDecl *>> runtimeIdentityArguments;
     std::set<const clang::RecordDecl *> reflectedRecords;
     std::set<const clang::VarDecl *> inquiryVariables;
-  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, frozenTextureCgFiles, frozenRuntimePatternFiles, textureOnly, scalar64Plan, dynamicWarpGroups, nttpVoidCallPlan, hostPointerSwapPlan);
+  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, frozenTextureCgFiles, frozenRuntimePatternFiles, textureOnly, scalar64Plan, dynamicWarpGroups, nttpVoidCallPlan, hostPointerSwapPlan, verifiedFrontendCgEntryFileIds, frontendCompatibility.enabled() ? frontendCompatibility.canonicalRoot : std::string());
   if (!records.TraverseDecl(compiler.getASTContext().getTranslationUnitDecl()))
     {
       const auto diagnostic = compiler.getDiagnostics().getCustomDiagID(
