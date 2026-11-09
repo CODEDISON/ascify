@@ -352,6 +352,28 @@ __aicore__ ASCIFY_FORCEINLINE T atomic_exch_generic(T *, V) {
 }
 #endif
 
+// Exact SDK int/uint maximum on a generic pointer/reference or shared scalar,
+// selected for calls proven rooted at a pure device helper parameter. The
+// address space stays whatever pure SIMT infers (GM or UB).
+#if defined(ASCIFY_SIMT_LEGACY_HAS_GM_ATOMICS) && \
+    defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
+__aicore__ ASCIFY_FORCEINLINE int32_t atomic_max_generic(
+    int32_t *address, int32_t value) {
+  return asc_atomic_max(address, value);
+}
+__aicore__ ASCIFY_FORCEINLINE uint32_t atomic_max_generic(
+    uint32_t *address, uint32_t value) {
+  return asc_atomic_max(address, value);
+}
+#else
+template<typename T, typename V>
+__aicore__ ASCIFY_FORCEINLINE T atomic_max_generic(T *, V) {
+  static_assert(detail::dependentFalse<T>::value,
+                "Ascify: generic maximum requires the admitted pure-SIMT API");
+  return T{};
+}
+#endif
+
 // These wrappers are internal targets for AST-proven global atomic calls.
 // The frontend admits addresses rooted at a parameter of the current CUDA
 // global kernel, or atomicInc on a separately proved same-module uint32 device
@@ -1966,19 +1988,24 @@ inline int sampleFindCudaDevice(int argc, const char** argv) {
 // Keep the CUDA argument order and result width at the translated call site.
 // aclrtGetDeviceInfo instead takes device first and writes an int64_t.
 struct UnsupportedCudaSmAttribute {};
-inline constexpr UnsupportedCudaSmAttribute cudaDevAttrComputeCapabilityMajor{};
-inline constexpr UnsupportedCudaSmAttribute cudaDevAttrComputeCapabilityMinor{};
+inline constexpr aclrtDevAttr cudaDevAttrComputeCapabilityMajor =
+    static_cast<aclrtDevAttr>(79000001U);
+inline constexpr aclrtDevAttr cudaDevAttrComputeCapabilityMinor =
+    static_cast<aclrtDevAttr>(79000002U);
 
-inline aclError cudaDeviceGetAttribute(int* value, UnsupportedCudaSmAttribute,
-                                      int device) {
-  if (value == nullptr || device < 0) { return ACL_ERROR_RT_PARAM_INVALID; }
-  // CUDA SM versions have no NPU equivalent. Preserve the output and return
-  // an explicit failure; these selector tags carry no fabricated SM number.
-  return ACL_ERROR_FEATURE_UNSUPPORTED;
-}
+// The capability-epoch pair documented on cudaDeviceProp (7.0) is also the
+// value these selector tags report: the reviewed SIMT admission set, not an
+// NVIDIA SM hardware readout (CANN exposes none). Every other SM-shaped
+// attribute stays unsupported and carries no fabricated number.
 
 inline aclError cudaDeviceGetAttribute(int* value, aclrtDevAttr attribute, int device) {
   if (value == nullptr || device < 0) { return ACL_ERROR_RT_PARAM_INVALID; }
+
+  // The capability-epoch selector tags are Ascify-private encodings: they
+  // document the cudaDeviceProp epoch pair and are answered here instead of
+  // being forwarded to aclrt, whose attribute enum has no such member.
+  if (attribute == cudaDevAttrComputeCapabilityMajor) { *value = 7; return ACL_SUCCESS; }
+  if (attribute == cudaDevAttrComputeCapabilityMinor) { *value = 0; return ACL_SUCCESS; }
 
   const aclError initialized = detail::runtime_manager.ensureInitialized();
   if (initialized != ACL_SUCCESS) {

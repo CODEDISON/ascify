@@ -144,6 +144,7 @@ enum FrozenNvidiaSampleHelperFileRole : unsigned {
   FrozenOfficialNvidiaSampleHelperImage = 1U << 3,
   FrozenOfficialNvidiaSampleHelperTimer = 1U << 4,
   FrozenOfficialNvidiaSampleHelperDrvapi = 1U << 5,
+  FrozenOfficialNvidiaSampleHelperException = 1U << 6,
 };
 
 std::string contextualInputSha256(llvm::StringRef contents) {
@@ -237,7 +238,8 @@ unsigned frozenNvidiaSampleHelperFileRole(
       sourceManager.getFilename(spelling));
   if (filename != "helper_cuda.h" && filename != "helper_string.h" &&
       filename != "helper_functions.h" && filename != "helper_image.h" &&
-      filename != "helper_timer.h" && filename != "helper_cuda_drvapi.h")
+      filename != "helper_timer.h" && filename != "helper_cuda_drvapi.h" &&
+      filename != "exception.h")
     return FrozenNvidiaSampleHelperNone;
   bool invalidBuffer = false;
   const llvm::StringRef contents =
@@ -260,6 +262,16 @@ unsigned frozenNvidiaSampleHelperFileRole(
             contents,
             "0494246768a4e3dbfcd688d79f4abad1fa39fc9f2d9dc3264a894f1c96d3785d"))
       return FrozenOfficialNvidiaSampleHelperCuda;
+  } else if (filename == "exception.h") {
+    // NVIDIA cuda-samples v13.0 Common/exception.h: one of the four frozen
+    // helper-closure dependencies (helper_cuda.h includes it and the closure
+    // retains it in the translated TU). Same provenance class as the other
+    // frozen roles for the dynamic-warp conditional audit.
+    if (contents.size() == 6168 &&
+        sha256Equals(
+            contents,
+            "ad043023a652bf3610671aad88237383c7bf2e17c66f8da5830d1d668fe7bbe7"))
+      return FrozenOfficialNvidiaSampleHelperException;
   } else if (filename == "helper_cuda_drvapi.h") {
     // NVIDIA cuda-samples v13.0 commit b7c5481c556c3fe98db060207ecaa41a4b9a9abc:
     // the Driver-API helper surface (findCudaDeviceDRV, findFatbinPath and the
@@ -826,12 +838,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 135415)
+  if (contents.size() != 136614)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "9238f16df259e43e4a566d7a591097e97ba3fe9ecf42714e07e626459eb98b7d");
+      "0f01fd41b19087943d79bcce6019a2e93a47d7e17df8abda4ec0a4020b9ac12e");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -858,12 +870,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 135415)
+  if (invalidBuffer || contents.size() != 136614)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "9238f16df259e43e4a566d7a591097e97ba3fe9ecf42714e07e626459eb98b7d");
+      "0f01fd41b19087943d79bcce6019a2e93a47d7e17df8abda4ec0a4020b9ac12e");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -1981,6 +1993,12 @@ static bool fullWarpNativeCompilerInput(clang::FileID file,
     if (!physicalOwnedClangInput(file, compiler)) {
       const auto at = source.getLocForStartOfFile(file);
       const auto path = source.getFilename(at);
+      // The configured --cuda-path tree is an audited producer-side SDK
+      // identity (separate dependency checks own its provenance); an owned
+      // wrapper chain may legitimately root there, same as the host system
+      // headers below.
+      if (pathIsWithinConfiguredCudaInclude(path))
+        return true;
       const auto *entry = source.getFileEntryForID(file);
       return entry && initialSystemFiles.count(file.getHashValue()) &&
           source.isInSystemHeader(at) && physicalSourceFileMatches(path, *entry, source) &&
@@ -6556,15 +6574,73 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
     // Reuse the existing physical product-resource/native-parent proof for
     // this raw-token role only; it never grants CUDA SDK AST ownership.
     if (native(begin)||fullWarpNativeCompilerInput(file,compiler,trustedSystemFileIds)) continue;
+    // The configured --cuda-path is an already-audited SDK dependency tree
+    // (its include tuple is pinned by the SDK identity checks elsewhere).
+    // Its headers are producer-side input, not caller retentions.
+    if (pathIsWithinConfiguredCudaInclude(source.getFilename(begin)))
+      continue;
+    // Same producer-side class for the toolchain's own CUDA wrappers: a file
+    // that byte- and hash-matches the product's owned clang resource tree
+    // (physicalOwnedClangInput pins resourceRoot == the owned install and
+    // re-reads the reference file) cannot be a caller retention. The command
+    // -D names those wrappers legitimately spell do not void that identity.
+    if (physicalOwnedClangInput(file,compiler)) continue;
     bool invalid=false;const auto bytes=source.getBufferData(file,&invalid);
     if (invalid) return reject("cannot inventory dynamic caller macro history");
     const bool frozenHelper=frozenNvidiaSampleHelperFileRole(source,begin)!=0;
     clang::Lexer lexer(begin,compiler.getLangOpts(),bytes.begin(),bytes.begin(),bytes.end());
     unsigned directive=0;
+    // Target-equivalent __CUDA_ARCH__ witness state: the conversion parses
+    // under the exact --cuda-gpu-arch value and the target compile pins
+    // __CUDA_ARCH__ to that same value, so a directive line whose only
+    // identifier is the compiler builtin evaluates identically on the
+    // target. A caller-defined __CUDA_ARCH__ voids the witness.
+    unsigned archConditionalDepth=0;
+    unsigned long long archDriverPinnedValue=0;
+    int archCollectRemaining=0;
+    bool archCollectIsOpener=false;
+    bool archSawForeignIdentifier=false;
+    bool archBuiltinClean=true;
+    bool archCommandPinned=false;
+    for (const auto &macro:compiler.getPreprocessorOpts().Macros) {
+      // The conversion driver pins __CUDA_ARCH__ from --cuda-gpu-arch; that
+      // plain numeric define is exactly the target-equivalent witness and
+      // stays clean. Anything else (undef, spliced, multi-token) voids it.
+      llvm::StringRef spelling(macro.first);
+      if (!spelling.starts_with("__CUDA_ARCH__")) continue;
+      if (macro.second||!spelling.consume_front("__CUDA_ARCH__=")||
+          spelling.empty()||spelling.getAsInteger(10,archDriverPinnedValue))
+        archBuiltinClean=false;
+      else
+        archCommandPinned=true;
+    }
+    (void)archCommandPinned;
+    // No definition-location audit is needed here: any caller-source
+    // #define/#undef of __CUDA_ARCH__ is rejected outright by the raw
+    // define/undef audit below, and every non-caller file class (system
+    // headers, owned resources, the configured SDK tree) is skipped before
+    // this loop body runs. The offload layer remains free to own the
+    // builtin's final definition.
     for (;;) {
       clang::Token token;lexer.LexFromRawLexer(token);
-      if (token.is(clang::tok::eof))break;
-      if (token.isAtStartOfLine())directive=token.is(clang::tok::hash)?1:0;
+      if (token.is(clang::tok::eof)) {
+        if (archCollectRemaining>0) {
+          if (!archBuiltinClean||archSawForeignIdentifier)
+            return reject("retained caller conditional has no target-equivalent source witness");
+          if (archCollectIsOpener) ++archConditionalDepth;
+          archCollectRemaining=0;
+        }
+        break;
+      }
+      if (token.isAtStartOfLine()) {
+        if (archCollectRemaining>0) {
+          if (!archBuiltinClean||archSawForeignIdentifier)
+            return reject("retained caller conditional has no target-equivalent source witness");
+          if (archCollectIsOpener) ++archConditionalDepth;
+          archCollectRemaining=0;
+        }
+        directive=token.is(clang::tok::hash)?1:0;
+      }
       if (!token.isAnyIdentifier())continue;
       const auto name=clang::Lexer::getSpelling(token,source,compiler.getLangOpts());
       if(llvm::StringRef(name).starts_with("_CG_")||llvm::StringRef(name).starts_with("_COOPERATIVE_GROUPS_"))
@@ -6581,10 +6657,45 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
         return reject("retained caller token can inject an owned backend name");
       if (directive==1&&!frozenHelper&&
           (name=="if"||name=="ifdef"||name=="ifndef"||name=="elif"||
-           name=="elifdef"||name=="elifndef"||name=="else"||name=="endif"))
-        return reject("retained caller conditional has no target-equivalent source witness");
+           name=="elifdef"||name=="elifndef"||name=="else"||name=="endif")) {
+        if (name=="else"||name=="endif") {
+          if (archConditionalDepth==0)
+            return reject("retained caller conditional has no target-equivalent source witness");
+          if (name=="endif") --archConditionalDepth;
+          directive=0;
+          continue;
+        } else if (llvm::StringRef(name).starts_with("elif")) {
+          if (archConditionalDepth==0)
+            return reject("retained caller conditional has no target-equivalent source witness");
+          archCollectRemaining=64;
+          archSawForeignIdentifier=false;
+          archCollectIsOpener=false;
+          directive=2;
+        } else {
+          archCollectRemaining=64;
+          archSawForeignIdentifier=false;
+          archCollectIsOpener=true;
+          directive=2;
+        }
+        continue;
+      } else if (archCollectRemaining>0) {
+        if (llvm::StringRef(name)!="__CUDA_ARCH__")
+          archSawForeignIdentifier=true;
+        --archCollectRemaining;
+        continue;
+      }
       if (directive==1)directive=(name=="define"||name=="undef")?2:0;
       else if (directive==2) {
+        if (name=="__CUDA_ARCH__") {
+          // The command-line pin physically lands as a #define in the
+          // nameless predefines buffer; that is the validated driver pin
+          // itself. Only a define/undef inside a named caller file can
+          // forge the builtin.
+          if (!llvm::StringRef(source.getFilename(begin)).empty())
+            return reject("retained define/undef captures the pinned architecture builtin");
+          directive=0;
+          continue;
+        }
         if (token.needsCleaning()||isDynamicWarpControlledToken(name))
           return reject("retained define/undef captures a dynamic backend token");
         directive=0;
@@ -9674,6 +9785,68 @@ bool AscifyAction::rewriteProvenGenericAtomicExchCall(
   static const dppCounter counter = {
       "CUDA generic exchange", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
   Statistics::current().incrementCounter(counter, "SDK int/uint generic atomicExch");
+  return true;
+}
+
+bool AscifyAction::rewriteProvenGenericAtomicMaxCall(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
+  if (call == nullptr || Result.Context == nullptr || Result.SourceManager == nullptr ||
+      call->isTypeDependent() || call->isValueDependent() ||
+      getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks)
+    return false;
+  const auto *callee = call->getDirectCallee();
+  const auto *spec = findGlobalAtomicSpec("atomicMax");
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  if (callee == nullptr || callee->getQualifiedNameAsString() != "atomicMax" ||
+      call->getNumArgs() != 2 || !callee->hasAttr<clang::CUDADeviceAttr>())
+    return false;
+  const auto kind = classifyGlobalAtomicPointer(call->getArg(0)->getType(), context);
+  if (kind == GlobalAtomicScalarKind::Unsupported ||
+      !hasExactGlobalAtomicSignature(callee, *spec, kind, context) ||
+      classifyGlobalAtomicScalar(call->getArg(1)->getType(), context) != kind)
+    return false;
+  for (const auto *declaration : callee->redecls()) {
+    const auto location = source.getSpellingLoc(declaration->getLocation());
+    if (location.isInvalid() || !source.isInSystemHeader(location)) return false;
+    const auto file = source.getFileID(location);
+    if (!cudaRuntimeApiSdkFileIds.count(file.getHashValue()) &&
+        !isOwnedCudaCompilerInput(file, getCompilerInstance())) return false;
+  }
+  const auto *owner = enclosingNonLambdaFunction(call, context);
+  if (owner == nullptr || !owner->hasAttr<clang::CUDADeviceAttr>() ||
+      owner->hasAttr<clang::CUDAHostAttr>() || owner->hasAttr<clang::CUDAGlobalAttr>() ||
+      owner->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      !isAddressRootedAtCurrentFunctionParameter(call->getArg(0), owner, context))
+    return false;
+  // Same generic-pointer contract as the admitted helper atomicAdd: the
+  // parameter root does not imply GM, so no address-space cast occurs.
+  const auto *reference = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
+      call->getCallee()->IgnoreParenImpCasts());
+  if (reference == nullptr || reference->hasQualifier() ||
+      reference->getDecl()->getCanonicalDecl() != callee->getCanonicalDecl())
+    return false;
+  const auto name = reference->getLocation();
+  if (name.isInvalid() || name.isMacroID() || !source.isWrittenInMainFile(name))
+    return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto spelling = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(clang::SourceRange(name, name)), source, options);
+  if (spelling != "atomicMax") return false;
+  const auto end = clang::Lexer::getLocForEndOfToken(name, 0, source, options);
+  if (end.isInvalid()) return false;
+  const auto offset = source.getFileOffset(name);
+  if (!rewrittenGlobalAtomicOffsets.insert(offset).second) return true;
+  if (!insertSemanticReplacement(ct::Replacement(source, name, spelling.size(),
+        "::ascify::atomic_max_generic"), clang::FullSourceLoc(name, source), name, end)) {
+    rewrittenGlobalAtomicOffsets.erase(offset);
+    return false;
+  }
+  needsCudaCompatHeader = true;
+  static const dppCounter counter = {
+      "CUDA generic helper atomic max", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(counter, "SDK int/uint helper atomicMax");
   return true;
 }
 
@@ -16958,6 +17131,7 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
         !preserveCudaIntegerIntrinsicArgumentConversion(Result) &&
         !rewriteProvenGlobalAtomicCall(Result) &&
         !rewriteProvenGenericAtomicAddCall(Result) &&
+        !rewriteProvenGenericAtomicMaxCall(Result) &&
         !rewriteProvenGenericAtomicExchCall(Result))
       (void)rewriteProvenDeviceMemoryCall(Result);
     return;

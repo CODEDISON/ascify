@@ -57,6 +57,8 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_TYPE_NAME_MAP = [] {
   m["cudaDeviceAttr"]                                    = {"aclrtDevAttr",                                        CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};
   m["cudaDevAttrMaxThreadsPerBlock"]                  = {"ascify::cudaDevAttrMaxThreadsPerBlock", CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};
   m["cudaDevAttrWarpSize"]                            = {"ascify::cudaDevAttrWarpSize", CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};
+  m["cudaDevAttrComputeCapabilityMajor"]             = {"ascify::cudaDevAttrComputeCapabilityMajor", CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};
+  m["cudaDevAttrComputeCapabilityMinor"]             = {"ascify::cudaDevAttrComputeCapabilityMinor", CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};
   m["cudaDevAttrMaxSharedMemoryPerBlockOptin"]      = {"ascify::cudaDevAttrLocalMemoryPerVectorCore", CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};
   // Minimal kernel-attribute surface used by layer_norm.cuh.
   m["cudaFuncAttributes"]                            = {"ascify::cudaFuncAttributes",               CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};

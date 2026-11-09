@@ -28,16 +28,20 @@ void test_kernel(unsigned *) {}
 
 int main() {
   int unavailable = 12345;
+  // The capability-epoch pair is a documented compile-time constant of the
+  // porting layer (cudaDeviceProp reports the same 7.0); it never reaches
+  // the runtime attribute query.
   assert(ascify::cudaDeviceGetAttribute(&unavailable,
-      ascify::cudaDevAttrComputeCapabilityMajor, 2) == ACL_ERROR_FEATURE_UNSUPPORTED);
+      ascify::cudaDevAttrComputeCapabilityMajor, 2) == ACL_SUCCESS);
+  assert(unavailable == 7 && ascify_test_get_device_info_calls == 0);
   assert(ascify::cudaDeviceGetAttribute(&unavailable,
-      ascify::cudaDevAttrComputeCapabilityMinor, 2) == ACL_ERROR_FEATURE_UNSUPPORTED);
-  assert(unavailable == 12345 && ascify_test_get_device_info_calls == 0);
+      ascify::cudaDevAttrComputeCapabilityMinor, 2) == ACL_SUCCESS);
+  assert(unavailable == 0 && ascify_test_get_device_info_calls == 0);
   assert(ascify::cudaDeviceGetAttribute(nullptr,
       ascify::cudaDevAttrComputeCapabilityMajor, 2) == ACL_ERROR_RT_PARAM_INVALID);
   assert(ascify::cudaDeviceGetAttribute(&unavailable,
       ascify::cudaDevAttrComputeCapabilityMinor, -1) == ACL_ERROR_RT_PARAM_INVALID);
-  assert(unavailable == 12345 && ascify_test_get_device_info_calls == 0);
+  assert(unavailable == 0 && ascify_test_get_device_info_calls == 0);
   // Property queries target logical Device 0 even with no bound context or
   // another bound device; the runtime reports its own Device 0 SocName.
   ascify_test_get_device_status = 71;
