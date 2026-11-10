@@ -2140,6 +2140,16 @@ struct ModuleHandle {
   size_t size = 0;
 };
 
+// Cooperative-launch admission anchor. The translator proves each exact
+// call site (kernel address, local argument array of exact parameter
+// addresses) and rewrites it to a direct <<<>>> launch, so this runtime
+// entry is never selected for an admitted TU; it exists to complete the
+// mapped prototype surface for boundary audits.
+inline aclError cudaLaunchCooperativeKernel(void *, void *, void *, void **,
+                                            size_t, void *) {
+  return ACL_ERROR_FEATURE_UNSUPPORTED;
+}
+
 // Device-global, sense-reversing grid barrier state. Every observation and
 // update goes through device atomics, so all co-resident blocks observe a
 // coherent epoch without relying on plain-store visibility across cores.

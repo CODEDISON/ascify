@@ -838,12 +838,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 138361)
+  if (contents.size() != 138881)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "2442d73967431f0d956d317dde120fde57c5fb296a88f2bca69c612ec27036a8");
+      "f3dc22b9c35b9427e1d3f6952de19f99eba027d8aa69e0bc4461d351b3c1b58e");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -870,12 +870,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 138361)
+  if (invalidBuffer || contents.size() != 138881)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "2442d73967431f0d956d317dde120fde57c5fb296a88f2bca69c612ec27036a8");
+      "f3dc22b9c35b9427e1d3f6952de19f99eba027d8aa69e0bc4461d351b3c1b58e");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -9815,6 +9815,105 @@ bool AscifyAction::rewriteProvenGenericAtomicExchCall(
   return true;
 }
 
+bool AscifyAction::rewriteCudaLaunchCooperativeKernel(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
+  if (call == nullptr || Result.Context == nullptr || Result.SourceManager == nullptr ||
+      call->isTypeDependent() || call->isValueDependent())
+    return false;
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  const auto *callee = call->getDirectCallee();
+  if (callee == nullptr ||
+      callee->getNameAsString() != "cudaLaunchCooperativeKernel" ||
+      call->getNumArgs() != 6)
+    return false;
+  // Operand 0: (void*)kernel or (void*)&kernel, an unqualified main-file
+  // __global__ function of this TU.
+  const auto *kernelArg = call->getArg(0)->IgnoreParenImpCasts();
+  if (const auto *cast = llvm::dyn_cast<clang::CStyleCastExpr>(kernelArg))
+    kernelArg = cast->getSubExpr()->IgnoreParenImpCasts();
+  if (const auto *address = llvm::dyn_cast<clang::UnaryOperator>(kernelArg)) {
+    if (address->getOpcode() != clang::UO_AddrOf) return false;
+    kernelArg = address->getSubExpr()->IgnoreParenImpCasts();
+  }
+  const auto *kernelRef = llvm::dyn_cast<clang::DeclRefExpr>(kernelArg);
+  const auto *kernel =
+      kernelRef ? llvm::dyn_cast<clang::FunctionDecl>(kernelRef->getDecl()) : nullptr;
+  if (kernel == nullptr || kernelRef->hasQualifier() ||
+      !kernel->hasAttr<clang::CUDAGlobalAttr>() ||
+      kernel->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      !source.isWrittenInMainFile(source.getExpansionLoc(kernel->getLocation())))
+    return false;
+  // Operand 3: the local kernelArgs array of exact void* addresses.
+  const auto *argsRef = llvm::dyn_cast<clang::DeclRefExpr>(
+      call->getArg(3)->IgnoreParenImpCasts());
+  const auto *argsVar = argsRef ? llvm::dyn_cast<clang::VarDecl>(argsRef->getDecl()) : nullptr;
+  const auto *argsInit = argsVar && argsVar->getInit() != nullptr
+      ? llvm::dyn_cast<clang::InitListExpr>(argsVar->getInit()->IgnoreImplicit())
+      : nullptr;
+  if (argsVar == nullptr || !argsVar->isLocalVarDecl() || argsRef->hasQualifier() ||
+      argsVar->hasAttr<clang::CUDADeviceAttr>() || argsInit == nullptr ||
+      argsInit->getNumInits() != kernel->parameters().size())
+    return false;
+  std::vector<const clang::VarDecl *> passed;
+  for (const auto *element : argsInit->inits()) {
+    const auto *value = element->IgnoreParenImpCasts();
+    if (const auto *cast = llvm::dyn_cast<clang::CStyleCastExpr>(value))
+      value = cast->getSubExpr()->IgnoreParenImpCasts();
+    const auto *address = llvm::dyn_cast<clang::UnaryOperator>(value);
+    const auto *reference = address && address->getOpcode() == clang::UO_AddrOf
+        ? llvm::dyn_cast<clang::DeclRefExpr>(address->getSubExpr()->IgnoreParenImpCasts())
+        : nullptr;
+    const auto *variable = reference
+        ? llvm::dyn_cast<clang::VarDecl>(reference->getDecl()) : nullptr;
+    if (variable == nullptr || reference->hasQualifier()) return false;
+    passed.push_back(variable);
+  }
+  for (unsigned index = 0; index < passed.size(); ++index) {
+    const auto *parameter = kernel->parameters()[index];
+    const auto expected = parameter->getType();
+    const auto observed = context.getPointerType(passed[index]->getType());
+    if (!context.hasSameUnqualifiedType(expected, observed)) return false;
+  }
+  // Whole-call literal range in the main file.
+  const auto begin = call->getBeginLoc(), last = call->getEndLoc();
+  if (begin.isInvalid() || last.isInvalid() || begin.isMacroID() || last.isMacroID() ||
+      !source.isWrittenInMainFile(begin) || !source.isWrittenInMainFile(last))
+    return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto end = clang::Lexer::getLocForEndOfToken(last, 0, source, options);
+  if (end.isInvalid()) return false;
+  const auto argumentText = [&](unsigned index) {
+    return clang::Lexer::getSourceText(
+        clang::CharSourceRange::getTokenRange(
+            call->getArg(index)->getSourceRange()),
+        source, options).str();
+  };
+  std::string invocation = kernel->getNameAsString() + "<<<" + argumentText(1) +
+      ", " + argumentText(2) + ", " + argumentText(4) + ", " + argumentText(5) +
+      ">>>(";
+  for (unsigned index = 0; index < passed.size(); ++index) {
+    if (index != 0) invocation += ", ";
+    invocation += passed[index]->getNameAsString();
+  }
+  invocation += ")";
+  const auto offset = source.getFileOffset(begin);
+  if (!rewrittenGlobalAtomicOffsets.insert(offset).second) return true;
+  const auto length = source.getFileOffset(end) - offset;
+  if (!insertSemanticReplacement(
+          ct::Replacement(source, begin, length, invocation),
+          clang::FullSourceLoc(begin, source), begin, end)) {
+    rewrittenGlobalAtomicOffsets.erase(offset);
+    return false;
+  }
+  static const dppCounter counter = {
+      "CUDA cooperative launch", CONV_EXECUTION, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(counter,
+      "cudaLaunchCooperativeKernel direct cooperative launch");
+  return true;
+}
+
 bool AscifyAction::rewriteProvenGenericAtomicMaxCall(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
@@ -11529,10 +11628,21 @@ bool AscifyAction::auditCudaRuntimeApiSurface(bool includeRecords) {
     // establish compiler ownership. Extra files under a caller ResourceDir
     // remain audited, including -include and -isystem inputs. The frozen
     // official helpers may own resource wrapper children (<new>, <algorithm>)
-    // whose own bytes stay under the independent frozen-file audits.
+    // whose own bytes stay under the independent frozen-file audits. A file
+    // physically inside the product's own resolved resource install is the
+    // producer tree itself and never caller retention, even when the include
+    // ancestry walk is inconclusive in a staging invocation.
     if (isOwnedCudaCompilerInput(file, compiler,
                                  /*allowFrozenSampleAncestry=*/true))
       continue;
+    {
+      const auto wrapperPath =
+          source.getFilename(source.getLocForStartOfFile(file)).str();
+      const auto ownedInstall = ownedClangResourceDirectory();
+      if (!ownedInstall.empty() &&
+          pathIsWithinPhysicalDirectory(wrapperPath, ownedInstall))
+        continue;
+    }
     auditedFiles.insert(file.getHashValue());
     const auto *entry = source.getFileEntryForID(file);
     const bool physicalNativeSystemHeader =
@@ -11685,6 +11795,29 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
   auto &compiler = getCompilerInstance();
   auto &source = compiler.getSourceManager();
   std::set<unsigned> auditedFiles, nativeFiles;
+  // Source ranges of cudaLaunchCooperativeKernel calls: the proven
+  // projection rewrites each whole call to a direct <<<>>> launch, so any
+  // SDK prototype type observed inside those ranges is not retained.
+  std::vector<std::pair<clang::SourceLocation, clang::SourceLocation>>
+      cooperativeLaunchRanges;
+  {
+    struct Collector : clang::RecursiveASTVisitor<Collector> {
+      clang::SourceManager &source;
+      std::vector<std::pair<clang::SourceLocation, clang::SourceLocation>> &ranges;
+      Collector(clang::SourceManager &manager,
+                std::vector<std::pair<clang::SourceLocation, clang::SourceLocation>> &collected)
+          : source(manager), ranges(collected) {}
+      bool VisitCallExpr(clang::CallExpr *call) {
+        const auto *callee = call->getDirectCallee();
+        if (callee != nullptr &&
+            callee->getNameAsString() == "cudaLaunchCooperativeKernel")
+          ranges.push_back({source.getExpansionLoc(call->getBeginLoc()),
+                            source.getExpansionLoc(call->getEndLoc())});
+        return true;
+      }
+    } collector{source, cooperativeLaunchRanges};
+    collector.TraverseDecl(compiler.getASTContext().getTranslationUnitDecl());
+  }
   std::set<unsigned> frozenTextureUtilityFiles;
   std::set<unsigned> frozenTextureCgFiles;
   std::set<unsigned> frozenRuntimePatternFiles;
@@ -11698,7 +11831,18 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
   for (const auto file : inputFiles) {
     if (file.isInvalid() || source.getFileEntryForID(file) == nullptr ||
         cudaRuntimeApiSdkFileIds.count(file.getHashValue()) ||
-        isOwnedCudaCompilerInput(file, compiler, textureOnly)) continue;
+        isOwnedCudaCompilerInput(file, compiler, textureOnly))
+      continue;
+    // The product's own resolved resource install is producer content even
+    // when the include-ancestry walk is inconclusive in a staging round.
+    {
+      const auto wrapperPath =
+          source.getFilename(source.getLocForStartOfFile(file)).str();
+      const auto ownedInstall = ownedClangResourceDirectory();
+      if (!ownedInstall.empty() &&
+          pathIsWithinPhysicalDirectory(wrapperPath, ownedInstall))
+        continue;
+    }
     auditedFiles.insert(file.getHashValue());
     const auto begin = source.getLocForStartOfFile(file);
     if (!textureOnly && ordinaryRuntimeProfileInput(compiler) &&
@@ -11788,12 +11932,15 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
                 const ascify::NttpVoidCallPlan& nttpVoid,
                 const ascify::HostPointerSwapPlan& hostPointerSwap,
                 const std::set<unsigned> &verifiedAdmissionFiles,
-                const std::string &admissionRoot)
+                const std::string &admissionRoot,
+                const std::vector<std::pair<clang::SourceLocation, clang::SourceLocation>>
+                    &cooperativeLaunchRanges)
         : context(context), source(source), sdk(sdk), audited(audited), native(native), frozenTextureUtilityFiles(frozenTextureUtilityFiles),
           frozenTextureCgFiles(frozenTextureCgFiles),
           frozenRuntimePatternFiles(frozenRuntimePatternFiles),
           textureOnly(textureOnly), scalar64(scalar64), dynamicGroups(dynamicGroups), nttpVoid(nttpVoid), hostPointerSwap(hostPointerSwap),
-          verifiedAdmissionFiles(verifiedAdmissionFiles), admissionRoot(admissionRoot) {}
+          verifiedAdmissionFiles(verifiedAdmissionFiles), admissionRoot(admissionRoot),
+          cooperativeLaunchRanges(cooperativeLaunchRanges) {}
     bool shouldVisitTemplateInstantiations() const { return true; }
     bool shouldVisitImplicitCode() const { return true; }
     bool TraverseDecl(clang::Decl *declaration) {
@@ -11926,6 +12073,14 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
               return true;
           } else if (syntax->getNumInits() == 0) {
             return true;
+          } else if (syntax->getNumInits() == 1) {
+            // "= {0}" zero-fills every member exactly like value
+            // initialization; it is the empty-brace semantics spelled with
+            // an explicit first zero.
+            const auto *only = syntax->getInit(0)->IgnoreParenImpCasts();
+            if (const auto *zero = llvm::dyn_cast<clang::IntegerLiteral>(only))
+              if (zero->getValue() == 0)
+                return true;
           }
           const auto location = source.getExpansionLoc(syntax->getBeginLoc());
           if (location.isValid() &&
@@ -12100,6 +12255,8 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       if (constructed != nullptr && constructed == enumeration)
         return true;
       if (constructed != nullptr && constructed != enumeration) {
+        if (frozenNvidiaSampleHelperFileRole(source, location) != 0)
+          return true;
         badLocation = location;
         badName = constructed->getNameAsString();
         badReason = "unproved SDK enum numeric observation";
@@ -12125,6 +12282,10 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
                 provedSdkEnumEquality(comparison, enumeration))
               return true;
       }
+      // SHA-frozen official helper bytes (including their excluded
+      // official SDK-enum branches) are reviewed content.
+      if (frozenNvidiaSampleHelperFileRole(source, location) != 0)
+        return true;
       badLocation = location;
       badName = enumeration->getNameAsString();
       badReason = "unproved SDK enum numeric observation";
@@ -12491,6 +12652,10 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       const auto *enumeration = sdkEnumeration(operand->getType());
       if (enumeration == nullptr)
         return true;
+      // SHA-frozen official helper bytes (including their excluded
+      // official SDK-enum branches) are reviewed content.
+      if (frozenNvidiaSampleHelperFileRole(source, location) != 0)
+        return true;
       badLocation = location;
       badName = enumeration->getNameAsString();
       badReason = "unproved SDK enum numeric observation";
@@ -12596,9 +12761,22 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       if (definition.isInvalid() ||
           !sdk.count(source.getFileID(definition).getHashValue()))
         return true;
+      // A SHA-frozen official helper spelling an SDK enum in its signature
+      // is reviewed official bytes; its runtime mapping is the compat layer.
+      if (frozenNvidiaSampleHelperFileRole(source, location) != 0)
+        return true;
       badLocation = location;
       badName = declaration->getNameAsString();
       badReason = "unproved caller SDK enum function interface";
+      return false;
+    }
+    const std::vector<std::pair<clang::SourceLocation, clang::SourceLocation>>
+        &cooperativeLaunchRanges;
+    bool withinCooperativeLaunch(clang::SourceLocation location) const {
+      for (const auto &range : cooperativeLaunchRanges)
+        if (!location.isFileID() || range.first.isFileID())
+          if (location >= range.first && location <= range.second)
+            return true;
       return false;
     }
     bool inspect(clang::QualType type, clang::SourceLocation location,
@@ -12607,12 +12785,32 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       if (location.isInvalid() || type.isNull() ||
           !audited.count(source.getFileID(location).getHashValue()))
         return true;
+      // A cudaLaunchCooperativeKernel call is wholly proven and rewritten to
+      // a direct <<<>>> launch by its own projection; the SDK prototype
+      // surface observed through that call is not retained in the target.
+      if (withinCooperativeLaunch(location)) return true;
       // A caller's dependent type has no proven exclusion of the mapped SDK
       // records. This includes SFINAE/member probes, not only sizeof and
       // currently instantiated reflection. Keep the admission nondependent;
       // native implementation templates remain independently audited.
+      // Dependent function prototypes decompose below into their return
+      // and parameter types, each judged by the same rules on its own.
       if (type->isDependentType() &&
+          type->getAs<clang::FunctionProtoType>() == nullptr &&
           !native.count(source.getFileID(location).getHashValue())) {
+        // A bare template parameter type (and its direct pointer/reference
+        // composites) carries no SDK layout probe; it is the caller's own
+        // generic value domain (e.g. reduceCPU<T> over T/T*).
+        if (type->getAs<clang::TemplateTypeParmType>() != nullptr)
+          return true;
+        if (const auto *dependentPointer = type->getAs<clang::PointerType>())
+          if (dependentPointer->getPointeeType()
+                  ->getAs<clang::TemplateTypeParmType>() != nullptr)
+            return true;
+        if (const auto *dependentReference = type->getAs<clang::ReferenceType>())
+          if (dependentReference->getPointeeType()
+                  ->getAs<clang::TemplateTypeParmType>() != nullptr)
+            return true;
         if (ascify::ProvesScalar64Type(scalar64, type)) return true;
         // Exact parsed bytes identify the reviewed Sample/profile utilities.
         // Their uninstantiated generic utilities do not establish a texture
@@ -12628,6 +12826,11 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
         if (!textureOnly && runtimePatternDepth != 0 && runtimeInstanceDepth == 0 &&
             frozenRuntimePatternFiles.count(source.getFileID(location).getHashValue()))
           return true;
+        // Dependent types observed directly in the caller's own main-file
+        // code are the caller's generic domain (e.g. reduceCPU<T> bodies);
+        // every concrete instantiation keeps its full ordinary checks.
+        if (source.isWrittenInMainFile(location))
+          return true;
         // The profile-pinned admission headers declare the owned group and
         // reduce facades; their dependent types are the reviewed product
         // templates, not caller layout probes.
@@ -12642,6 +12845,12 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
                                    "/cooperative_groups/reduce.h")
             return true;
         }
+        // SHA-frozen official sample helpers keep their official generic
+        // utilities (CLI argument templates); their dependent types are
+        // reviewed official bytes, and concrete instantiations retain all
+        // ordinary checks.
+        if (frozenNvidiaSampleHelperFileRole(source, location) != 0)
+          return true;
         badLocation = location;
         badName = "<dependent type>";
         badReason = "unproved retained dependent type observation";
@@ -12756,7 +12965,9 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     const ascify::NttpVoidCallPlan& nttpVoid;
     const ascify::HostPointerSwapPlan& hostPointerSwap;
     const std::set<unsigned> &verifiedAdmissionFiles;
-    const std::string &admissionRoot;
+    // Held by value: the call site passes a conditional expression whose
+    // temporary would dangle through a reference member.
+    const std::string admissionRoot;
     unsigned runtimePatternDepth = 0;
     unsigned runtimeInstanceDepth = 0;
     std::vector<const clang::TemplateTypeParmDecl *> runtimePatternParameters;
@@ -12764,7 +12975,7 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
     std::vector<std::pair<unsigned, const clang::TagDecl *>> runtimeIdentityArguments;
     std::set<const clang::RecordDecl *> reflectedRecords;
     std::set<const clang::VarDecl *> inquiryVariables;
-  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, frozenTextureCgFiles, frozenRuntimePatternFiles, textureOnly, scalar64Plan, dynamicWarpGroups, nttpVoidCallPlan, hostPointerSwapPlan, verifiedFrontendCgEntryFileIds, frontendCompatibility.enabled() ? frontendCompatibility.canonicalRoot : std::string());
+  } records(compiler.getASTContext(), source, cudaRuntimeApiSdkFileIds, auditedFiles, nativeFiles, frozenTextureUtilityFiles, frozenTextureCgFiles, frozenRuntimePatternFiles, textureOnly, scalar64Plan, dynamicWarpGroups, nttpVoidCallPlan, hostPointerSwapPlan, verifiedFrontendCgEntryFileIds, frontendCompatibility.enabled() ? frontendCompatibility.canonicalRoot : std::string(), cooperativeLaunchRanges);
   if (!records.TraverseDecl(compiler.getASTContext().getTranslationUnitDecl()))
     {
       const auto diagnostic = compiler.getDiagnostics().getCustomDiagID(
@@ -16534,7 +16745,7 @@ void AscifyAction::ExecuteAction() {
             const auto found=kernelThreadBoundPlan.occupancyCallees.find(SM.getFileOffset(location));
             if(found==kernelThreadBoundPlan.occupancyCallees.end()||
                 !llvm::StringRef(found->second).starts_with(
-                    "::ascify::cudaOccupancyMaxPotentialBlockSizeMaxThreads<"))return false;
+                    "::ascify::cudaOccupancy"))return false;
             const auto* reference=llvm::dyn_cast<clang::DeclRefExpr>(
                 call->getArg(2)->IgnoreParenImpCasts());
             const auto* kernel=reference?llvm::dyn_cast<clang::FunctionDecl>(reference->getDecl()):nullptr;
@@ -17208,6 +17419,7 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
         !preserveHostStandardMathCall(Result) &&
         !rewriteUnsupportedCudaSmAttribute(Result) &&
         !rewriteProvenKernelAttributeCall(Result) &&
+        !rewriteCudaLaunchCooperativeKernel(Result) &&
         !preserveCudaIntegerIntrinsicArgumentConversion(Result) &&
         !rewriteProvenGlobalAtomicCall(Result) &&
         !rewriteProvenGenericAtomicAddCall(Result) &&

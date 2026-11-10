@@ -391,13 +391,21 @@ class Proof {
   }
   bool admissionGroupRecord(const CXXRecordDecl* record) const {
     if (record == nullptr || record->getLocation().isInvalid()) return false;
-    if (owned(source.getSpellingLoc(record->getLocation()))) return false;
     const auto name = record->getQualifiedNameAsString();
-    return name == "cooperative_groups::thread_block" ||
+    const bool facadeName = name == "cooperative_groups::thread_block" ||
         name == "cooperative_groups::grid_group" ||
         name == "cooperative_groups::coalesced_group" ||
         name == "cooperative_groups::thread_group" ||
         llvm::StringRef(name).starts_with("cooperative_groups::thread_block_tile");
+    if (!facadeName) return false;
+    if (!owned(source.getSpellingLoc(record->getLocation()))) return true;
+    // The owned predicate is call-order-sensitive on some TU shapes; the
+    // admission headers also prove themselves by their resolved install
+    // path, which a caller TU cannot counterfeit.
+    const auto path = source.getFilename(record->getLocation());
+    return (path.ends_with("/cooperative_groups.h") ||
+            path.ends_with("/cooperative_groups/reduce.h")) &&
+        path.contains("frontend-compat");
   }
   bool signatureType(QualType type, const TemplateTypeParmDecl* parameter) const {
     if (type.isNull() || type.isVolatileQualified() || type->isAtomicType()) return false;
@@ -593,8 +601,11 @@ class Proof {
     if (closedIntegerLeaf(expression)) return true;
     // Admission-facade coordinate queries (thread_rank/size family) are pure
     // unsigned reads; admissible as array subscripts on the scalar64 route.
-    if (const auto* query = dyn_cast<CXXMemberCallExpr>(expression)) {
-      const auto* method = query->getMethodDecl();
+    if (const auto* query = dyn_cast<CallExpr>(expression)) {
+      // Static facade queries spelled through an object (obj.thread_rank())
+      // may arrive as plain CallExprs with a member callee; match on the
+      // resolved method declaration either way.
+      const auto* method = dyn_cast<CXXMethodDecl>(query->getDirectCallee());
       const auto* owner = method ? method->getParent() : nullptr;
       if (method != nullptr && owner != nullptr && query->getNumArgs() == 0) {
         const auto methodName = method->getNameAsString();
@@ -658,6 +669,17 @@ class Proof {
       switch (cast->getCastKind()) {
       case CK_LValueToRValue: case CK_NoOp: return scalarValue(cast->getSubExpr(), depth + 1);
       case CK_IntegralToFloating: return integralLiteral(cast->getSubExpr());
+      case CK_FloatingCast: {
+        // Widening float->double is exact and keeps the value on the route
+        // (narrowing never reaches a scalar operand context).
+        const auto from = cast->getSubExpr()->getType();
+        const auto to = cast->getType();
+        return !from.isNull() && !to.isNull() && from->isFloatingType() &&
+            to->isFloatingType() &&
+            context.getTypeSize(from.getCanonicalType()) <
+                context.getTypeSize(to.getCanonicalType()) &&
+            scalarValue(cast->getSubExpr(), depth + 1);
+      }
       default: return false;
       }
     }

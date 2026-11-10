@@ -881,8 +881,30 @@ bool ProveDynamicKernelAbiTails(ASTContext& context,const DynamicWarpGroupStats&
       }else if(entry.call->getNumArgs()>2&&occupancy(entry.call)&&
           entry.call->getDirectCallee()&&entry.call->getDirectCallee()->getNameAsString()=="cudaOccupancyMaxPotentialBlockSize"&&
           directReference(entry.call->getArg(2),reference,true))admitted=true;
+      else if(entry.call->getNumArgs()>2&&occupancy(entry.call)&&
+          entry.call->getDirectCallee()&&entry.call->getDirectCallee()->getNameAsString()=="cudaOccupancyMaxActiveBlocksPerMultiprocessor") {
+        for(const auto* argument:entry.call->arguments())
+          if(directReference(argument,reference,true))admitted=true;
+      }else if(entry.call->getNumArgs()==6&&
+          entry.call->getDirectCallee()&&
+          entry.call->getDirectCallee()->getNameAsString()=="cudaLaunchCooperativeKernel") {
+        // The proven cooperative-launch projection rewrites the whole call
+        // into a direct <<<>>> launch; its kernel operand is (void*)kernel
+        // or (void*)&kernel around the exact reference.
+        const Expr* operand=entry.call->getArg(0)->IgnoreParenImpCasts();
+        if(const auto*cast=dyn_cast<CStyleCastExpr>(operand))
+          operand=cast->getSubExpr()->IgnoreParenImpCasts();
+        if(const auto*address=dyn_cast<UnaryOperator>(operand)) {
+          if(address->getOpcode()!=UO_AddrOf)operand=nullptr;
+          else operand=address->getSubExpr()->IgnoreParenImpCasts();
+        }
+        if(operand==reference)admitted=true;
+      }
     }
-    if(!admitted)return fail(reference->getLocation(),"dynamic kernel ABI padding rejects kernel address escape, reflection, alias or unproved call");
+    if(!admitted) {
+      return fail(reference->getLocation(),
+          "dynamic kernel ABI padding rejects kernel address escape, reflection, alias or unproved call");
+    }
   }
   for(const auto* function:kernels)if(!launched.count(function))
     return fail(function->getLocation(),"dynamic kernel ABI padding requires its direct ordinary host launch in the same root");

@@ -323,9 +323,9 @@ int main(){
         native_compat = native / "ascify/ascify_cuda_compat.hpp"
         compat = isolated / "ascify/ascify_cuda_compat.hpp"
         frozen = compat.read_bytes()
-        assert len(frozen) == 138361
+        assert len(frozen) == 138881
         assert hashlib.sha256(frozen).hexdigest() == (
-            "2442d73967431f0d956d317dde120fde57c5fb296a88f2bca69c612ec27036a8")
+            "f3dc22b9c35b9427e1d3f6952de19f99eba027d8aa69e0bc4461d351b3c1b58e")
         # The symbol-registration macro is itself a protected output spelling.
         # Do not change the product trust boundary to admit that transitive
         # macro as caller input. Only this parser fixture replaces that leaf.

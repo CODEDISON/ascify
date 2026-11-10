@@ -46,7 +46,11 @@ struct Tokens {
       lexer.LexFromRawLexer(token);
       if (token.is(tok::eof)) return false;
       if (source.getFileOffset(token.getLocation()) >= first)
-        return !hasPrevious || previous == tok::semi || previous == tok::r_brace;
+        // A linkage-specification literal ("C"/"C++") directly precedes an
+        // extern-linkage kernel signature; it is part of the declaration,
+        // not a previous statement.
+        return !hasPrevious || previous == tok::semi ||
+            previous == tok::r_brace || previous == tok::string_literal;
       if (token.isAtStartOfLine()) directiveLine = false;
       if (token.is(tok::hash) && token.isAtStartOfLine()) directiveLine = true;
       if (!directiveLine) { previous = token.getKind(); hasPrevious = true; }

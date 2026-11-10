@@ -560,6 +560,7 @@
     "cudaHostRegisterMapped",
     "cudaHostRegisterPortable",
     "cudaHostUnregister",
+    "cudaLaunchCooperativeKernel",
     "cudaLaunchHostFunc",
     "cudaMalloc",
     "cudaMalloc3DArray",
