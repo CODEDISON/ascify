@@ -150,7 +150,7 @@ private:
   std::vector<OriginalCgInput> originalCgInputs;
   std::vector<std::string> originalCgIncludes;
   std::string originalCgSdkRoot;
-  bool originalCgControlChanged = false;
+  std::string originalCgControlSite;
   bool originalCgInquiry = false;
   const clang::MacroInfo *originalCgCompilerDefaultMacro = nullptr;
   clang::SourceLocation originalCgCompilerDefaultDefinition;

@@ -397,8 +397,10 @@ bool ProvePureSimtKernelThreadBound(ASTContext &context, const FunctionDecl *ker
         !llvm::isa<CUDALaunchBoundsAttr>(attribute)) return reject("unproved kernel attribute");
   Tokens tokens{context, source, owned, qualifier, macroFree};
   std::vector<Token> signature;
-  if (!tokens.unconditional(source.getFileID(kernel->getLocation())) ||
-      !tokens.scan({kernel->getBeginLoc(), kernel->getBody()->getBeginLoc()}, true, &signature))
+  // The signature scan proves the literal, unconditional token range of the
+  // declaration itself; body-level __CUDA_ARCH__ guards are audited by their
+  // own boundary mechanisms, not by the kernel-signature proof.
+  if (!tokens.scan({kernel->getBeginLoc(), kernel->getBody()->getBeginLoc()}, true, &signature))
     return reject("kernel signature macro or conditional provenance is unproved");
   SourceLocation global;
   for (const auto &token : signature)

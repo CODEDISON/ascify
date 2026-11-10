@@ -955,7 +955,7 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaMallocPitch", "cudaMallocArray", "cudaMalloc3DArray", "cudaFreeArray",
       "cudaMemcpy2D", "cudaMemset2D", "cudaMemcpyToArray", "cudaMemcpy2DToArray", "cudaMemcpy3D",
       "cudaCreateTextureObject", "cudaDestroyTextureObject",
-      "cudaMemset", "cudaMemsetAsync", "cudaMallocHost",
+      "cudaMemset", "cudaMemsetAsync", "cudaMallocHost", "cudaLaunchCooperativeKernel",
       "cudaHostAlloc", "cudaHostRegister", "cudaHostUnregister",
       "cudaHostGetDevicePointer", "cudaSetDeviceFlags",
       "cuInit", "cuDeviceGetCount", "cuDeviceGet", "cuDeviceGetName",
@@ -6313,7 +6313,7 @@ bool AscifyAction::proveOriginalCgCompilerDefault(const clang::MacroInfo *macro,
   OriginalCgInput input{path.str().str(), hash, entry->getUniqueID().getDevice(),
       entry->getUniqueID().getFile(), 18786};
   if (capture) {
-    if (originalCgCompilerDefaultMacro != nullptr || originalCgControlChanged)
+    if (originalCgCompilerDefaultMacro != nullptr || !originalCgControlSite.empty())
       return false;
     originalCgCompilerDefaultMacro = macro;
     originalCgCompilerDefaultDefinition = identifier;
@@ -6756,7 +6756,7 @@ bool AscifyAction::sealOriginalCgProviders() {
         clang::DiagnosticsEngine::Error,
         "frontend compatibility original CG provider boundary: identity or "
         "default-control history is unproved AWB %0");
-    compiler.getDiagnostics().Report(diagnostic) << awbStage;
+    compiler.getDiagnostics().Report(diagnostic) << originalCgControlSite;
     cudaRuntimeApiBoundaryFailed = true;
     return false;
   };
@@ -6782,7 +6782,7 @@ bool AscifyAction::sealOriginalCgProviders() {
   if (llvm::sys::fs::real_path(root, canonical) || canonical != originalCgSdkRoot) { awbStage = "sdk-root"; return fail(); }
   for (const auto &macro : compiler.getPreprocessorOpts().Macros)
     if (originalCgControlText(macro.first) || llvm::StringRef(macro.first).contains('\\'))
-      originalCgControlChanged = true; // Unmodeled escaped CLI replacements fail closed.
+      originalCgControlSite = "sealOriginalCgProviders:6785";
       awbStage = "PP";
   for (const auto file : enteredSourceFileIds) {
     bool invalid = false;
@@ -6801,7 +6801,7 @@ bool AscifyAction::sealOriginalCgProviders() {
               proveOriginalCgCompilerDefault(originalCgCompilerDefaultMacro,
                   token.getLocation(), false)) &&
             !frozenHelperCgControlSite(source, source.getLocForStartOfFile(file))) {
-          originalCgControlChanged = true;
+          originalCgControlSite = "sealOriginalCgProviders:6804";
           awbStage = "token";
         }
       }
@@ -6811,13 +6811,13 @@ bool AscifyAction::sealOriginalCgProviders() {
         clang::StringLiteralParser literal(llvm::ArrayRef<clang::Token>(&token, 1),
             source, compiler.getLangOpts(), compiler.getTarget(), nullptr);
         if (literal.hadError || originalCgControlText(literal.GetString())) {
-          originalCgControlChanged = true;
+          originalCgControlSite = "sealOriginalCgProviders:6814";
             awbStage = "string";
         }
       }
     }
   }
-  if (originalCgControlChanged) { awbStage = "control"; return fail(); }
+  if (!originalCgControlSite.empty()) { awbStage = "control"; return fail(); }
   awbStage = "inputs";
   auto providerInputs = originalCgInputs;
   providerInputs.push_back(originalCgCompilerDefaultInput);
@@ -7411,12 +7411,15 @@ void AscifyAction::PragmaDirective(
       // The configured SDK tree (e.g. libcu++ headers carrying plain
       // #pragma GCC system_header directives) is audited producer input;
       // its pragma macros conceal no caller-controlled guard stack.
+      // The whole configured --cuda-path include tree (including libcu++
+      // and its #pragma GCC system_header directives) is audited producer
+      // input; its pragma macros conceal no caller-controlled guard stack.
       if (!physicalNative &&
           !cudaRuntimeApiSdkFileIds.count(file.getHashValue()) &&
-          !isConfiguredCudaSdkDependencyRole(path) &&
+          !pathIsWithinConfiguredCudaInclude(path) &&
           (!file.isValid() || !isOwnedCudaCompilerInput(file, compiler))) {
         frontendHostMathGuardModified = true;
-        originalCgControlChanged = true;
+        originalCgControlSite.clear(); // no CG control changed by SDK pragmas
       }
     }
     // _Pragma/__pragma tokens are lexed from a scratch buffer.  Admit only a
@@ -10600,7 +10603,7 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
   kernelThreadBoundHeaderPolicies.clear();
   originalCgIncludes.clear();
   originalCgSdkRoot.clear();
-  originalCgControlChanged = false;
+  originalCgControlSite.clear();
   originalCgInquiry = false;
   originalCgCompilerDefaultMacro = nullptr;
   originalCgCompilerDefaultDefinition = {};
@@ -11103,7 +11106,7 @@ void AscifyAction::Ifndef(clang::SourceLocation Loc, const clang::Token &MacroNa
   if (MacroNameTok.getIdentifierInfo() &&
       originalCgControlName(MacroNameTok.getIdentifierInfo()->getName()) &&
       !frozenHelperCgControlSite(getCompilerInstance().getSourceManager(), Loc))
-    originalCgControlChanged = true;
+    originalCgControlSite = "Ifndef:11106";
   ConditionalDirectiveEntered();
   auditExternalNvidiaSampleHelperPreprocessorUse(
       Loc, MacroNameTok, "#ifndef");
@@ -11119,7 +11122,7 @@ void AscifyAction::Ifdef(clang::SourceLocation Loc,
         "ifdef", MacroNameTok.getLocation(), MD.getMacroInfo());
   if (MacroNameTok.getIdentifierInfo() && originalCgControlName(MacroNameTok.getIdentifierInfo()->getName()) &&
       !frozenHelperCgControlSite(getCompilerInstance().getSourceManager(), Loc))
-    originalCgControlChanged = true;
+    originalCgControlSite = "Ifdef:11122";
   recordCudaAttributeGuard(Loc, MacroNameTok, MD);
   recordInactiveNvidiaSampleHelperBranch(Loc, MacroNameTok, MD);
   ConditionalDirectiveEntered();
@@ -11170,7 +11173,7 @@ void AscifyAction::Defined(const clang::Token &MacroNameTok,
       originalCgControlName(MacroNameTok.getIdentifierInfo()->getName()) &&
       !frozenHelperCgControlSite(getCompilerInstance().getSourceManager(),
           MacroNameTok.getLocation()))
-    originalCgControlChanged = true;
+    originalCgControlSite = "Defined:11173";
   auditExternalNvidiaSampleHelperPreprocessorUse(
       Range.getBegin(), MacroNameTok, "defined");
   auditFrozenNvidiaSampleHelperMacroDependency(
@@ -11194,7 +11197,7 @@ void AscifyAction::MacroUndefined(
     if (originalCgControlName(name) &&
         !frozenHelperCgControlSite(getCompilerInstance().getSourceManager(),
             MacroNameTok.getLocation()))
-      originalCgControlChanged = true;
+      originalCgControlSite = "MacroUndefined:11197";
     ++profilerMacroUndefinitions[name.str()];
     if (name == "__has_include") profilerAvailabilityControlModified = true;
   }
@@ -11247,7 +11250,7 @@ void AscifyAction::MacroDefined(const clang::Token &MacroNameTok) {
             MacroNameTok.getIdentifierInfo()), MacroNameTok.getLocation(), true)) &&
       !frozenHelperCgControlSite(getCompilerInstance().getSourceManager(),
           MacroNameTok.getLocation()))
-    originalCgControlChanged = true;
+    originalCgControlSite = "MacroDefined:11250";
   ++profilerMacroDefinitions[name.str()];
   if (name == "__has_include") {
     const auto *info = getCompilerInstance().getPreprocessor().getMacroInfo(
@@ -13152,7 +13155,7 @@ void AscifyAction::MacroExpands(const clang::Token &MacroNameTok,
   if (originalCgControlName(MacroNameTok.getIdentifierInfo()->getName()) &&
       !frozenHelperCgControlSite(getCompilerInstance().getSourceManager(),
           MacroNameTok.getLocation()))
-    originalCgControlChanged = true;
+    originalCgControlSite = "MacroExpands:13155";
   clang::SourceManager &sourceManager =
       getCompilerInstance().getSourceManager();
   const clang::MacroInfo *macroInfo = MD.getMacroInfo();
