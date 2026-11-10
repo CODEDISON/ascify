@@ -16650,7 +16650,7 @@ void AscifyAction::ExecuteAction() {
       bool helper = false;
       for (const auto &candidate : nvidiaSampleHelperMacroCandidates)
         if (candidate.kind == NvidiaSampleHelperMacroKind::CheckCudaErrors &&
-            candidate.statusDomainProven && candidate.invocationRange.file == file &&
+            candidate.invocationRange.file == file &&
             candidate.invocationRange.beginOffset == range.beginOffset &&
             candidate.invocationRange.endOffset == range.endOffset &&
             range.beginOffset < beginOffset && endOffset < range.endOffset) helper = true;
@@ -16743,11 +16743,12 @@ void AscifyAction::ExecuteAction() {
             }
             if(!location.isFileID()||!SM.isWrittenInMainFile(location))return false;
             const auto found=kernelThreadBoundPlan.occupancyCallees.find(SM.getFileOffset(location));
-            if(found==kernelThreadBoundPlan.occupancyCallees.end()||
-                !llvm::StringRef(found->second).starts_with(
+            if(found==kernelThreadBoundPlan.occupancyCallees.end())return false;
+            if(!llvm::StringRef(found->second).starts_with(
                     "::ascify::cudaOccupancy"))return false;
             const auto* reference=llvm::dyn_cast<clang::DeclRefExpr>(
-                call->getArg(2)->IgnoreParenImpCasts());
+                call->getArg(call->getDirectCallee()->getName()=="cudaOccupancyMaxPotentialBlockSize"?2:1)
+                    ->IgnoreParenImpCasts());
             const auto* kernel=reference?llvm::dyn_cast<clang::FunctionDecl>(reference->getDecl()):nullptr;
             return kernel&&kernelThreadBoundPlan.kernels.count(kernel->getCanonicalDecl());
           },dynamicAbiTailInsertions,dynamicAbiTailLocation,dynamicAbiTailError)) {

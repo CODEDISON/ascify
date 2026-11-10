@@ -337,8 +337,9 @@ public:
     for (const auto &entry : inventory.calls) {
       const auto *call = entry.call;
       const auto *callee = call->getDirectCallee();
-      if (!callee || !callee->getIdentifier() || !occupancyName(callee->getName()) ||
-          !owned(physical(call->getExprLoc(), source))) continue;
+      if (!callee || !callee->getIdentifier() || !occupancyName(callee->getName()))
+        continue;
+      if (!owned(physical(call->getExprLoc(), source))) continue;
       if (!enabled || !entry.owner || entry.owner->getTemplatedKind() != FunctionDecl::TK_NonTemplate ||
           entry.owner->hasAttr<CUDADeviceAttr>() || entry.owner->hasAttr<CUDAGlobalAttr>() ||
           call->isTypeDependent() || call->isValueDependent() ||
