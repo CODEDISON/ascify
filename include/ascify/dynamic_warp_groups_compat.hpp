@@ -4,6 +4,13 @@
 // WIP, deliberately not included by the public facade or translator. A source
 // proof must admit only the closed SDK-origin value and operation domain before
 // this backend can be published. This header grants no grid/partial-warp sync.
+// Cooperative grid-wide synchronization is backed by the device-global
+// sense-reversing barrier defined in ascify_cuda_compat.hpp (declared at
+// the true global ::ascify scope so the merged-TU include order resolves).
+namespace ascify {
+__SIMT_DEVICE_FUNCTIONS_DECL__ void grid_barrier_sync(unsigned blocks);
+}
+
 namespace ascify_cg {
 namespace dynamic_detail {
 __SIMT_DEVICE_FUNCTIONS_DECL__ inline unsigned count(unsigned mask) {
@@ -168,12 +175,6 @@ __SIMT_DEVICE_FUNCTIONS_DECL__ inline int reduce(
   return dynamic_detail::reduce_int(group, value, operation);
 }
 
-// Cooperative grid-wide synchronization is backed by the device-global
-// sense-reversing barrier defined in ascify_cuda_compat.hpp (declared here
-// so this header stays self-contained in the merged TU include order).
-namespace ascify {
-__SIMT_DEVICE_FUNCTIONS_DECL__ void grid_barrier_sync(unsigned blocks);
-}
 
 // Grid coordinates stay read-only; synchronization is the documented
 // co-residency barrier above (admission contract: the cooperative occupancy

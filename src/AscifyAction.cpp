@@ -92,6 +92,7 @@ const StringRef sCudaDeviceSymbol = "cudaDeviceSymbol";
 const StringRef sCudaHalf2Operator = "cudaHalf2Operator";
 const StringRef sFrontendHostMath = "frontendHostMath";
 const StringRef sProvenGlobalAtomicCall = "provenGlobalAtomicCall";
+const StringRef sWideningFloatCast = "wideningFloatCast";
 const StringRef sCudaLaneIdAsm = "cudaLaneIdAsm";
 const StringRef sCudaAttributeGuard = "cudaAttributeGuard";
 const StringRef sGridConstantParameterGuard = "gridConstantParameterGuard";
@@ -838,12 +839,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 138881)
+  if (contents.size() != 139089)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "f3dc22b9c35b9427e1d3f6952de19f99eba027d8aa69e0bc4461d351b3c1b58e");
+      "1b8a6c35578a7d5ab5235b571911def43f96faecd923a591ce5af7d99d7ea12a");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -870,12 +871,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 138881)
+  if (invalidBuffer || contents.size() != 139089)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "f3dc22b9c35b9427e1d3f6952de19f99eba027d8aa69e0bc4461d351b3c1b58e");
+      "1b8a6c35578a7d5ab5235b571911def43f96faecd923a591ce5af7d99d7ea12a");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -6529,7 +6530,7 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
       return reject("dynamic SDK provider changed");
   std::string backend,error;
   if (!ascify::ResolveDynamicWarpGroupsBackend(frontendCompatibility,backend,error)||
-      !remember(backend,9779,"eadf26ebbe5df77374849885a0f680c06231407e4bd9847f1b33c9d1c30a40d8"))
+      !remember(backend,9782,"2f6f98ac63aa1b6bc17cb9444af192daaacd71d525183d07146371f1c6d6f043"))
     return reject("owned dynamic backend has no complete physical identity");
   const auto native=[&](clang::SourceLocation location) {
     if (!location.isFileID()) return false;
@@ -9815,6 +9816,68 @@ bool AscifyAction::rewriteProvenGenericAtomicExchCall(
   return true;
 }
 
+bool AscifyAction::rewriteDeviceWideningFloatCast(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *cast = Result.Nodes.getNodeAs<clang::CastExpr>(sWideningFloatCast);
+  if (cast == nullptr || Result.Context == nullptr || Result.SourceManager == nullptr)
+    return false;
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  if (cast->getCastKind() != clang::CK_FloatingCast) return false;
+  const auto from = cast->getSubExpr()->getType();
+  const auto to = cast->getType();
+  if (from.isNull() || to.isNull() || !from->isFloatingType()) return false;
+  const bool widening =
+      to->isSpecificBuiltinType(clang::BuiltinType::Double) &&
+      !from->isSpecificBuiltinType(clang::BuiltinType::Double);
+  const bool narrowing =
+      from->isSpecificBuiltinType(clang::BuiltinType::Double) &&
+      to->isFloatingType() && !to->isSpecificBuiltinType(clang::BuiltinType::Double);
+  if (!widening && !narrowing) return false;
+  // Only device code: the enclosing non-lambda function carries __device__
+  // (host widening keeps the native conversion).
+  const auto *owner = enclosingNonLambdaFunction(cast, context);
+  if (owner == nullptr || owner->hasAttr<clang::CUDAHostAttr>() ||
+      (!owner->hasAttr<clang::CUDADeviceAttr>() &&
+       !owner->hasAttr<clang::CUDAGlobalAttr>()))
+    return false;
+  if (cast->getBeginLoc().isMacroID() || cast->getEndLoc().isMacroID() ||
+      !source.isWrittenInMainFile(cast->getBeginLoc()) ||
+      !source.isWrittenInMainFile(cast->getEndLoc()))
+    return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto end = clang::Lexer::getLocForEndOfToken(
+      cast->getEndLoc(), 0, source, options);
+  if (end.isInvalid()) return false;
+  const unsigned offset = source.getFileOffset(cast->getBeginLoc());
+  if (!rewrittenGlobalAtomicOffsets.insert(offset).second) return true;
+  const unsigned length = source.getFileOffset(end) - offset;
+  const char *name = narrowing ? "::ascify::detail::narrow_f64_to_f32"
+                               : "::ascify::detail::widen_f32_to_f64";
+  // An implicit cast shares its source range with its operand: wrap the
+  // original operand text in the integer-exact conversion call.
+  const auto operandText = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(cast->getSourceRange()),
+      source, options);
+  if (operandText.empty()) return false;
+  const std::string replacement =
+      std::string(name) + "(" + operandText.str() + ")";
+  if (!insertSemanticReplacement(
+          ct::Replacement(source, cast->getBeginLoc(), length, replacement),
+          clang::FullSourceLoc(cast->getBeginLoc(), source),
+          cast->getBeginLoc(), end)) {
+    rewrittenGlobalAtomicOffsets.erase(offset);
+    return false;
+  }
+  needsCudaCompatHeader = true;
+  static const dppCounter counter = {
+      "CUDA device float conversion", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(counter,
+      narrowing ? "device double->float narrowing rewritten"
+                : "device float->double widening rewritten");
+  return true;
+}
+
 bool AscifyAction::rewriteCudaLaunchCooperativeKernel(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
@@ -9824,10 +9887,8 @@ bool AscifyAction::rewriteCudaLaunchCooperativeKernel(
   auto &context = *Result.Context;
   auto &source = *Result.SourceManager;
   const auto *callee = call->getDirectCallee();
-  if (callee == nullptr ||
-      callee->getNameAsString() != "cudaLaunchCooperativeKernel" ||
-      call->getNumArgs() != 6)
-    return false;
+  if (callee == nullptr || call->getNumArgs() != 6) return false;
+  if (callee->getNameAsString() != "cudaLaunchCooperativeKernel") return false;
   // Operand 0: (void*)kernel or (void*)&kernel, an unqualified main-file
   // __global__ function of this TU.
   const auto *kernelArg = call->getArg(0)->IgnoreParenImpCasts();
@@ -9873,8 +9934,23 @@ bool AscifyAction::rewriteCudaLaunchCooperativeKernel(
   for (unsigned index = 0; index < passed.size(); ++index) {
     const auto *parameter = kernel->parameters()[index];
     const auto expected = parameter->getType();
-    const auto observed = context.getPointerType(passed[index]->getType());
-    if (!context.hasSameUnqualifiedType(expected, observed)) return false;
+    // A pointer parameter must be fed by the exact pointee variable; a
+    // builtin value parameter is fed by a value copy of a builtin variable
+    // (the kernelArgs protocol: (void*)&value delivers the scalar value).
+    const auto varType = passed[index]->getType();
+    if (expected->isPointerType() && varType->isPointerType()) {
+      // Exact pointer types, or the safe implicit qualification addition
+      // T* -> const T*; the kernel value copy keeps the pointer value.
+      const auto expectedPointee = expected->getPointeeType();
+      const auto observedPointee = varType->getPointeeType();
+      const bool same = context.hasSameUnqualifiedType(expectedPointee, observedPointee);
+      const bool constWidening = same && expectedPointee.isConstQualified() &&
+          !observedPointee.hasQualifiers();
+      if (!same && !constWidening) return false;
+    } else if (!(expected->isBuiltinType() && expected->isArithmeticType() &&
+                 varType->isBuiltinType() && varType->isArithmeticType())) {
+      return false;
+    }
   }
   // Whole-call literal range in the main file.
   const auto begin = call->getBeginLoc(), last = call->getEndLoc();
@@ -10541,6 +10617,12 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
       mat::callExpr(mat::callee(mat::functionDecl()),
                     mat::isExpansionInMainFile())
           .bind(sProvenGlobalAtomicCall),
+      this);
+  // Device-side implicit float->double casts: the target SIMT entry cannot
+  // call the rtlib widening helper, so each proven cast is rewritten to the
+  // integer-exact widen function.
+  Finder->addMatcher(
+      mat::castExpr(mat::isExpansionInMainFile()).bind(sWideningFloatCast),
       this);
   // Test location through Stmt's concrete-kind dispatch: the abstract
   // AsmStmt base does not supply the GCC statement's source location.
@@ -17411,6 +17493,10 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
   }
   if (Result.Nodes.getNodeAs<clang::DeclRefExpr>(sFrontendHostMath) != nullptr) {
     (void)rewriteFrontendHostMath(Result);
+    return;
+  }
+  if (Result.Nodes.getNodeAs<clang::CastExpr>(sWideningFloatCast) != nullptr) {
+    (void)rewriteDeviceWideningFloatCast(Result);
     return;
   }
   if (Result.Nodes.getNodeAs<clang::CallExpr>(

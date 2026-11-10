@@ -1026,8 +1026,13 @@ class Proof {
     }
     const unsigned first = source.getFileOffset(begin), last = source.getFileOffset(end);
     const unsigned offset = source.getFileOffset(op);
+    // Plain assignment keeps the natural overload set: template argument
+    // deduction selects (double&,double), and an exact float-argument
+    // overload widens in integer logic (no rtlib conversion in SIMT).
+    const bool explicitTemplate = masked || !assignment;
     prefixes[first] += "::ascify::detail::" + std::string(masked ? "scalar_masked_add_assign_rne" :
-        assignment ? "scalar_add_assign_rne" : "scalar_add_rne") + "<" + typeName + ">(";
+        assignment ? "scalar_add_assign_rne" : "scalar_add_rne") +
+        (explicitTemplate ? "<" + typeName + ">" : "") + "(";
     if (masked) {
       bool invalid=false;
       const auto mask=Lexer::getSourceText(CharSourceRange::getTokenRange(maskedCall->getArg(0)->getSourceRange()),

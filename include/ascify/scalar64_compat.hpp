@@ -124,6 +124,75 @@ template<class T> ASCIFY_SCALAR64_DEVICE T scalar_add_rne(T left, T right) {
   }
 }
 
+// Exact IEEE-754 float->double widening with integer bit logic: the
+// target's SIMT entry cannot call the rtlib __extendsfdf2 helper, and the
+// scalar += projection delivers float right-hand sides to double slots.
+ASCIFY_SCALAR64_DEVICE double widen_f32_to_f64(float value) {
+  const unsigned bits = __builtin_bit_cast(unsigned, value);
+  const unsigned exponent = (bits >> 23) & 0xffu;
+  const unsigned fraction = bits & 0x7fffffu;
+  const unsigned long long sign =
+      static_cast<unsigned long long>(bits >> 31) << 63;
+  if (exponent == 0xffu)
+    return __builtin_bit_cast(double,
+        sign | 0x7ff0000000000000ull |
+        (static_cast<unsigned long long>(fraction) << 29));
+  if (exponent == 0) {
+    if (fraction == 0) return __builtin_bit_cast(double, sign);
+    int normalized = -126;
+    unsigned mantissa = fraction;
+    while ((mantissa & 0x800000u) == 0) { mantissa <<= 1; --normalized; }
+    mantissa &= 0x7fffffu;
+    return __builtin_bit_cast(double,
+        sign | (static_cast<unsigned long long>(normalized + 1023) << 52) |
+        (static_cast<unsigned long long>(mantissa) << 29));
+  }
+  return __builtin_bit_cast(double,
+      sign | (static_cast<unsigned long long>(exponent - 127 + 1023) << 52) |
+      (static_cast<unsigned long long>(fraction) << 29));
+}
+
+// Exact IEEE-754 double->float narrowing (round to nearest even) in
+// integer logic: the SIMT entry cannot call the rtlib __truncdfsf2 helper.
+ASCIFY_SCALAR64_DEVICE float narrow_f64_to_f32(double value) {
+  const unsigned long long bits =
+      __builtin_bit_cast(unsigned long long, value);
+  const unsigned sign = static_cast<unsigned>(bits >> 63) << 31;
+  const int exponent = static_cast<int>((bits >> 52) & 0x7ff) - 1023;
+  const unsigned long long fraction = bits & 0xfffffffffffffull;
+  if (((bits >> 52) & 0x7ff) == 0x7ff)
+    return __builtin_bit_cast(float,
+        sign | 0x7f800000u | static_cast<unsigned>(fraction >> 29));
+  if (exponent > 127)
+    return __builtin_bit_cast(float, sign | 0x7f800000u);
+  if (exponent >= -126) {
+    unsigned long long mantissa = fraction >> 29;
+    const unsigned long long remainder = fraction & 0x1fffffffull;
+    if (remainder > 0x10000000ull ||
+        (remainder == 0x10000000ull && (mantissa & 1ull) != 0))
+      ++mantissa;
+    if ((mantissa >> 23) != 0)
+      return __builtin_bit_cast(float,
+          sign | (static_cast<unsigned>(exponent + 128) << 23));
+    return __builtin_bit_cast(float,
+        sign | (static_cast<unsigned>(exponent + 127) << 23) |
+        static_cast<unsigned>(mantissa));
+  }
+  if (exponent < -149)
+    return __builtin_bit_cast(float, sign);
+  // Subnormal: 1.fraction * 2^exponent into f32 subnormal grid.
+  unsigned long long mantissa = fraction | (1ull << 52);
+  const int shift = -exponent - 126 + 29;
+  unsigned long long quotient = mantissa >> shift;
+  const unsigned long long rem = mantissa & ((1ull << shift) - 1);
+  const unsigned long long half = 1ull << (shift - 1);
+  if (rem > half || (rem == half && (quotient & 1ull) != 0))
+    ++quotient;
+  if (quotient >= (1ull << 23))
+    return __builtin_bit_cast(float, sign | 0x3f800000u);
+  return __builtin_bit_cast(float, sign | static_cast<unsigned>(quotient));
+}
+
 template<class T> ASCIFY_SCALAR64_DEVICE void scalar_add_assign_rne(
     T& left, T right) {
   static_assert(scalar_add_type<T>::value && !std::is_volatile<T>::value,
@@ -133,6 +202,17 @@ template<class T> ASCIFY_SCALAR64_DEVICE void scalar_add_assign_rne(
   const T previous = left;
   left = scalar_add_rne<T>(previous, right);
 }
+
+// float right-hand side widened exactly in integer logic, then the same
+// binary64 RNE add (no rtlib conversion call inside the SIMT entry). Only
+// the verified target defines the binary64 add this builds on.
+#if defined(ASCIFY_SCALAR64_VERIFIED_TARGET)
+ASCIFY_SCALAR64_DEVICE void scalar_add_assign_rne(
+    double& left, float right) {
+  const double previous = left;
+  left = scalar_add_rne<double>(previous, widen_f32_to_f64(right));
+}
+#endif
 
 } // namespace detail
 } // namespace ascify

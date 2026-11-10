@@ -75,7 +75,6 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   m["cuMemcpyHtoD"] = {"ascify::cuMemcpyHtoD", CONV_MEMORY, API_DRIVER, 0};
   m["cuMemcpyDtoH"] = {"ascify::cuMemcpyDtoH", CONV_MEMORY, API_DRIVER, 0};
   m["cuLaunchKernel"] = {"ascify::cuLaunchKernel", CONV_EXECUTION, API_DRIVER, 0};
-  m["cudaLaunchCooperativeKernel"] = {"ascify::cudaLaunchCooperativeKernel", CONV_EXECUTION, API_RUNTIME, SEC::EXECUTION, FULL};
   // CUDA SDK version macros (cuda.h) rename several Driver entry points at
   // preprocessing time; the AST therefore sees these _v2/_v4 spellings. Map
   // each to the same reviewed implementation.

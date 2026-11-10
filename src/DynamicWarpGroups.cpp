@@ -898,7 +898,13 @@ bool ProveDynamicKernelAbiTails(ASTContext& context,const DynamicWarpGroupStats&
           if(address->getOpcode()!=UO_AddrOf)operand=nullptr;
           else operand=address->getSubExpr()->IgnoreParenImpCasts();
         }
-        if(operand==reference)admitted=true;
+        if(operand==reference) {
+          admitted=true;
+          // The cooperative-launch projection rewrites this call into the
+          // direct <<<>>> launch of the same kernel in the same root.
+          if(const auto* cooperativeKernel=llvm::dyn_cast<FunctionDecl>(reference->getDecl()))
+            launched.insert(cooperativeKernel->getCanonicalDecl());
+        }
       }
     }
     if(!admitted) {
