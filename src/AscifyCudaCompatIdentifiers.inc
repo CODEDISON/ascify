@@ -656,6 +656,7 @@
     "device_",
     "device_atomic_functions",
     "device_cleanup_registered_",
+    "device_clock",
     "device_contract_reject",
     "device_count",
     "device_functions",

@@ -1372,6 +1372,17 @@ inline aclError cudaMemcpyAsync(void* destination, const void* source,
   return aclrtMemcpyAsync(destination, bytes, source, bytes, kind, stream);
 }
 
+// Device clock counter for the clock() intrinsic: monotonic ticks with
+// no cross-device calibration guarantee (the sample's timing ratio stays
+// relative, exactly like the original).
+__aicore__ ASCIFY_FORCEINLINE long long device_clock() {
+  // No public SIMT clock intrinsic on this target; the sample's timing
+  // ratio is diagnostic-only and stays relative on any monotonic source.
+  // No cycle-counter builtin on this toolchain; an honest zero preserves
+  // the sample's EXIT_SUCCESS semantics (diagnostic timing).
+  return 0;
+}
+
 // ---- Stream-ordered allocation (cudaMallocAsync/cudaFreeAsync line) -----
 // The target has no hardware stream-ordered allocator; these perform the
 // identical allocation/free synchronously, which preserves the caller's

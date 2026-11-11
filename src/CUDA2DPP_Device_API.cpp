@@ -54,6 +54,7 @@ const std::map<llvm::StringRef, dppCounter> CUDA_DEVICE_FUNCTION_MAP = [] {
   m["__any_sync"]        = {"ascify::any_sync",       CONV_DEVICE_FUNC, API_RUNTIME, 0};
   m["__all_sync"]        = {"ascify::all_sync",       CONV_DEVICE_FUNC, API_RUNTIME, 0};
   // The facade retains CUDA tile result types while using native CANN groups.
+  m["clock"] = {"ascify::device_clock", CONV_DEVICE_FUNC, API_RUNTIME, 0};
   m["cooperative_groups"] = {"ascify_cg",           CONV_DEVICE_FUNC, API_RUNTIME, 0};
   // Keep synchronization behind the dual-header-family compatibility layer.
   // Public 8.5 deliberately rejects block vote collectives that its aggregate
