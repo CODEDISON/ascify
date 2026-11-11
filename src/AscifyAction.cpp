@@ -839,12 +839,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 141244)
+  if (contents.size() != 142586)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "8f5a46dd8a5294df9a53e5148bf3e889cb3a2ebbff42cd906a0642edb519dbcb");
+      "aae3deca12b6d5a58e880cf1b67a1458f258b6c4debffb24e852356af7356fa2");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -871,12 +871,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 141244)
+  if (invalidBuffer || contents.size() != 142586)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "8f5a46dd8a5294df9a53e5148bf3e889cb3a2ebbff42cd906a0642edb519dbcb");
+      "aae3deca12b6d5a58e880cf1b67a1458f258b6c4debffb24e852356af7356fa2");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -956,7 +956,7 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaMemcpy2D", "cudaMemset2D", "cudaMemcpyToArray", "cudaMemcpy2DToArray", "cudaMemcpy3D",
       "cudaCreateTextureObject", "cudaDestroyTextureObject",
       "cudaMemset", "cudaMemsetAsync", "cudaMallocHost", "cudaLaunchCooperativeKernel",
-      "cudaMallocAsync", "cudaFreeAsync", "cudaDeviceGetDefaultMemPool", "cudaMemPoolSetAttribute",
+      "cudaMallocAsync", "cudaFreeAsync", "cudaDeviceGetDefaultMemPool", "cudaMemPoolSetAttribute", "cudaMemPoolSetAccess",
       "cudaHostAlloc", "cudaHostRegister", "cudaHostUnregister",
       "cudaHostGetDevicePointer", "cudaSetDeviceFlags",
       "cuInit", "cuDeviceGetCount", "cuDeviceGet", "cuDeviceGetName",

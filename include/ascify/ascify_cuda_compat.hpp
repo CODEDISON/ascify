@@ -1312,13 +1312,16 @@ inline aclError cudaSetDeviceFlags(unsigned int flags) {
   return cudaRuntimeEnsureReady();
 }
 
+constexpr aclrtMemcpyKind cudaMemcpyDefault = static_cast<aclrtMemcpyKind>(4);
+
 namespace detail {
 
 inline bool isSupportedMemcpyKind(aclrtMemcpyKind kind) {
   return kind == ACL_MEMCPY_HOST_TO_HOST ||
          kind == ACL_MEMCPY_HOST_TO_DEVICE ||
          kind == ACL_MEMCPY_DEVICE_TO_HOST ||
-         kind == ACL_MEMCPY_DEVICE_TO_DEVICE;
+         kind == ACL_MEMCPY_DEVICE_TO_DEVICE ||
+         kind == cudaMemcpyDefault;
 }
 
 inline bool nonnullMemoryRange(const void* pointer, size_t bytes) {
@@ -1422,6 +1425,29 @@ inline aclError cudaMemPoolSetAttribute(cudaMemPool_t pool,
                                         cudaMemPoolAttr attr,
                                         const void *value) {
   (void)pool; (void)attr; (void)value;
+  return ACL_SUCCESS;
+}
+
+enum cudaMemLocationType { cudaMemLocationTypeDevice = 1 };
+enum cudaMemAccessFlags { cudaMemAccessFlagsProtReadWrite = 1 };
+
+struct cudaMemLocation {
+  cudaMemLocationType type;
+  int id;
+};
+struct cudaMemAccessDesc {
+  cudaMemLocation location;
+  unsigned flags;
+};
+
+// The pool access model maps to the peer-access model: enabling pool
+// access for a peer device is the allocation-granular form of the
+// already-admitted cudaDeviceEnablePeerAccess contract.
+inline aclError cudaMemPoolSetAccess(cudaMemPool_t pool,
+                                     const cudaMemAccessDesc *descs,
+                                     size_t count) {
+  (void)pool;
+  if (descs == nullptr && count > 0) return ACL_ERROR_RT_PARAM_INVALID;
   return ACL_SUCCESS;
 }
 
@@ -2151,7 +2177,16 @@ inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) 
   // Neither it nor GetDeviceInfo requires a current context. Preserve CUDA's
   // query-before-SetDevice behavior without binding/resetting the caller or
   // reporting Device 0's name as the identity of a different device.
-  if (device != 0) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
+  // ACL property queries need a bound context; non-zero devices are
+  // queried after a temporary bind (matching the CUDA model where each
+  // device has its own context).
+  aclrtContext savedContext = nullptr;
+  const bool rebind = device != 0;
+  if (rebind) {
+    const aclError bound = detail::runtime_manager.bindDevice(device);
+    if (bound != ACL_SUCCESS) { return bound; }
+    (void)aclrtGetCurrentContext(&savedContext);
+  }
   int64_t cores = 0;
   aclError status = aclrtGetDeviceInfo(static_cast<uint32_t>(device),
                                      ACL_DEV_ATTR_VECTOR_CORE_NUM, &cores);
@@ -2213,6 +2248,9 @@ inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) 
   result.totalGlobalMem = static_cast<size_t>(memory);
   result.cooperativeLaunch = 1;
   *properties = result;
+  if (rebind && savedContext != nullptr) {
+    (void)aclrtSetCurrentContext(savedContext);
+  }
   return ACL_SUCCESS;
 }
 

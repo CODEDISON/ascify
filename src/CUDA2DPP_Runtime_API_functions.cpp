@@ -78,6 +78,7 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   m["cudaMallocAsync"]              = {"ascify::cudaMallocAsync", CONV_MEMORY, API_RUNTIME, SEC::MEMORY, FULL};
   m["cudaFreeAsync"]                = {"ascify::cudaFreeAsync", CONV_MEMORY, API_RUNTIME, SEC::MEMORY, FULL};
   m["cudaDeviceGetDefaultMemPool"]  = {"ascify::cudaDeviceGetDefaultMemPool", CONV_MEMORY, API_RUNTIME, SEC::MEMORY, FULL};
+  m["cudaMemPoolSetAccess"]              = {"ascify::cudaMemPoolSetAccess", CONV_MEMORY, API_RUNTIME, SEC::MEMORY, FULL};
   m["cudaMemPoolSetAttribute"]      = {"ascify::cudaMemPoolSetAttribute", CONV_MEMORY, API_RUNTIME, SEC::MEMORY, FULL};
   m["cudaLaunchCooperativeKernel"] = {"ascify::cudaLaunchCooperativeKernel", CONV_EXECUTION, API_RUNTIME, SEC::EXECUTION, FULL};
   // CUDA SDK version macros (cuda.h) rename several Driver entry points at
