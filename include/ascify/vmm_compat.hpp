@@ -115,5 +115,11 @@ inline CUresult cuMemGetAllocationPropertiesFromHandle(
   return CUDA_SUCCESS;
 }
 
+inline CUresult cuGetErrorName(CUresult error, const char **name) {
+  if (name == nullptr) return CUDA_ERROR_INVALID_VALUE;
+  *name = "CUresult"; // The target has no CUerror name table.
+  return CUDA_SUCCESS;
+}
+
 }  // namespace ascify
 #endif

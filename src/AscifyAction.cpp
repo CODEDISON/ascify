@@ -961,7 +961,7 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaHostGetDevicePointer", "cudaSetDeviceFlags",
       "cuInit", "cuDeviceGetCount", "cuDeviceGet", "cuDeviceGetName",
       "cuDeviceGetAttribute", "cuGetErrorString",
-      "cuCtxCreate", "cuCtxDestroy", "cuCtxSynchronize", "cuCtxGetDevice",
+      "cuCtxCreate", "cuCtxDestroy", "cuCtxSynchronize", "cuCtxGetDevice", "cuGetErrorName", "cuGetErrorString",
       "cuMemAddressReserve", "cuMemAddressFree", "cuMemCreate", "cuMemMap",
       "cuMemUnmap", "cuMemSetAccess", "cuMemRelease",
       "cuMemGetAllocationGranularity", "cuMemGetAllocationPropertiesFromHandle",
@@ -993,8 +993,20 @@ bool isAdmittedCudaRuntimeStatusCall(
   };
   if (std::find_if(std::begin(admittedNames), std::end(admittedNames),
                    [&](const char *admitted) { return name == admitted; }) ==
-      std::end(admittedNames))
-    return false;
+      std::end(admittedNames)) {
+    // A local function whose declared return type is exactly cudaError_t
+    // (= aclError) IS the status domain by type: checkCudaErrors checking
+    // its return value is semantically correct without tracing the body
+    // (which may live in another TU of the original build).
+    const auto *functionType = callee->getType()->getAs<clang::FunctionProtoType>();
+    if (functionType == nullptr ||
+        !functionType->getReturnType()->isEnumeralType())
+      return false;
+    const auto *returnEnum = functionType->getReturnType()->getAs<clang::EnumType>();
+    if (returnEnum == nullptr || returnEnum->getDecl()->getName() != "cudaError")
+      return false;
+    return sourceManager.isWrittenInMainFile(callee->getLocation()) == false;
+  }
   const auto mapped = CUDA_RENAMES_MAP().find(name);
   if (mapped == CUDA_RENAMES_MAP().end() ||
       (mapped->second.apiType != API_RUNTIME &&
