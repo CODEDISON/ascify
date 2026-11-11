@@ -839,12 +839,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 139089)
+  if (contents.size() != 140703)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "1b8a6c35578a7d5ab5235b571911def43f96faecd923a591ce5af7d99d7ea12a");
+      "ad7245cb6b401a60154d671600ab45ea136dcb044756ead6c35b1168a93aaf83");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -871,12 +871,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 139089)
+  if (invalidBuffer || contents.size() != 140703)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "1b8a6c35578a7d5ab5235b571911def43f96faecd923a591ce5af7d99d7ea12a");
+      "ad7245cb6b401a60154d671600ab45ea136dcb044756ead6c35b1168a93aaf83");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -956,6 +956,7 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaMemcpy2D", "cudaMemset2D", "cudaMemcpyToArray", "cudaMemcpy2DToArray", "cudaMemcpy3D",
       "cudaCreateTextureObject", "cudaDestroyTextureObject",
       "cudaMemset", "cudaMemsetAsync", "cudaMallocHost", "cudaLaunchCooperativeKernel",
+      "cudaMallocAsync", "cudaFreeAsync", "cudaDeviceGetDefaultMemPool", "cudaMemPoolSetAttribute",
       "cudaHostAlloc", "cudaHostRegister", "cudaHostUnregister",
       "cudaHostGetDevicePointer", "cudaSetDeviceFlags",
       "cuInit", "cuDeviceGetCount", "cuDeviceGet", "cuDeviceGetName",

@@ -1372,6 +1372,49 @@ inline aclError cudaMemcpyAsync(void* destination, const void* source,
   return aclrtMemcpyAsync(destination, bytes, source, bytes, kind, stream);
 }
 
+// ---- Stream-ordered allocation (cudaMallocAsync/cudaFreeAsync line) -----
+// The target has no hardware stream-ordered allocator; these perform the
+// identical allocation/free synchronously, which preserves the caller's
+// data-flow correctness (each stream operation still observes its own
+// allocation) without inventing an async pool that does not exist.
+
+using cudaMemPool_t = void *;
+
+enum cudaMemPoolAttr { cudaMemPoolAttrReleaseThreshold = 0x1 };
+
+inline constexpr aclrtDevAttr cudaDevAttrMemoryPoolsSupported =
+    static_cast<aclrtDevAttr>(79000003U);
+
+template <typename T>
+inline aclError cudaMallocAsync(T **ptr, size_t size, aclrtStream stream) {
+  (void)stream;
+  if (ptr == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  return aclrtMalloc(reinterpret_cast<void **>(ptr), size,
+                     ACL_MEM_MALLOC_HUGE_FIRST);
+}
+
+inline aclError cudaFreeAsync(void *ptr, aclrtStream stream) {
+  (void)stream;
+  if (ptr == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  return aclrtFree(ptr);
+}
+
+static char ascifyDefaultMemPoolStorage[1];
+
+inline aclError cudaDeviceGetDefaultMemPool(cudaMemPool_t *pool, int device) {
+  if (pool == nullptr || device != 0) return ACL_ERROR_RT_PARAM_INVALID;
+  *pool = &ascifyDefaultMemPoolStorage[0];
+  return ACL_SUCCESS;
+}
+
+inline aclError cudaMemPoolSetAttribute(cudaMemPool_t pool,
+                                        cudaMemPoolAttr attr,
+                                        const void *value) {
+  (void)pool; (void)attr; (void)value;
+  return ACL_SUCCESS;
+}
+
+
 inline aclError cudaMemset(void* destination, int value, size_t bytes) {
   if (bytes == 0) { return ACL_SUCCESS; }
   if (!detail::nonnullMemoryRange(destination, bytes)) {
@@ -2042,6 +2085,7 @@ inline aclError cudaDeviceGetAttribute(int* value, aclrtDevAttr attribute, int d
   // being forwarded to aclrt, whose attribute enum has no such member.
   if (attribute == cudaDevAttrComputeCapabilityMajor) { *value = 7; return ACL_SUCCESS; }
   if (attribute == cudaDevAttrComputeCapabilityMinor) { *value = 0; return ACL_SUCCESS; }
+  if (attribute == cudaDevAttrMemoryPoolsSupported) { *value = 1; return ACL_SUCCESS; }
 
   const aclError initialized = detail::runtime_manager.ensureInitialized();
   if (initialized != ACL_SUCCESS) {
