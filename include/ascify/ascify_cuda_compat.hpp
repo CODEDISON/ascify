@@ -97,6 +97,7 @@ extern int ascify_test_register_exit_cleanup(void (*callback)());
 #endif
 
 #include <ascify/scalar64_compat.hpp>
+#include <ascify/vmm_compat.hpp>
 
 namespace ascify {
 

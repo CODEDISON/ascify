@@ -1298,6 +1298,7 @@
     "vector_functions",
     "verified",
     "view",
+    "vmm_compat",
     "void",
     "void_t",
     "volatile",

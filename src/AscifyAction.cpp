@@ -839,12 +839,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 142586)
+  if (contents.size() != 142619)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "aae3deca12b6d5a58e880cf1b67a1458f258b6c4debffb24e852356af7356fa2");
+      "e623f518b54277b8f31ffb6bb6c69922d565ed6da41dd2e9788107b7cd80446d");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -871,12 +871,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 142586)
+  if (invalidBuffer || contents.size() != 142619)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "aae3deca12b6d5a58e880cf1b67a1458f258b6c4debffb24e852356af7356fa2");
+      "e623f518b54277b8f31ffb6bb6c69922d565ed6da41dd2e9788107b7cd80446d");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -961,7 +961,10 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaHostGetDevicePointer", "cudaSetDeviceFlags",
       "cuInit", "cuDeviceGetCount", "cuDeviceGet", "cuDeviceGetName",
       "cuDeviceGetAttribute", "cuGetErrorString",
-      "cuCtxCreate", "cuCtxDestroy", "cuCtxSynchronize",
+      "cuCtxCreate", "cuCtxDestroy", "cuCtxSynchronize", "cuCtxGetDevice",
+      "cuMemAddressReserve", "cuMemAddressFree", "cuMemCreate", "cuMemMap",
+      "cuMemUnmap", "cuMemSetAccess", "cuMemRelease",
+      "cuMemGetAllocationGranularity", "cuMemGetAllocationPropertiesFromHandle",
       "cuModuleLoadData", "cuModuleUnload", "cuModuleGetFunction",
       "cuMemAlloc", "cuMemFree", "cuMemcpyHtoD", "cuMemcpyDtoH",
       "cuLaunchKernel",
