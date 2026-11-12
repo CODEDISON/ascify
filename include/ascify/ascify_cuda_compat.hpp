@@ -1145,6 +1145,15 @@ inline void stagePeerKernelArguments(void *blob, uint32_t blob_bytes) {
   // device, the same blocking-copy policy the cudaMemcpy adapter uses.
   if (aclrtSynchronizeStream(nullptr) != ACL_SUCCESS) return;
 
+  // The mirror refresh is host-issued while CUDA's cross-device dataflow is
+  // device-side (streamWaitEvent edges the host copy cannot observe). Drain
+  // each staged source's owner device once per launch before refreshing its
+  // mirror; otherwise an async write still in flight on the owner (e.g. a
+  // pool H2D upload on the owner's stream) can lose the race and leave the
+  // mirror stale. A failed drain keeps the original peer address, exactly
+  // like a mirror that could not be provided.
+  int32_t drained_owners[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+
   for (size_t offset = 0; offset + sizeof(void *) <= bytes;
        offset += sizeof(void *)) {
     char *const slot = static_cast<char *>(blob) + offset;
@@ -1174,6 +1183,31 @@ inline void stagePeerKernelArguments(void *blob, uint32_t blob_bytes) {
       }
     }
     if (source == nullptr) continue;
+
+    bool owner_drained = false;
+    for (const int32_t drained : drained_owners) {
+      if (drained == owner) { owner_drained = true; break; }
+    }
+    if (!owner_drained) {
+      aclrtContext saved_context = nullptr;
+      const bool have_saved_context =
+          aclrtGetCurrentContext(&saved_context) == ACL_SUCCESS &&
+          saved_context != nullptr;
+      const bool switched = owner != current;
+      if (switched) (void)aclrtSetDevice(owner);
+      const bool drained_ok = aclrtSynchronizeDevice() == ACL_SUCCESS;
+      if (switched) {
+        if (have_saved_context) {
+          (void)aclrtSetCurrentContext(saved_context);
+        } else {
+          (void)aclrtSetDevice(current);
+        }
+      }
+      if (!drained_ok) continue;
+      for (int32_t &drained : drained_owners) {
+        if (drained == -1) { drained = owner; break; }
+      }
+    }
 
     void *mirror = nullptr;
     {
@@ -1316,9 +1350,22 @@ int32_t ascifyRtKernelLaunchWithFlagV2Shim(const void *stub_func,
                      cfg_info);
 }
 
+namespace detail {
+// Installed by the converter-emitted CDP replay glue (cdp_compat.hpp).
+inline int (*cdpDrainHook)() = nullptr;
+}  // namespace detail
+
 inline aclError cudaDeviceSynchronize() {
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
+  // CDP emulation: device-side <<<>>> launches queued on the device are
+  // replayed by the host before the device is considered synchronized
+  // (the hook is installed by the converter-emitted cdp glue; absent
+  // glue leaves the drain a no-op).
+  if (detail::cdpDrainHook != nullptr) {
+    const aclError drained = detail::cdpDrainHook();
+    if (drained != ACL_SUCCESS) return drained;
+  }
   const aclError status = aclrtSynchronizeDevice();
   if (status != ACL_SUCCESS) return status;
   const auto *hooks = detail::runtimeTextureHooks.load(std::memory_order_acquire);
@@ -1727,22 +1774,80 @@ inline constexpr aclrtDevAttr cudaDevAttrMemoryPoolsSupported =
 
 template <typename T>
 inline aclError cudaMallocAsync(T **ptr, size_t size, aclrtStream stream) {
+  // Synchronous allocation on the thread's current device (the target has no
+  // hardware stream-ordered allocator; the caller's data-flow still observes
+  // its own allocation). Registered with device ownership exactly like the
+  // cudaMalloc adapter so the peer-staging path recognizes cross-device
+  // pool pointers at launch time.
   (void)stream;
   if (ptr == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
-  return aclrtMalloc(reinterpret_cast<void **>(ptr), size,
-                     ACL_MEM_MALLOC_HUGE_FIRST);
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  detail::RuntimeLockGuard allocationGuard(detail::runtimeAllocationRegistry().lock);
+  const aclError status = aclrtMalloc(reinterpret_cast<void **>(ptr), size,
+                                      ACL_MEM_MALLOC_HUGE_FIRST);
+  if (status != ACL_SUCCESS || !*ptr || !size) return status;
+  for (auto &record : detail::runtimeAllocationRegistry().records) {
+    if (record.pointer) continue;
+    void *context = nullptr;
+    // A failed optional context query denies provenance, not the allocation.
+    if (aclrtGetCurrentContext(&context) == ACL_SUCCESS && context)
+      record = {*ptr, size, detail::selectedDeviceForThread(), context};
+    break;
+  }
+  return status;
 }
 
 inline aclError cudaFreeAsync(void *ptr, aclrtStream stream) {
+  // Synchronous free (same data-flow argument as the allocation above). A
+  // pool pointer may be owned by a device other than the calling thread's
+  // current one -- CUDA frees it through the allocating context -- so a
+  // registered foreign allocation is freed under its owner's binding, and
+  // the peer-staging mirrors keyed by it die with it.
   (void)stream;
   if (ptr == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
-  return aclrtFree(ptr);
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  detail::RuntimeLockGuard allocationGuard(detail::runtimeAllocationRegistry().lock);
+  auto *allocation = detail::runtimeAllocationLocked(ptr);
+  if (allocation != nullptr && allocation->device >= 0) {
+    int32_t current = -1;
+    if (aclrtGetDevice(&current) == ACL_SUCCESS && current >= 0 &&
+        current != allocation->device) {
+      aclrtContext saved = nullptr;
+      const bool have_saved =
+          aclrtGetCurrentContext(&saved) == ACL_SUCCESS && saved != nullptr;
+      const aclError switched = aclrtSetDevice(allocation->device);
+      const aclError freed = aclrtFree(ptr);
+      if (have_saved) {
+        (void)aclrtSetCurrentContext(saved);
+      } else {
+        (void)aclrtSetDevice(current);
+      }
+      if (freed == ACL_SUCCESS) {
+        *allocation = {};
+        detail::releasePeerMirrorsForSource(ptr);
+      }
+      return switched != ACL_SUCCESS ? switched : freed;
+    }
+  }
+  const aclError status = aclrtFree(ptr);
+  if (status == ACL_SUCCESS && allocation) *allocation = {};
+  if (status == ACL_SUCCESS) {
+    // Mirrors die with their source allocation; registry -> mirror is the
+    // established lock order and the registry lock is already held.
+    detail::releasePeerMirrorsForSource(ptr);
+  }
+  return status;
 }
 
 static char ascifyDefaultMemPoolStorage[1];
 
 inline aclError cudaDeviceGetDefaultMemPool(cudaMemPool_t *pool, int device) {
-  if (pool == nullptr || device != 0) return ACL_ERROR_RT_PARAM_INVALID;
+  // Every device's default pool maps onto the same process-wide software
+  // pool surface; the handle only carries the cudaMemPoolSetAccess contract
+  // below, so any non-negative device id is a valid pool owner.
+  if (pool == nullptr || device < 0) return ACL_ERROR_RT_PARAM_INVALID;
   *pool = &ascifyDefaultMemPoolStorage[0];
   return ACL_SUCCESS;
 }
@@ -2741,7 +2846,13 @@ struct CallbackWorker {
   detail::RuntimeLock lock;
   bool started = false;
   bool stopping = false;
-  aclrtStream pending[64] = {};
+  pthread_t thread = 0;
+  int32_t boundDevice = -1;
+  struct Pending {
+    aclrtStream stream;
+    int32_t device;
+  };
+  Pending pending[64] = {};
   size_t pendingCount = 0;
   aclrtStream subscribedByWorker[64] = {};
   size_t subscribedByWorkerCount = 0;
@@ -2750,10 +2861,23 @@ inline CallbackWorker &callbackWorker() {
   static CallbackWorker worker;
   return worker;
 }
+// Process-exit drain stop: sets the stop flag and joins the worker so no
+// aclrtProcessReport call can race the RuntimeManager device reset and
+// aclFinalize teardown. Idempotent and safe when the worker never started.
+inline void stopCallbackWorker() {
+  pthread_t thread = 0;
+  {
+    detail::RuntimeLockGuard guard(callbackWorker().lock);
+    if (!callbackWorker().started || callbackWorker().stopping) { return; }
+    callbackWorker().stopping = true;
+    thread = callbackWorker().thread;
+  }
+  if (thread != 0) { (void)pthread_join(thread, nullptr); }
+}
 inline void *callbackWorkerLoop(void *) {
   const uint64_t self = static_cast<uint64_t>(pthread_self());
   while (true) {
-    aclrtStream todo[64];
+    CallbackWorker::Pending todo[64];
     size_t count = 0;
     bool stopping = false;
     {
@@ -2763,19 +2887,27 @@ inline void *callbackWorkerLoop(void *) {
         todo[count++] = callbackWorker().pending[i];
       callbackWorker().pendingCount = 0;
     }
-    if (stopping && count == 0 &&
-        callbackWorker().subscribedByWorkerCount == 0) break;
+    if (stopping) break;
     for (size_t i = 0; i < count; ++i) {
       bool known = false;
       for (size_t k = 0; k < callbackWorker().subscribedByWorkerCount; ++k)
         known = known ||
-            callbackWorker().subscribedByWorker[k] == todo[i];
+            callbackWorker().subscribedByWorker[k] == todo[i].stream;
       if (known) continue;
       if (callbackWorker().subscribedByWorkerCount == 64) break;
-      if (aclrtSubscribeReport(self, todo[i]) == 0) {
+      // Subscription and report drain both execute on this worker thread;
+      // bind the stream's device context first so the worker shares the
+      // same context that produced the stream.
+      if (callbackWorker().boundDevice != todo[i].device) {
+        if (runtime_manager.bindDevice(todo[i].device) != ACL_SUCCESS) {
+          continue;
+        }
+        callbackWorker().boundDevice = todo[i].device;
+      }
+      if (aclrtSubscribeReport(self, todo[i].stream) == 0) {
         detail::RuntimeLockGuard guard(callbackWorker().lock);
         callbackWorker().subscribedByWorker[
-            callbackWorker().subscribedByWorkerCount++] = todo[i];
+            callbackWorker().subscribedByWorkerCount++] = todo[i].stream;
       }
     }
     aclrtProcessReport(100);
@@ -2783,19 +2915,36 @@ inline void *callbackWorkerLoop(void *) {
   return nullptr;
 }
 
-inline aclError ensureStreamCallbackSubscription(aclrtStream stream) {
-  detail::RuntimeLockGuard guard(callbackWorker().lock);
-  if (!callbackWorker().started) {
-    callbackWorker().started = true;
-    pthread_t thread = 0;
-    if (pthread_create(&thread, nullptr, callbackWorkerLoop, nullptr) != 0) {
-      callbackWorker().started = false;
-      return ACL_ERROR_BAD_ALLOC;
+// The worker lock is a non-recursive spinlock: the enqueue below must be a
+// separately scoped critical section, and the bounded wait must run with the
+// lock released so the worker can drain the pending queue at all.
+inline aclError ensureStreamCallbackSubscription(aclrtStream stream,
+                                                 int32_t device) {
+  {
+    detail::RuntimeLockGuard guard(callbackWorker().lock);
+    if (!callbackWorker().started) {
+      callbackWorker().started = true;
+      if (pthread_create(&callbackWorker().thread, nullptr,
+                         callbackWorkerLoop, nullptr) != 0) {
+        callbackWorker().started = false;
+        return ACL_ERROR_BAD_ALLOC;
+      }
+      // atexit handlers run LIFO: the RuntimeManager cleanup callbacks were
+      // registered by the earlier runtime calls, so this later registration
+      // stops and joins the worker before the device reset and aclFinalize.
+      if (::atexit(stopCallbackWorker) != 0) {
+        callbackWorker().stopping = true;
+        (void)pthread_join(callbackWorker().thread, nullptr);
+        callbackWorker().started = false;
+        callbackWorker().stopping = false;
+        callbackWorker().thread = 0;
+        return ACL_ERROR_BAD_ALLOC;
+      }
     }
-    pthread_detach(thread);
+    if (callbackWorker().pendingCount == 64) return ACL_ERROR_BAD_ALLOC;
+    callbackWorker().pending[callbackWorker().pendingCount++] = {stream,
+                                                                 device};
   }
-  if (callbackWorker().pendingCount == 64) return ACL_ERROR_BAD_ALLOC;
-  callbackWorker().pending[callbackWorker().pendingCount++] = stream;
   // The native launch checks that the stream is already registered, so wait
   // bounded for the worker's subscription to complete before returning.
   for (int spin = 0; spin < 2000000; ++spin) {
@@ -2822,8 +2971,8 @@ inline aclError cudaStreamAddCallback(aclrtStream stream,
   if (flags != 0U) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
-  const aclError subscribed =
-      detail::ensureStreamCallbackSubscription(stream);
+  const aclError subscribed = detail::ensureStreamCallbackSubscription(
+      stream, detail::selectedDeviceForThread());
   if (subscribed != ACL_SUCCESS) { return subscribed; }
   detail::StreamCallbackTicket *ticket = static_cast<detail::StreamCallbackTicket *>(
       calloc(1, sizeof(detail::StreamCallbackTicket)));

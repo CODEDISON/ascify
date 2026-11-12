@@ -93,6 +93,7 @@ const StringRef sCudaHalf2Operator = "cudaHalf2Operator";
 const StringRef sFrontendHostMath = "frontendHostMath";
 const StringRef sProvenGlobalAtomicCall = "provenGlobalAtomicCall";
 const StringRef sMixedFloatDoubleDivision = "mixedFloatDoubleDivision";
+const StringRef sCdpDeviceLaunch = "cdpDeviceLaunch";
 const StringRef sWideningFloatCast = "wideningFloatCast";
 const StringRef sCudaLaneIdAsm = "cudaLaneIdAsm";
 const StringRef sCudaAttributeGuard = "cudaAttributeGuard";
@@ -851,12 +852,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 162124)
+  if (contents.size() != 169029)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "7f7ced1baa77fbd14da40dc1382a0701775b6e11af4f2de06dc36d4fec957026");
+      "1c24162f5ff961ff388d51cc179929889669f08c605477322398dfa00b43677f");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -883,12 +884,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 162124)
+  if (invalidBuffer || contents.size() != 169029)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "e45bb7d9e27fcc427d63cbfb3a05623bdc93caca8ba2257fdcb3d9fddcd0f1f1");
+      "1c24162f5ff961ff388d51cc179929889669f08c605477322398dfa00b43677f");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -10275,6 +10276,171 @@ bool AscifyAction::rewriteDeviceStdMove(const mat::MatchFinder::MatchResult &Res
   return true;
 }
 
+bool AscifyAction::rewriteDeviceCdpLaunch(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *launch =
+      Result.Nodes.getNodeAs<clang::CUDAKernelCallExpr>(sCdpDeviceLaunch);
+  llvm::errs() << "ASCIFY DBG cdp launch matched=" << (launch ? 1 : 0) << "\n";
+  if (launch == nullptr || Result.Context == nullptr ||
+      Result.SourceManager == nullptr)
+    return false;
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  const auto *callee = launch->getDirectCallee();
+  if (callee == nullptr || !callee->hasAttr<clang::CUDAGlobalAttr>())
+    return false;
+  // Device context only: a host-side <<<>>> launch keeps the native path.
+  const auto *owner = enclosingNonLambdaFunction(launch, context);
+  if (owner == nullptr || owner->hasAttr<clang::CUDAHostAttr>() ||
+      (!owner->hasAttr<clang::CUDADeviceAttr>() &&
+       !owner->hasAttr<clang::CUDAGlobalAttr>()))
+    return false;
+  const clang::Expr *config = launch->getConfig();
+  const auto *configuration = llvm::dyn_cast_or_null<clang::CallExpr>(config);
+  if (configuration == nullptr || configuration->getNumArgs() < 2 ||
+      configuration->getNumArgs() > 4)
+    return false;
+  // Every argument must be a POD/pointer: the queue stores argument words.
+  if (launch->getNumArgs() > 12u)  // ascify::cdp::kMaxArgs
+    return false;
+  for (const auto *argument : launch->arguments()) {
+    const auto type = argument->getType();
+    if (type.isNull() || type->isDependentType() ||
+        (!type->isBuiltinType() && !type->isPointerType()))
+      return false;
+  }
+  const auto begin = source.getFileLoc(launch->getBeginLoc());
+  const auto last = source.getFileLoc(launch->getEndLoc());
+  if (begin.isMacroID() || last.isMacroID() || begin.isInvalid() ||
+      last.isInvalid() || !source.isWrittenInMainFile(begin) ||
+      !source.isWrittenInMainFile(last))
+    return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto end = clang::Lexer::getLocForEndOfToken(last, 0, source, options);
+  if (end.isInvalid()) return false;
+  const auto text = [&](const clang::Expr *expression) {
+    return clang::Lexer::getSourceText(
+        clang::CharSourceRange::getTokenRange(
+            source.getFileLoc(expression->getBeginLoc()),
+            source.getFileLoc(expression->getEndLoc())),
+        source, options).str();
+  };
+  const auto components = [&](const clang::Expr *expression,
+                              std::string &x, std::string &y,
+                              std::string &z) {
+    const auto type = expression->getType();
+    if (!type.isNull() && !type->isBuiltinType() &&
+        context.hasSameUnqualifiedType(type, context.VoidTy) == false &&
+        type->isRecordType() &&
+        llvm::StringRef(type->getAsCXXRecordDecl()
+                            ? type->getAsCXXRecordDecl()->getQualifiedNameAsString()
+                            : "") == "dim3") {
+      x = "(" + text(expression) + ").x";
+      y = "(" + text(expression) + ").y";
+      z = "(" + text(expression) + ").z";
+      return true;
+    }
+    x = "(" + text(expression) + ")";
+    y = "0u";
+    z = "0u";
+    return true;
+  };
+  std::string gx, gy, gz, bx, by, bz;
+  if (!components(configuration->getArg(0), gx, gy, gz)) return false;
+  if (!components(configuration->getArg(1), bx, by, bz)) return false;
+  const std::string smem = configuration->getNumArgs() >= 3
+      ? "(" + text(configuration->getArg(2)) + ")"
+      : "0u";
+  const std::string stream = configuration->getNumArgs() >= 4
+      ? "(const void *)(" + text(configuration->getArg(3)) + ")"
+      : "(const void *)0";
+  auto found = cdpKernelIds_.find(callee->getCanonicalDecl());
+  if (found == cdpKernelIds_.end()) {
+    const unsigned next = static_cast<unsigned>(cdpKernelIds_.size()) + 1u;
+    found = cdpKernelIds_.emplace(callee->getCanonicalDecl(), next).first;
+  }
+  const unsigned id = found->second;
+  std::string invocation = "::ascify::cdp::enqueue<" +
+      std::to_string(id) + ">(" + gx + ", " + gy + ", " + gz + ", " + bx +
+      ", " + by + ", " + bz + ", " + smem + ", " + stream;
+  for (const auto *argument : launch->arguments())
+    invocation += ", (" + text(argument) + ")";
+  invocation += ")";
+  const auto offset = source.getFileOffset(begin);
+  if (!rewrittenGlobalAtomicOffsets.insert(offset).second) return true;
+  const auto length = source.getFileOffset(end) - offset;
+  if (!insertSemanticReplacement(
+          ct::Replacement(source, begin, length, invocation),
+          clang::FullSourceLoc(begin, source), begin, end)) {
+    rewrittenGlobalAtomicOffsets.erase(offset);
+    return false;
+  }
+  needsCudaCompatHeader = true;
+  cdpUsed = true;
+  static const dppCounter counter = {
+      "CUDA device dynamic launch", CONV_EXECUTION, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(
+      counter, "device-side <<<>>> launch queued for host replay");
+  return true;
+}
+
+bool AscifyAction::rewriteDeviceCdpStreamCall(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *call =
+      Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
+  if (call == nullptr || Result.Context == nullptr ||
+      Result.SourceManager == nullptr)
+    return false;
+  const auto *callee = call->getDirectCallee();
+  if (callee == nullptr || callee->getIdentifier() == nullptr) return false;
+  const auto name = callee->getName();
+  const bool create = name == "cudaStreamCreateWithFlags";
+  const bool destroy = name == "cudaStreamDestroy";
+  if (!create && !destroy) return false;
+  if (create && call->getNumArgs() != 2) return false;
+  if (destroy && call->getNumArgs() != 1) return false;
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  // Device context only.
+  const auto *owner = enclosingNonLambdaFunction(call, context);
+  if (owner == nullptr || owner->hasAttr<clang::CUDAHostAttr>() ||
+      (!owner->hasAttr<clang::CUDADeviceAttr>() &&
+       !owner->hasAttr<clang::CUDAGlobalAttr>()))
+    return false;
+  const auto begin = source.getFileLoc(call->getBeginLoc());
+  const auto last = source.getFileLoc(call->getEndLoc());
+  if (begin.isMacroID() || last.isMacroID() || begin.isInvalid() ||
+      last.isInvalid() || !source.isWrittenInMainFile(begin) ||
+      !source.isWrittenInMainFile(last))
+    return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto end = clang::Lexer::getLocForEndOfToken(last, 0, source, options);
+  if (end.isInvalid()) return false;
+  const auto text = [&](const clang::Expr *expression) {
+    return clang::Lexer::getSourceText(
+        clang::CharSourceRange::getTokenRange(
+            source.getFileLoc(expression->getBeginLoc()),
+            source.getFileLoc(expression->getEndLoc())),
+        source, options).str();
+  };
+  const std::string replacement = create
+      ? "::ascify::cdp::deviceStreamCreate((void **)(" +
+            text(call->getArg(0)) + "))"
+      : "::ascify::cdp::deviceStreamDestroy((void *)(" +
+            text(call->getArg(0)) + "))";
+  const auto offset = source.getFileOffset(begin);
+  if (!rewrittenGlobalAtomicOffsets.insert(offset).second) return true;
+  const auto length = source.getFileOffset(end) - offset;
+  if (!insertSemanticReplacement(
+          ct::Replacement(source, begin, length, replacement),
+          clang::FullSourceLoc(begin, source), begin, end)) {
+    rewrittenGlobalAtomicOffsets.erase(offset);
+    return false;
+  }
+  cdpUsed = true;
+  return true;
+}
+
 bool AscifyAction::rewriteCudaLaunchCooperativeKernel(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
@@ -11055,6 +11221,10 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
   Finder->addMatcher(
       mat::binaryOperator(mat::isExpansionInMainFile())
           .bind(sMixedFloatDoubleDivision),
+      this);
+  Finder->addMatcher(
+      mat::cudaKernelCallExpr(mat::isExpansionInMainFile())
+          .bind(sCdpDeviceLaunch),
       this);
   // Device-side implicit float->double casts: the target SIMT entry cannot
   // call the rtlib widening helper, so each proven cast is rewritten to the
@@ -16085,6 +16255,72 @@ void AscifyAction::EndSourceFileAction() {
   if (dynamicWarpGroups.used())
     includes += "#include <ascify/cooperative_groups_compat.hpp>\n"
                 "#include <ascify/dynamic_warp_groups_compat.hpp>\n";
+  if (cdpUsed && !cdpKernelIds_.empty()) {
+    includes += "#include <ascify/cdp_compat.hpp>\n";
+    clang::PrintingPolicy policy(getCompilerInstance().getLangOpts());
+    std::vector<std::pair<unsigned, const clang::FunctionDecl *>> ordered;
+    ordered.reserve(cdpKernelIds_.size());
+    for (const auto &entry : cdpKernelIds_)
+      ordered.emplace_back(entry.second, entry.first);
+    std::sort(ordered.begin(), ordered.end(),
+              [](const auto &lhs, const auto &rhs) {
+                return lhs.first < rhs.first;
+              });
+    std::string declarations, cases;
+    for (const auto &entry : ordered) {
+      const auto *kernel = entry.second;
+      declarations += "ASCIFY_GLOBAL void " + kernel->getNameAsString() + "(";
+      cases += "  case " + std::to_string(entry.first) + ": " +
+               kernel->getNameAsString() +
+               "<<<dim3(t.gx, t.gy, t.gz), dim3(t.bx, t.by, t.bz), t.smem, "
+               "(aclrtStream)nullptr>>>(";
+      for (unsigned index = 0; index < kernel->getNumParams(); ++index) {
+        if (index != 0) {
+          declarations += ", ";
+          cases += ", ";
+        }
+        const auto *parameter = kernel->getParamDecl(index);
+        const auto type = parameter->getType();
+        const std::string slot =
+            "t.args[" + std::to_string(index) + "]";
+        if (type->isPointerType()) {
+          cases += "(" + type.getAsString(policy) + ")(uintptr_t)" + slot;
+        } else if (type->isBuiltinType() && type->isFloatingType()) {
+          const auto *builtin = type->getAs<clang::BuiltinType>();
+          if (builtin->getKind() == clang::BuiltinType::Double)
+            cases += "__builtin_bit_cast(double, " + slot + ")";
+          else
+            cases += "__builtin_bit_cast(float, (unsigned)" + slot + ")";
+        } else {
+          cases += "(" + type.getAsString(policy) + ")" + slot;
+        }
+        declarations += type.getAsString(policy) +
+            (parameter->getName().empty()
+                 ? std::string()
+                 : std::string(" ") + parameter->getName().str());
+      }
+      declarations += ");\n";
+      cases += "); break;\n";
+    }
+    includes += declarations +
+        "namespace ascify { namespace cdp {\n"
+        "inline void replayKernel(const TaskHeader &t) {\n"
+        "  switch (t.id) {\n" +
+        cases +
+        "  default: break;\n"
+        "  }\n"
+        "}\n"
+        "namespace {\n"
+        "struct CdpReplayInstaller {\n"
+        "  CdpReplayInstaller() {\n"
+        "    ::ascify::cdp::replayFn() = &replayKernel;\n"
+        "    ::ascify::detail::cdpDrainHook = &drainOnce;\n"
+        "  }\n"
+        "};\n"
+        "inline CdpReplayInstaller cdpReplayInstaller_;\n"
+        "}}\n"
+        "}\n}  // namespace ascify::cdp\n";
+  }
   const bool useSimdTargetRecipe =
       TargetRecipe == ascify::DavC310TargetRecipe::SimdRecipeName;
   const bool hasSelectedTargetHeader =
@@ -18196,6 +18432,11 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
     (void)rewriteFrontendHostMath(Result);
     return;
   }
+  if (Result.Nodes.getNodeAs<clang::CUDAKernelCallExpr>(
+          sCdpDeviceLaunch) != nullptr) {
+    (void)rewriteDeviceCdpLaunch(Result);
+    return;
+  }
   if (Result.Nodes.getNodeAs<clang::BinaryOperator>(
           sMixedFloatDoubleDivision) != nullptr) {
     (void)rewriteDeviceMixedFloatDoubleDivision(Result);
@@ -18208,6 +18449,7 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
   if (Result.Nodes.getNodeAs<clang::CallExpr>(
           sProvenGlobalAtomicCall) != nullptr) {
     if (!rewriteDeviceStdMove(Result) &&
+        !rewriteDeviceCdpStreamCall(Result) &&
         !rewriteCudaSmDiagnostic(Result) &&
         !rewriteCudaFloatFrexp(Result) &&
         !preserveHostStandardMathCall(Result) &&
