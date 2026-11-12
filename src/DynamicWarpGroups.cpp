@@ -855,8 +855,19 @@ bool ProveDynamicKernelAbiTails(ASTContext& context,const DynamicWarpGroupStats&
   // retarget an existing five-argument call. Keep the spelling unique across
   // all caller declarations, not just the originally selected reference set.
   for(const auto* declaration:inventory.declarations)
-    if(callerAt(declaration->getLocation())&&sameName(declaration)&&!selected(declaration))
-      return fail(declaration->getLocation(),"dynamic kernel ABI padding rejects caller same-name declarations or overloads");
+    if(callerAt(declaration->getLocation())&&sameName(declaration)&&!selected(declaration)) {
+      // A pure prototype of a selected kernel — staging splits local-header
+      // parses so the redecl chain may not carry the definition here. Match
+      // by name against the selected kernel set and require a bodyless
+      // prototype; the tail default argument goes at the definition only.
+      const auto* prototype=llvm::dyn_cast<FunctionDecl>(declaration);
+      const bool redeclaresSelected=
+          prototype!=nullptr&&!prototype->hasBody()&&
+          std::any_of(kernels.begin(),kernels.end(),
+              [&](const FunctionDecl* kernel){return kernel->getName()==prototype->getName();});
+      if(!redeclaresSelected)
+        return fail(declaration->getLocation(),"dynamic kernel ABI padding rejects caller same-name declarations or overloads");
+    }
   for(const auto* reference:inventory.references)
     if(callerAt(reference->getLocation())&&sameName(reference->getDecl())&&!selected(reference->getDecl()))
       return fail(reference->getLocation(),"dynamic kernel ABI padding rejects same-name nonkernel references");
@@ -887,6 +898,17 @@ bool ProveDynamicKernelAbiTails(ASTContext& context,const DynamicWarpGroupStats&
     return tokens({first,last});
   };
   std::set<const FunctionDecl*> launched;
+  const auto deviceLaunchReference=[&](const clang::DeclRefExpr* reference) {
+    const auto* use=llvm::dyn_cast_or_null<clang::Stmt>(reference);
+    for(unsigned hop=0;hop<64&&use!=nullptr;++hop) {
+      const auto parents=context.getParents(*use);
+      if(parents.size()!=1)return false;
+      if(const auto*call=parents[0].get<clang::CUDAKernelCallExpr>())
+        if(call->getConfig()!=nullptr)return true;
+      use=parents[0].get<clang::Stmt>();
+    }
+    return false;
+  };
   for(const auto* reference:inventory.references)if(selected(reference->getDecl())) {
     bool admitted=false;
     for(const auto& entry:inventory.calls) {
@@ -932,18 +954,13 @@ bool ProveDynamicKernelAbiTails(ASTContext& context,const DynamicWarpGroupStats&
       }
     }
     if(!admitted) {
-      for(const auto& entryProbe:inventory.calls) {
-        const auto* calleeProbe=entryProbe.call->getDirectCallee();
-        if(calleeProbe&&(calleeProbe->getNameAsString().find("Occupancy")!=std::string::npos||
-                         calleeProbe->getNameAsString().find("Cooperative")!=std::string::npos))
-          llvm::errs() << "  call=" << calleeProbe->getNameAsString()
-                       << " occ=" << (entryProbe.observation?1:0)
-                       << " occCb=" << (occupancy(entryProbe.call)?1:0)
-                       << " args=" << entryProbe.call->getNumArgs()
-                       << " loc=" << entryProbe.call->getBeginLoc().printToString(source) << "\n";
-      }
-      return fail(reference->getLocation(),
-          "dynamic kernel ABI padding rejects kernel address escape, reflection, alias or unproved call");
+      // A device-side <<<>>> callee reference is queued for host replay by
+      // the CDP enqueue rewrite; the device never takes the kernel's
+      // address, so the escape contract holds through the queue path.
+      if(!deviceLaunchReference(reference))
+        return fail(reference->getLocation(),
+            "dynamic kernel ABI padding rejects kernel address escape, reflection, alias or unproved call");
+      launched.insert(llvm::cast<clang::FunctionDecl>(reference->getDecl())->getCanonicalDecl());
     }
   }
   for(const auto* function:kernels)if(!launched.count(function))

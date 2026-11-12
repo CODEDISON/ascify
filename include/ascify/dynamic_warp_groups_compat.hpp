@@ -69,9 +69,6 @@ class coalesced_group final {
   }
   __SIMT_DEVICE_FUNCTIONS_DECL__ unsigned meta_group_rank() const { return meta_rank_; }
   __SIMT_DEVICE_FUNCTIONS_DECL__ unsigned meta_group_size() const { return meta_size_; }
-  template <typename T> __SIMT_DEVICE_FUNCTIONS_DECL__
-  typename std::enable_if<std::is_same<T, int>::value ||
-                         std::is_same<T, unsigned>::value, T>::type
   __SIMT_DEVICE_FUNCTIONS_DECL__ inline unsigned ballot(
       unsigned predicate) const {
     // Coalesced-group ballot: warp ballot masked to this group's members,
@@ -79,6 +76,9 @@ class coalesced_group final {
     return asc_ballot(predicate) & mask_;
   }
 
+  template <typename T> __SIMT_DEVICE_FUNCTIONS_DECL__
+  typename std::enable_if<std::is_same<T, int>::value ||
+                         std::is_same<T, unsigned>::value, T>::type
   shfl(T value, int source_rank) const {
     dynamic_detail::require_members_active(mask_);
     if (source_rank < 0 || static_cast<unsigned>(source_rank) >= size())

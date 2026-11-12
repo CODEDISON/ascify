@@ -142,9 +142,14 @@ __SIMT_DEVICE_FUNCTIONS_DECL__ inline void enqueue(
   task.smem = smem;
   task.stream = reinterpret_cast<unsigned long long>(stream);
   task.nargs = sizeof...(Args);
-  const unsigned long long words[kMaxArgs] = {detail_cdp::argBits(args)...};
-  for (unsigned index = 0; index < task.nargs; ++index)
-    task.args[index] = index < kMaxArgs ? words[index] : 0u;
+  unsigned index = 0;
+  (void)std::initializer_list<unsigned long long>{
+      (task.args[index < kMaxArgs ? index : 0] =
+           detail_cdp::argBits(args), static_cast<unsigned long long>(0))...,
+      0ULL};
+  for (unsigned tail = task.nargs > kMaxArgs ? kMaxArgs : task.nargs;
+       tail < kMaxArgs; ++tail)
+    task.args[tail] = 0u;
 }
 
 // Device-context stream stubs: CDP recursion uses fresh non-blocking
