@@ -852,12 +852,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 170635)
+  if (contents.size() != 228045)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "eaaa526ba7eff40586c1474c2493bf312aad3c378a9fe5c3307e9445862c57a4");
+      "1cfb4ff959b42f27618090741b167ad90e72ce7a2ee6a772b9337e4eb591dde1");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -884,12 +884,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 170635)
+  if (invalidBuffer || contents.size() != 228045)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "eaaa526ba7eff40586c1474c2493bf312aad3c378a9fe5c3307e9445862c57a4");
+      "1cfb4ff959b42f27618090741b167ad90e72ce7a2ee6a772b9337e4eb591dde1");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -10280,7 +10280,6 @@ bool AscifyAction::rewriteDeviceCdpLaunch(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *launch =
       Result.Nodes.getNodeAs<clang::CUDAKernelCallExpr>(sCdpDeviceLaunch);
-  llvm::errs() << "ASCIFY DBG cdp launch matched=" << (launch ? 1 : 0) << "\n";
   if (launch == nullptr || Result.Context == nullptr ||
       Result.SourceManager == nullptr)
     return false;
@@ -10297,8 +10296,11 @@ bool AscifyAction::rewriteDeviceCdpLaunch(
     return false;
   const clang::Expr *config = launch->getConfig();
   const auto *configuration = llvm::dyn_cast_or_null<clang::CallExpr>(config);
-  if (configuration == nullptr || configuration->getNumArgs() < 2 ||
-      configuration->getNumArgs() > 4)
+  // LLVM23 config bundle: two '<<<' marker dummies, then grid, block and
+  // the optional shared-memory and stream operands.
+  const unsigned configBase = 2;
+  if (configuration == nullptr || configuration->getNumArgs() < configBase + 2 ||
+      configuration->getNumArgs() > configBase + 4)
     return false;
   // Every argument must be a POD/pointer: the queue stores argument words.
   if (launch->getNumArgs() > 12u)  // ascify::cdp::kMaxArgs
@@ -10329,15 +10331,14 @@ bool AscifyAction::rewriteDeviceCdpLaunch(
                               std::string &x, std::string &y,
                               std::string &z) {
     const auto type = expression->getType();
-    if (!type.isNull() && !type->isBuiltinType() &&
-        context.hasSameUnqualifiedType(type, context.VoidTy) == false &&
-        type->isRecordType() &&
-        llvm::StringRef(type->getAsCXXRecordDecl()
-                            ? type->getAsCXXRecordDecl()->getQualifiedNameAsString()
-                            : "") == "dim3") {
-      x = "(" + text(expression) + ").x";
-      y = "(" + text(expression) + ").y";
-      z = "(" + text(expression) + ").z";
+    const auto record =
+        type.isNull() ? nullptr : type->getAsCXXRecordDecl();
+    if (record != nullptr &&
+        record->getQualifiedNameAsString() == "dim3") {
+      const std::string value = "dim3(" + text(expression) + ")";
+      x = "(" + value + ").x";
+      y = "(" + value + ").y";
+      z = "(" + value + ").z";
       return true;
     }
     x = "(" + text(expression) + ")";
@@ -10346,13 +10347,14 @@ bool AscifyAction::rewriteDeviceCdpLaunch(
     return true;
   };
   std::string gx, gy, gz, bx, by, bz;
-  if (!components(configuration->getArg(0), gx, gy, gz)) return false;
-  if (!components(configuration->getArg(1), bx, by, bz)) return false;
-  const std::string smem = configuration->getNumArgs() >= 3
-      ? "(" + text(configuration->getArg(2)) + ")"
+  if (!components(configuration->getArg(configBase), gx, gy, gz)) return false;
+  if (!components(configuration->getArg(configBase + 1), bx, by, bz))
+    return false;
+  const std::string smem = configuration->getNumArgs() >= configBase + 3
+      ? "(" + text(configuration->getArg(configBase + 2)) + ")"
       : "0u";
-  const std::string stream = configuration->getNumArgs() >= 4
-      ? "(const void *)(" + text(configuration->getArg(3)) + ")"
+  const std::string stream = configuration->getNumArgs() >= configBase + 4
+      ? "(const void *)(" + text(configuration->getArg(configBase + 3)) + ")"
       : "(const void *)0";
   auto found = cdpKernelIds_.find(callee->getCanonicalDecl());
   if (found == cdpKernelIds_.end()) {
@@ -16319,7 +16321,8 @@ void AscifyAction::EndSourceFileAction() {
         "};\n"
         "inline CdpReplayInstaller cdpReplayInstaller_;\n"
         "}}\n"
-        "}\n}  // namespace ascify::cdp\n";
+        "}  // namespace cdp\n"
+        "}  // namespace ascify\n";
   }
   const bool useSimdTargetRecipe =
       TargetRecipe == ascify::DavC310TargetRecipe::SimdRecipeName;

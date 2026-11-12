@@ -1301,6 +1301,675 @@ inline void *nextRuntimeSymbol(const char *name) {
 
 }  // namespace detail
 
+// ---- CUDA Graph emulation (host-side recorder / replayer) ------------------
+// Platform fact: CANN 9.1 has no cudaGraph API. CUDA graphs are emulated
+// entirely on the host: a graph is a recorded node list (kernel launch
+// snapshots, memcpy/memset parameters, allocation slots, host callbacks)
+// plus a dependency edge list, and cudaGraphLaunch replays the snapshot in
+// a topological (sequential) order. Concurrency between independent graph
+// branches is therefore not reproduced: every node runs in dependency
+// order on the launching stream. Samples whose own verification only
+// observes data-flow results keep their semantics exactly.
+//
+// Two recording paths share one node representation:
+//   * explicit construction: cudaGraphAddKernelNode & friends. Manual
+//     kernel nodes replay through a typed <<<>>> thunk that the converter
+//     emits next to each __global__ kernel whose address is taken (the
+//     thunk receives the CUDA kernelParams array and performs a real
+//     launch, so the ccec argument packing is never reconstructed).
+//   * stream capture: cudaStreamBeginCapture diverts the runtime launch
+//     shims (rtKernelLaunch / rtKernelLaunchWithFlagV2) and the async
+//     memory APIs into graph nodes. Kernel argument blobs are deep-copied
+//     at capture time, which is exactly CUDA's capture-time value baking.
+//
+// Graph memory nodes: a cudaGraphAddMemAllocNode assigns the virtual
+// address synchronously (CUDA contract), backed by a real aclrtMalloc.
+// CUDA's documented virtual-address reuse (a later alloc node may reuse
+// the address of a freed earlier allocation) is reproduced by handing out
+// the same physical pointer when the freeing free-node already precedes
+// the alloc in the same graph. A free node only flips the slot's logical
+// liveness; physical memory stays valid until the last graph/exec handle
+// dies so that replayed kernels observe the address their baked arguments
+// carry. An external cudaFree / cudaFreeAsync of a graph-owned pointer
+// marks the slot dead without invalidating the address; the next launch
+// of an owning graph resurrects it, preserving the sample's relaunch
+// flows.
+namespace detail {
+
+enum GraphNodeType {
+  GraphNodeKernelV2 = 0,
+  GraphNodeKernelLegacy,
+  GraphNodeKernelThunk,
+  GraphNodeMemcpy,
+  GraphNodeMemset,
+  GraphNodeMemAlloc,
+  GraphNodeMemFree,
+  GraphNodeHost
+};
+
+struct GraphAllocSlot {
+  void *pointer;
+  size_t bytes;
+  bool live;
+};
+
+struct GraphKernelThunkParams {
+  void (*thunk)(unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
+                unsigned, aclrtStream, void **);
+  unsigned grid_x, grid_y, grid_z;
+  unsigned block_x, block_y, block_z;
+  unsigned shared_mem_bytes;
+  void **kernel_params;  // borrowed CUDA-style argument pointer array
+};
+
+struct GraphNode {
+  GraphNodeType type;
+  uint32_t deps[8];
+  size_t dep_count;
+  // Kernel captured from the runtime launch ABI (deep-copied blob).
+  const void *stub;
+  uint32_t num_blocks;
+  AscifyRtArgsEx args_ex;  // args points into blob when blob != nullptr
+  uint8_t *blob;
+  uint32_t blob_bytes;
+  void *sm_desc;  // SIMT launches pass nullptr; the value is replayed as-is
+  uint32_t flags;
+  bool has_cfg;
+  uint8_t cfg[16];  // rtTaskCfgInfo_t snapshot (fixed 16-byte RTS ABI)
+  // Manual kernel node (typed <<<>>> thunk bridge).
+  GraphKernelThunkParams manual;
+  // Memcpy / memset.
+  void *dst;
+  const void *src;
+  size_t bytes;
+  aclrtMemcpyKind kind;
+  int value;
+  // Memory nodes.
+  uint32_t alloc_slot;
+  void *free_ptr;
+  // Host node.
+  void (*host_fn)(void *);
+  void *host_data;
+};
+
+struct AscifyGraphObj {
+  uint64_t id;
+  RuntimeLock lock;
+  GraphNode nodes[64];
+  size_t node_count;
+  GraphAllocSlot allocs[16];
+  size_t alloc_count;
+  uint32_t refs;  // graph handle itself plus every instantiated exec
+  bool has_alloc_nodes;
+};
+
+struct AscifyGraphExecObj {
+  AscifyGraphObj *graph;  // holds one reference
+  uint32_t order[64];
+  size_t order_count;
+};
+
+inline uint64_t nextGraphId() {
+  static std::atomic<uint64_t> counter{1};
+  return counter.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Registry of live graph objects: the external-free interception and the
+// last-reference teardown need to find the owning graph of an address.
+// Lock order: graphRegistry lock first, then the graph's own lock.
+struct GraphRegistry {
+  RuntimeLock lock;
+  AscifyGraphObj *graphs[64];
+  size_t count;
+};
+inline GraphRegistry &graphRegistry() {
+  static GraphRegistry registry;
+  return registry;
+}
+
+inline aclError graphRegisterObject(AscifyGraphObj *graph) {
+  detail::RuntimeLockGuard guard(graphRegistry().lock);
+  if (graphRegistry().count == 64) return ACL_ERROR_BAD_ALLOC;
+  graphRegistry().graphs[graphRegistry().count++] = graph;
+  return ACL_SUCCESS;
+}
+
+inline void graphUnregisterObject(AscifyGraphObj *graph) {
+  detail::RuntimeLockGuard guard(graphRegistry().lock);
+  for (size_t i = 0; i < graphRegistry().count; ++i) {
+    if (graphRegistry().graphs[i] == graph) {
+      for (size_t j = i + 1; j < graphRegistry().count; ++j)
+        graphRegistry().graphs[j - 1] = graphRegistry().graphs[j];
+      --graphRegistry().count;
+      return;
+    }
+  }
+}
+
+// Marks a pointer dead in whichever live graph owns it. Returns true when
+// the pointer was graph-owned (the caller then skips the physical free).
+inline bool graphMarkOwnedPointerDead(const void *pointer) {
+  if (pointer == nullptr) return false;
+  detail::RuntimeLockGuard guard(graphRegistry().lock);
+  for (size_t i = 0; i < graphRegistry().count; ++i) {
+    AscifyGraphObj *graph = graphRegistry().graphs[i];
+    RuntimeLockGuard graph_guard(graph->lock);
+    for (size_t s = 0; s < graph->alloc_count; ++s) {
+      if (graph->allocs[s].pointer == pointer) {
+        // CUDA frees the virtual address; the physical block stays mapped
+        // for address-stable relaunches and dies with the last handle.
+        graph->allocs[s].live = false;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+inline AscifyGraphObj *newGraphObject() {
+  AscifyGraphObj *graph = static_cast<AscifyGraphObj *>(
+      calloc(1, sizeof(AscifyGraphObj)));
+  if (graph == nullptr) return nullptr;
+  graph->id = nextGraphId();
+  graph->refs = 1;  // the cudaGraph_t handle
+  const aclError registered = graphRegisterObject(graph);
+  if (registered != ACL_SUCCESS) {
+    free(graph);
+    return nullptr;
+  }
+  return graph;
+}
+
+inline void graphFreeNodeStorage(GraphNode &node) {
+  if (node.blob != nullptr) {
+    free(node.blob);
+    node.blob = nullptr;
+  }
+}
+
+// Releases one handle reference; the last one frees node storage and the
+// physically-live allocation slots.
+inline aclError graphReleaseReference(AscifyGraphObj *graph) {
+  if (graph == nullptr) return ACL_SUCCESS;
+  bool destroy = false;
+  {
+    detail::RuntimeLockGuard guard(graphRegistry().lock);
+    if (graph->refs > 0) --graph->refs;
+    destroy = graph->refs == 0;
+    if (destroy) {
+      for (size_t i = 0; i < graphRegistry().count; ++i) {
+        if (graphRegistry().graphs[i] == graph) {
+          for (size_t j = i + 1; j < graphRegistry().count; ++j)
+            graphRegistry().graphs[j - 1] = graphRegistry().graphs[j];
+          --graphRegistry().count;
+          break;
+        }
+      }
+    }
+  }
+  if (!destroy) return ACL_SUCCESS;
+  for (size_t i = 0; i < graph->node_count; ++i)
+    graphFreeNodeStorage(graph->nodes[i]);
+  for (size_t s = 0; s < graph->alloc_count; ++s) {
+    if (graph->allocs[s].pointer != nullptr)
+      (void)aclrtFree(graph->allocs[s].pointer);
+    graph->allocs[s] = {};
+  }
+  free(graph);
+  return ACL_SUCCESS;
+}
+
+// Assigns a graph allocation address, honoring CUDA's virtual-address
+// reuse contract: a slot freed earlier in the same graph is handed out
+// again when the sizes match. Called with the graph lock held.
+inline aclError graphAssignAllocationLocked(AscifyGraphObj *graph,
+                                            size_t bytes, void **out,
+                                            uint32_t *slot_out) {
+  for (size_t s = 0; s < graph->alloc_count; ++s) {
+    if (!graph->allocs[s].live && graph->allocs[s].pointer != nullptr &&
+        graph->allocs[s].bytes == bytes) {
+      graph->allocs[s].live = true;
+      *out = graph->allocs[s].pointer;
+      *slot_out = static_cast<uint32_t>(s);
+      return ACL_SUCCESS;
+    }
+  }
+  void *fresh = nullptr;
+  const aclError status =
+      aclrtMalloc(&fresh, bytes, ACL_MEM_MALLOC_HUGE_FIRST);
+  if (status != ACL_SUCCESS) return status;
+  if (graph->alloc_count == 16) {
+    (void)aclrtFree(fresh);
+    return ACL_ERROR_BAD_ALLOC;
+  }
+  const uint32_t slot = static_cast<uint32_t>(graph->alloc_count);
+  graph->allocs[graph->alloc_count++] = {fresh, bytes, true};
+  *out = fresh;
+  *slot_out = slot;
+  return ACL_SUCCESS;
+}
+
+// ---- stream capture session state -----------------------------------------
+// One capture at a time per thread (CUDA's global capture mode is more
+// restrictive still). Streams join the session by waiting on an event that
+// a session stream recorded, which is the join pattern both samples use.
+struct GraphCaptureEventRecord {
+  aclrtEvent event;
+  int node;  // -1 when the record preceded every node on its stream
+};
+
+struct GraphCaptureState {
+  bool active;
+  AscifyGraphObj *graph;
+  aclrtStream root;
+  aclrtStream streams[8];
+  int tail[8];        // last node index per session stream, -1 = none
+  int pending[8][4];  // wait-event edges consumed by the next node
+  size_t pending_count[8];
+  GraphCaptureEventRecord events[16];
+  size_t stream_count;
+  size_t event_count;
+  bool invalid;
+  aclError error;
+};
+
+inline GraphCaptureState &graphCaptureState() {
+  static thread_local GraphCaptureState state = {};
+  return state;
+}
+
+inline bool graphCaptureActive() { return graphCaptureState().active; }
+
+inline int graphCaptureStreamIndexLocked(aclrtStream stream) {
+  GraphCaptureState &capture = graphCaptureState();
+  for (size_t i = 0; i < capture.stream_count; ++i)
+    if (capture.streams[i] == stream) return static_cast<int>(i);
+  return -1;
+}
+
+inline aclError graphCaptureFail(aclError error) {
+  GraphCaptureState &capture = graphCaptureState();
+  if (!capture.invalid) {
+    capture.invalid = true;
+    capture.error = error;
+  }
+  return error;
+}
+
+inline bool graphCaptureEnsureStream(aclrtStream stream) {
+  GraphCaptureState &capture = graphCaptureState();
+  if (graphCaptureStreamIndexLocked(stream) >= 0) return true;
+  if (capture.stream_count == 8) {
+    graphCaptureFail(ACL_ERROR_BAD_ALLOC);
+    return false;
+  }
+  capture.streams[capture.stream_count] = stream;
+  capture.tail[capture.stream_count] = -1;
+  capture.pending_count[capture.stream_count] = 0;
+  ++capture.stream_count;
+  return true;
+}
+
+// Appends a node for `stream` whose dependencies are the stream's tail
+// plus any pending wait-event edges. Returns the new node index or -1.
+inline int graphCaptureAppendNode(aclrtStream stream, GraphNodeType type) {
+  GraphCaptureState &capture = graphCaptureState();
+  if (!graphCaptureEnsureStream(stream)) return -1;
+  const int index = graphCaptureStreamIndexLocked(stream);
+  if (capture.graph->node_count == 64) {
+    graphCaptureFail(ACL_ERROR_BAD_ALLOC);
+    return -1;
+  }
+  GraphNode &node = capture.graph->nodes[capture.graph->node_count];
+  node = GraphNode{};
+  node.type = type;
+  const int tail = capture.tail[index];
+  if (tail >= 0 && node.dep_count < 8) node.deps[node.dep_count++] =
+      static_cast<uint32_t>(tail);
+  for (size_t p = 0; p < capture.pending_count[index] && node.dep_count < 8;
+       ++p) {
+    const int edge = capture.pending[index][p];
+    if (edge >= 0) node.deps[node.dep_count++] = static_cast<uint32_t>(edge);
+  }
+  capture.pending_count[index] = 0;
+  const int created = static_cast<int>(capture.graph->node_count);
+  capture.tail[index] = created;
+  capture.graph->node_count++;
+  return created;
+}
+
+// Returns true when the wait was consumed by the capture session: the
+// waiting stream is already a session stream, or the event was recorded
+// inside this capture (which also joins the stream, the CUDA capture-tree
+// join rule both samples rely on). A wait outside the session on a foreign
+// event returns false and executes the real stream wait.
+inline bool graphCaptureWaitEvent(aclrtStream stream, aclrtEvent event) {
+  GraphCaptureState &capture = graphCaptureState();
+  const bool in_session = graphCaptureStreamIndexLocked(stream) >= 0;
+  bool known_event = false;
+  for (size_t e = 0; e < capture.event_count; ++e)
+    if (capture.events[e].event == event) known_event = true;
+  if (!in_session && !known_event) return false;
+  if (!graphCaptureEnsureStream(stream)) return true;
+  const int index = graphCaptureStreamIndexLocked(stream);
+  if (!known_event) return true;  // foreign event: satisfied edge only
+  for (size_t e = 0; e < capture.event_count; ++e) {
+    if (capture.events[e].event != event) continue;
+    if (capture.events[e].node < 0) return true;  // before any work
+    for (size_t p = 0; p < capture.pending_count[index]; ++p)
+      if (capture.pending[index][p] == capture.events[e].node) return true;
+    if (capture.pending_count[index] == 4) {
+      graphCaptureFail(ACL_ERROR_BAD_ALLOC);
+      return true;
+    }
+    capture.pending[index][capture.pending_count[index]++] =
+        capture.events[e].node;
+    return true;
+  }
+  return true;
+}
+
+// Records an event on a session stream at its current tail. Returns false
+// when the record is not part of the capture (stream outside the session).
+inline bool graphCaptureRecordEvent(aclrtEvent event, aclrtStream stream) {
+  if (graphCaptureStreamIndexLocked(stream) < 0) return false;
+  if (!graphCaptureEnsureStream(stream)) return true;
+  const int index = graphCaptureStreamIndexLocked(stream);
+  GraphCaptureState &capture = graphCaptureState();
+  for (size_t e = 0; e < capture.event_count; ++e) {
+    if (capture.events[e].event == event) {
+      capture.events[e].node = capture.tail[index];
+      return true;
+    }
+  }
+  if (capture.event_count == 16) {
+    graphCaptureFail(ACL_ERROR_BAD_ALLOC);
+    return true;
+  }
+  capture.events[capture.event_count++] = {event, capture.tail[index]};
+  return true;
+}
+
+// Captures cudaLaunchHostFunc as a graph host node.
+inline bool graphCaptureDivertHostFunc(aclrtStream stream,
+                                       void (*function)(void *), void *data) {
+  if (graphCaptureStreamIndexLocked(stream) < 0) return false;
+  const int index = graphCaptureAppendNode(stream, GraphNodeHost);
+  if (index < 0) return true;
+  GraphNode &node = graphCaptureState().graph->nodes[index];
+  node.host_fn = function;
+  node.host_data = data;
+  return true;
+}
+
+inline uint8_t *graphCopyBlob(const void *blob, uint32_t bytes) {
+  if (blob == nullptr || bytes == 0) return nullptr;
+  uint8_t *copy = static_cast<uint8_t *>(malloc(bytes));
+  if (copy == nullptr) return nullptr;
+  __builtin_memcpy(copy, blob, bytes);
+  return copy;
+}
+
+// Runtime-launch-shim capture hooks. Returning true means the launch was
+// recorded into the capturing graph and the caller must not launch.
+inline bool graphCaptureDivertLaunchV2(const void *stub_func,
+                                       uint32_t block_dim, void *args_info,
+                                       void *sm_desc, void *stm,
+                                       uint32_t flags, void *cfg_info) {
+  GraphCaptureState &capture = graphCaptureState();
+  if (!capture.active || stm == nullptr) return false;
+  if (graphCaptureStreamIndexLocked(stm) < 0) return false;
+  const int index = graphCaptureAppendNode(stm, GraphNodeKernelV2);
+  if (index < 0) return true;
+  GraphNode &node = capture.graph->nodes[index];
+  node.stub = stub_func;
+  node.num_blocks = block_dim;
+  node.sm_desc = sm_desc;
+  node.flags = flags;
+  if (cfg_info != nullptr) {
+    node.has_cfg = true;
+    __builtin_memcpy(node.cfg, cfg_info, sizeof(node.cfg));
+  }
+  if (args_info != nullptr) {
+    const AscifyRtArgsEx &packed =
+        *static_cast<const AscifyRtArgsEx *>(args_info);
+    if (packed.hostInputInfoNum != 0 || packed.hostInputInfoPtr != nullptr) {
+      // Host-input argument indirection cannot be snapshotted without the
+      // runtime's private layout; fail the capture like an unsupported
+      // capture operation instead of recording a dangling replay.
+      graphCaptureFail(ACL_ERROR_FEATURE_UNSUPPORTED);
+      return true;
+    }
+    node.args_ex = packed;
+    node.blob = graphCopyBlob(packed.args, packed.argsSize);
+    if (packed.args != nullptr && node.blob == nullptr)
+      graphCaptureFail(ACL_ERROR_BAD_ALLOC);
+    node.blob_bytes = packed.argsSize;
+  }
+  return true;
+}
+
+inline bool graphCaptureDivertLaunchLegacy(const void *stub_func,
+                                           uint32_t num_blocks, void *args,
+                                           uint32_t args_size, void *sm_desc,
+                                           void *stm) {
+  GraphCaptureState &capture = graphCaptureState();
+  if (!capture.active || stm == nullptr) return false;
+  if (graphCaptureStreamIndexLocked(stm) < 0) return false;
+  const int index = graphCaptureAppendNode(stm, GraphNodeKernelLegacy);
+  if (index < 0) return true;
+  GraphNode &node = capture.graph->nodes[index];
+  node.stub = stub_func;
+  node.num_blocks = num_blocks;
+  node.sm_desc = sm_desc;
+  node.blob = graphCopyBlob(args, args_size);
+  if (args != nullptr && node.blob == nullptr)
+    graphCaptureFail(ACL_ERROR_BAD_ALLOC);
+  node.blob_bytes = args_size;
+  return true;
+}
+
+// Async memory API capture hooks. Each returns ACL_SUCCESS when the call
+// was recorded (the caller returns immediately) and
+// ACL_ERROR_FEATURE_UNSUPPORTED as a "not capturing" sentinel otherwise.
+inline aclError graphCaptureDivertMemcpy(void *dst, const void *src,
+                                         size_t bytes, aclrtMemcpyKind kind,
+                                         aclrtStream stream) {
+  GraphCaptureState &capture = graphCaptureState();
+  if (!capture.active || graphCaptureStreamIndexLocked(stream) < 0)
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  const int index = graphCaptureAppendNode(stream, GraphNodeMemcpy);
+  if (index < 0) return ACL_SUCCESS;
+  GraphNode &node = capture.graph->nodes[index];
+  node.dst = dst;
+  node.src = src;
+  node.bytes = bytes;
+  node.kind = kind;
+  return ACL_SUCCESS;
+}
+
+inline aclError graphCaptureDivertMemset(void *dst, int value, size_t bytes,
+                                         aclrtStream stream) {
+  GraphCaptureState &capture = graphCaptureState();
+  if (!capture.active || graphCaptureStreamIndexLocked(stream) < 0)
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  const int index = graphCaptureAppendNode(stream, GraphNodeMemset);
+  if (index < 0) return ACL_SUCCESS;
+  GraphNode &node = capture.graph->nodes[index];
+  node.dst = dst;
+  node.value = value;
+  node.bytes = bytes;
+  return ACL_SUCCESS;
+}
+
+inline aclError graphCaptureDivertMalloc(void **ptr, size_t bytes,
+                                         aclrtStream stream) {
+  GraphCaptureState &capture = graphCaptureState();
+  if (!capture.active || graphCaptureStreamIndexLocked(stream) < 0)
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  if (ptr == nullptr) {
+    graphCaptureFail(ACL_ERROR_RT_PARAM_INVALID);
+    return ACL_SUCCESS;
+  }
+  detail::RuntimeLockGuard guard(capture.graph->lock);
+  void *assigned = nullptr;
+  uint32_t slot = 0;
+  const aclError status =
+      graphAssignAllocationLocked(capture.graph, bytes, &assigned, &slot);
+  if (status != ACL_SUCCESS) {
+    graphCaptureFail(status);
+    return ACL_SUCCESS;
+  }
+  const int index = graphCaptureAppendNode(stream, GraphNodeMemAlloc);
+  if (index < 0) return ACL_SUCCESS;
+  GraphNode &node = capture.graph->nodes[index];
+  node.alloc_slot = slot;
+  capture.graph->has_alloc_nodes = true;
+  *ptr = assigned;  // CUDA assigns the virtual address synchronously
+  return ACL_SUCCESS;
+}
+
+inline aclError graphCaptureDivertFree(void *ptr, aclrtStream stream) {
+  GraphCaptureState &capture = graphCaptureState();
+  if (!capture.active || graphCaptureStreamIndexLocked(stream) < 0)
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  const int index = graphCaptureAppendNode(stream, GraphNodeMemFree);
+  if (index < 0) return ACL_SUCCESS;
+  GraphNode &node = capture.graph->nodes[index];
+  node.free_ptr = ptr;
+  {
+    detail::RuntimeLockGuard guard(capture.graph->lock);
+    for (size_t s = 0; s < capture.graph->alloc_count; ++s)
+      if (capture.graph->allocs[s].pointer == ptr)
+        capture.graph->allocs[s].live = false;
+  }
+  return ACL_SUCCESS;
+}
+
+// ---- managed-memory (cudaMallocManaged) coherence layer --------------------
+// A managed allocation is a host-visible buffer plus a device mirror. The
+// kernel-argument blob is rewritten to the mirror at launch (same slot
+// scan the peer-staging path uses), host writes are pushed to the mirror
+// before a launch when the host bytes changed since the last coherent
+// observation, and device writes are pulled back synchronously after each
+// launch. The shadow copy records the last known coherent host bytes.
+struct ManagedRecord {
+  void *host;
+  void *device;
+  unsigned char *shadow;
+  size_t bytes;
+};
+struct ManagedTable {
+  RuntimeLock lock;
+  ManagedRecord records[16];
+  size_t count;
+};
+inline ManagedTable &managedTable() {
+  static ManagedTable table;
+  return table;
+}
+
+inline bool managedPresent() {
+  detail::RuntimeLockGuard guard(managedTable().lock);
+  return managedTable().count != 0;
+}
+
+inline bool managedIsOwnedPointerLocked(const void *pointer) {
+  for (size_t i = 0; i < managedTable().count; ++i)
+    if (managedTable().records[i].host == pointer) return true;
+  return false;
+}
+
+// Called by cudaFree/cudaFreeAsync before the regular paths: a managed
+// host pointer is written back, physically freed on both sides, and
+// unregistered. Returns true when handled.
+inline bool managedFree(void *pointer) {
+  ManagedRecord doomed;
+  bool found = false;
+  {
+    detail::RuntimeLockGuard guard(managedTable().lock);
+    if (!managedIsOwnedPointerLocked(pointer)) return false;
+    for (size_t i = 0; i < managedTable().count; ++i) {
+      if (managedTable().records[i].host == pointer) {
+        doomed = managedTable().records[i];
+        found = true;
+        for (size_t j = i + 1; j < managedTable().count; ++j)
+          managedTable().records[j - 1] = managedTable().records[j];
+        --managedTable().count;
+        break;
+      }
+    }
+  }
+  if (!found) return false;
+  (void)aclrtSynchronizeStream(nullptr);
+  (void)aclrtMemcpy(doomed.host, doomed.bytes, doomed.device, doomed.bytes,
+                    ACL_MEMCPY_DEVICE_TO_HOST);
+  (void)aclrtFree(doomed.device);
+  free(doomed.shadow);
+  free(doomed.host);
+  return true;
+}
+
+// Pre-launch coherence for one launch's argument blob: rewrites managed
+// host pointers to their device mirror and pushes host changes. Runs only
+// when at least one managed allocation exists.
+inline void managedStageKernelArguments(void *blob, uint32_t blob_bytes,
+                                        aclrtStream stream) {
+  if (blob == nullptr || blob_bytes < sizeof(void *)) return;
+  detail::RuntimeLockGuard guard(managedTable().lock);
+  if (managedTable().count == 0) return;
+  const size_t scan = blob_bytes > 4096U ? 4096U : blob_bytes;
+  for (size_t offset = 0; offset + sizeof(void *) <= scan;
+       offset += sizeof(void *)) {
+    char *const slot = static_cast<char *>(blob) + offset;
+    const uintptr_t value = *reinterpret_cast<const uintptr_t *>(slot);
+    if (value < 0x10000U) continue;
+    for (size_t i = 0; i < managedTable().count; ++i) {
+      ManagedRecord &record = managedTable().records[i];
+      const uintptr_t low = reinterpret_cast<uintptr_t>(record.host);
+      const uintptr_t high = low + static_cast<uintptr_t>(record.bytes);
+      if (value < low || value >= high) continue;
+      // Push host edits that happened since the last coherent point.
+      if (__builtin_memcmp(record.host, record.shadow, record.bytes) != 0) {
+        (void)aclrtSynchronizeStream(stream);
+        (void)aclrtMemcpy(record.device, record.bytes, record.host,
+                          record.bytes, ACL_MEMCPY_HOST_TO_DEVICE);
+        __builtin_memcpy(record.shadow, record.host, record.bytes);
+      }
+      *reinterpret_cast<uintptr_t *>(slot) =
+          reinterpret_cast<uintptr_t>(record.device) + (value - low);
+      break;
+    }
+  }
+}
+
+// Post-launch writeback: after the launching stream drains, the device
+// mirror is the authoritative copy; publish it to the host buffer and
+// refresh the shadow so a later host edit is detectable.
+inline void managedPublishAfterLaunch(aclrtStream stream) {
+  detail::RuntimeLockGuard guard(managedTable().lock);
+  if (managedTable().count == 0) return;
+  (void)aclrtSynchronizeStream(stream);
+  for (size_t i = 0; i < managedTable().count; ++i) {
+    ManagedRecord &record = managedTable().records[i];
+    (void)aclrtMemcpy(record.host, record.bytes, record.device,
+                      record.bytes, ACL_MEMCPY_DEVICE_TO_HOST);
+    __builtin_memcpy(record.shadow, record.host, record.bytes);
+  }
+}
+
+// Refresh shadows at synchronization points: every async writeback has
+// completed, so the current host bytes are the coherent observation.
+inline void managedRefreshAfterSync() {
+  detail::RuntimeLockGuard guard(managedTable().lock);
+  for (size_t i = 0; i < managedTable().count; ++i) {
+    ManagedRecord &record = managedTable().records[i];
+    __builtin_memcpy(record.shadow, record.host, record.bytes);
+  }
+}
+
+}  // namespace detail
+
 // The two runtime launch ABI symbols that carry a packed kernel-argument
 // blob on this ccec generation. asm labels keep the C++ entity names
 // separate from the ABI symbol, so the runtime declarations ccec adds
@@ -1321,13 +1990,21 @@ __attribute__((visibility("hidden"))) __attribute__((weak))
 int32_t ascifyRtKernelLaunchShim(const void *stub_func, uint32_t num_blocks,
                                  void *args, uint32_t args_size, void *sm_desc,
                                  void *stm) {
+  if (detail::graphCaptureDivertLaunchLegacy(stub_func, num_blocks, args,
+                                             args_size, sm_desc, stm)) {
+    return 0;  // recorded into the capturing graph
+  }
+  detail::managedStageKernelArguments(args, args_size, stm);
   detail::stagePeerKernelArguments(args, args_size);
   using Launch = int32_t (*)(const void *, uint32_t, void *, uint32_t, void *,
                              void *);
   static Launch real_launch = reinterpret_cast<Launch>(
       detail::nextRuntimeSymbol("rtKernelLaunch"));
   if (real_launch == nullptr) return 1;  // RT_ERROR_INVALID_VALUE
-  return real_launch(stub_func, num_blocks, args, args_size, sm_desc, stm);
+  const int32_t launched =
+      real_launch(stub_func, num_blocks, args, args_size, sm_desc, stm);
+  detail::managedPublishAfterLaunch(stm);
+  return launched;
 }
 
 __attribute__((visibility("hidden"))) __attribute__((weak))
@@ -1336,9 +2013,14 @@ int32_t ascifyRtKernelLaunchWithFlagV2Shim(const void *stub_func,
                                            void *args_info, void *sm_desc,
                                            void *stm, uint32_t flags,
                                            void *cfg_info) {
+  if (detail::graphCaptureDivertLaunchV2(stub_func, block_dim, args_info,
+                                         sm_desc, stm, flags, cfg_info)) {
+    return 0;  // recorded into the capturing graph
+  }
   if (args_info != nullptr) {
     detail::AscifyRtArgsEx &packed =
         *static_cast<detail::AscifyRtArgsEx *>(args_info);
+    detail::managedStageKernelArguments(packed.args, packed.argsSize, stm);
     detail::stagePeerKernelArguments(packed.args, packed.argsSize);
   }
   using Launch = int32_t (*)(const void *, uint32_t, void *, void *, void *,
@@ -1346,8 +2028,10 @@ int32_t ascifyRtKernelLaunchWithFlagV2Shim(const void *stub_func,
   static Launch real_launch = reinterpret_cast<Launch>(
       detail::nextRuntimeSymbol("rtKernelLaunchWithFlagV2"));
   if (real_launch == nullptr) return 1;  // RT_ERROR_INVALID_VALUE
-  return real_launch(stub_func, block_dim, args_info, sm_desc, stm, flags,
-                     cfg_info);
+  const int32_t launched = real_launch(stub_func, block_dim, args_info,
+                                       sm_desc, stm, flags, cfg_info);
+  detail::managedPublishAfterLaunch(stm);
+  return launched;
 }
 
 namespace detail {
@@ -1368,6 +2052,7 @@ inline aclError cudaDeviceSynchronize() {
   }
   const aclError status = aclrtSynchronizeDevice();
   if (status != ACL_SUCCESS) return status;
+  detail::managedRefreshAfterSync();
   const auto *hooks = detail::runtimeTextureHooks.load(std::memory_order_acquire);
   return hooks ? hooks->checkPending() : ACL_SUCCESS;
 }
@@ -1437,6 +2122,8 @@ inline aclError cudaFree(void* device_pointer) {
   if (device_pointer == nullptr) { return ACL_SUCCESS; }
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
+  if (detail::managedFree(device_pointer)) { return ACL_SUCCESS; }
+  if (detail::graphMarkOwnedPointerDead(device_pointer)) { return ACL_SUCCESS; }
   detail::RuntimeLockGuard allocationGuard(detail::runtimeAllocationRegistry().lock);
   auto *allocation = detail::runtimeAllocationLocked(device_pointer);
   const auto *hooks = detail::runtimeTextureHooks.load(std::memory_order_acquire);
@@ -1745,6 +2432,11 @@ inline aclError cudaMemcpyAsync(void* destination, const void* source,
   }
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
+  if (detail::graphCaptureActive()) {
+    const aclError captured = detail::graphCaptureDivertMemcpy(
+        destination, source, bytes, kind, stream);
+    if (captured != ACL_ERROR_FEATURE_UNSUPPORTED) { return captured; }
+  }
   return aclrtMemcpyAsync(destination, bytes, source, bytes, kind, stream);
 }
 
@@ -1783,6 +2475,13 @@ inline aclError cudaMallocAsync(T **ptr, size_t size, aclrtStream stream) {
   if (ptr == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
+  if (detail::graphCaptureActive()) {
+    // Stream capture turns the stream-ordered allocation into a graph
+    // memory node; the address is assigned synchronously like CUDA's.
+    const aclError captured = detail::graphCaptureDivertMalloc(
+        reinterpret_cast<void **>(ptr), size, stream);
+    if (captured != ACL_ERROR_FEATURE_UNSUPPORTED) { return captured; }
+  }
   detail::RuntimeLockGuard allocationGuard(detail::runtimeAllocationRegistry().lock);
   const aclError status = aclrtMalloc(reinterpret_cast<void **>(ptr), size,
                                       ACL_MEM_MALLOC_HUGE_FIRST);
@@ -1808,6 +2507,10 @@ inline aclError cudaFreeAsync(void *ptr, aclrtStream stream) {
   if (ptr == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
+  if (detail::managedFree(ptr)) { return ACL_SUCCESS; }
+  // A graph-owned allocation keeps its physical block (address-stable
+  // relaunch contract); the free is recorded as logical liveness only.
+  if (detail::graphMarkOwnedPointerDead(ptr)) { return ACL_SUCCESS; }
   detail::RuntimeLockGuard allocationGuard(detail::runtimeAllocationRegistry().lock);
   auto *allocation = detail::runtimeAllocationLocked(ptr);
   if (allocation != nullptr && allocation->device >= 0) {
@@ -1901,6 +2604,11 @@ inline aclError cudaMemsetAsync(void* destination, int value, size_t bytes,
   }
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
+  if (detail::graphCaptureActive()) {
+    const aclError captured = detail::graphCaptureDivertMemset(
+        destination, value, bytes, stream);
+    if (captured != ACL_ERROR_FEATURE_UNSUPPORTED) { return captured; }
+  }
   return aclrtMemsetAsync(destination, bytes, value, bytes, stream);
 }
 
@@ -2009,6 +2717,7 @@ inline aclError cudaStreamSynchronize(aclrtStream stream) {
   if (ready != ACL_SUCCESS) { return ready; }
   const aclError status = aclrtSynchronizeStream(stream);
   if (status != ACL_SUCCESS) return status;
+  detail::managedRefreshAfterSync();
   const auto *hooks = detail::runtimeTextureHooks.load(std::memory_order_acquire);
   return hooks ? hooks->checkPending() : ACL_SUCCESS;
 }
@@ -2042,11 +2751,73 @@ inline aclError cudaStreamQuery(aclrtStream stream) {
   return ACL_ERROR_FEATURE_UNSUPPORTED;
 }
 
+namespace detail {
+// Ledger of the device each event was last recorded on. A native
+// same-device stream-event wait is a real device-side edge; a cross-device
+// one is silently broken on this target (verified on device: the wait
+// submits successfully and the stream's submission queue then never
+// advances, down to a three-minute runtime timeout), so the record site
+// decides between the native edge and the host-side wait below. Unrecorded
+// events have no entry and keep today's native path (CUDA treats them as
+// complete). The lock is leaf-level: no other lock is taken while it is
+// held.
+struct EventRecordSite {
+  aclrtEvent event = nullptr;
+  int32_t device = -1;
+};
+struct EventRecordSiteTable {
+  RuntimeLock lock;
+  EventRecordSite records[64] = {};
+};
+inline EventRecordSiteTable &eventRecordSiteTable() {
+  static EventRecordSiteTable table;
+  return table;
+}
+inline void rememberEventRecordDevice(aclrtEvent event, int32_t device) {
+  if (event == nullptr) return;
+  RuntimeLockGuard guard(eventRecordSiteTable().lock);
+  for (auto &record : eventRecordSiteTable().records) {
+    if (record.event == event) { record.device = device; return; }
+  }
+  for (auto &record : eventRecordSiteTable().records) {
+    if (record.event == nullptr) {
+      record.event = event;
+      record.device = device;
+      return;
+    }
+  }
+}
+inline void forgetEventRecordDevice(aclrtEvent event) {
+  if (event == nullptr) return;
+  RuntimeLockGuard guard(eventRecordSiteTable().lock);
+  for (auto &record : eventRecordSiteTable().records) {
+    if (record.event == event) { record = {}; return; }
+  }
+}
+// True when the event's latest record happened on a device other than the
+// calling thread's current one. Converted samples create streams on their
+// own current device, so the thread's device is the waiting stream's device.
+inline bool eventRecordedOnOtherDevice(aclrtEvent event) {
+  RuntimeLockGuard guard(eventRecordSiteTable().lock);
+  for (const auto &record : eventRecordSiteTable().records) {
+    if (record.event == event) {
+      return record.device >= 0 && record.device != selectedDeviceForThread();
+    }
+  }
+  return false;
+}
+
+}  // namespace detail
+
 inline aclError cudaStreamWaitEvent(aclrtStream stream, aclrtEvent event,
                                     unsigned int flags = 0) {
   if (flags == cudaEventWaitExternal) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
   if (flags != cudaEventWaitDefault || event == nullptr) {
     return ACL_ERROR_RT_PARAM_INVALID;
+  }
+  if (detail::graphCaptureActive() &&
+      detail::graphCaptureWaitEvent(stream, event)) {
+    return ACL_SUCCESS;  // recorded as a capture dependency edge
   }
   if (stream == nullptr || stream == cudaStreamLegacy ||
       stream == cudaStreamPerThread) {
@@ -2061,6 +2832,18 @@ inline aclError cudaStreamWaitEvent(aclrtStream stream, aclrtEvent event,
   // cudaEventCreate uses Ex + SYNC events on this admitted SDK. Their wait
   // captures the latest record and is unaffected by subsequent rerecords.
   // This queues a device-side dependency; no host synchronization or reset.
+  //
+  // The cross-device form is the measured exception: the native edge never
+  // resolves (see EventRecordSiteTable above). The host can wait on the
+  // foreign event from any device context (aclrtSynchronizeEvent measured
+  // working cross-device), so that wait preserves CUDA's contract here:
+  // this call blocks until the event's captured work has completed, and
+  // everything the caller submits afterwards observes it. Same-device
+  // waits keep the native edge, keeping accepted multi-stream samples'
+  // overlap untouched.
+  if (detail::eventRecordedOnOtherDevice(event)) {
+    return aclrtSynchronizeEvent(event);
+  }
   return aclrtStreamWaitEvent(stream, event);
 #else
   return ACL_ERROR_FEATURE_UNSUPPORTED;
@@ -2072,6 +2855,10 @@ using cudaHostFn_t = void (*)(void*);
 inline aclError cudaLaunchHostFunc(aclrtStream stream, cudaHostFn_t function,
                                   void* user_data) {
   if (function == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
+  if (detail::graphCaptureActive() &&
+      detail::graphCaptureDivertHostFunc(stream, function, user_data)) {
+    return ACL_SUCCESS;  // recorded as a graph host node
+  }
   // ACL has no CUDA legacy default-stream cross-stream synchronization.
   // An explicit stream is required for this admitted ordered callback path.
   if (stream == nullptr) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
@@ -2130,13 +2917,19 @@ inline aclError cudaEventCreate(aclrtEvent* event) {
 inline aclError cudaEventDestroy(aclrtEvent event) {
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
-  return aclrtDestroyEvent(event);
+  const aclError status = aclrtDestroyEvent(event);
+  if (status == ACL_SUCCESS) { detail::forgetEventRecordDevice(event); }
+  return status;
 }
 
 inline aclError cudaEventRecord(
     aclrtEvent event, aclrtStream stream = nullptr) {
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
+  if (detail::graphCaptureActive() && stream != nullptr &&
+      detail::graphCaptureRecordEvent(event, stream)) {
+    return ACL_SUCCESS;  // recorded as the stream's capture tail
+  }
   if (stream == nullptr) {
     // CUDA's legacy default stream implicitly synchronizes with every
     // blocking stream: a default-stream record observes all prior named-
@@ -2158,7 +2951,14 @@ inline aclError cudaEventRecord(
     return ACL_ERROR_FEATURE_UNSUPPORTED;
 #endif
   }
-  return aclrtRecordEvent(event, stream);
+  const aclError status = aclrtRecordEvent(event, stream);
+  if (status == ACL_SUCCESS) {
+    // The record site decides the cross-device wait policy above; the
+    // thread's current device is the recording stream's device in every
+    // converted sample's create-then-use pattern.
+    detail::rememberEventRecordDevice(event, detail::selectedDeviceForThread());
+  }
+  return status;
 }
 
 inline aclError cudaEventSynchronize(aclrtEvent event) {
@@ -2166,6 +2966,7 @@ inline aclError cudaEventSynchronize(aclrtEvent event) {
   if (ready != ACL_SUCCESS) { return ready; }
   const aclError status = aclrtSynchronizeEvent(event);
   if (status != ACL_SUCCESS) return status;
+  detail::managedRefreshAfterSync();
   const auto *hooks = detail::runtimeTextureHooks.load(std::memory_order_acquire);
   return hooks ? hooks->checkPending() : ACL_SUCCESS;
 }
@@ -2195,6 +2996,680 @@ inline aclError cudaEventElapsedTime(float* milliseconds, aclrtEvent start,
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   return aclrtEventElapsedTime(milliseconds, start, end);
+}
+
+// ---- CUDA Graph host emulation: public API surface -------------------------
+// Handles and node-parameter records mirror the CUDA layouts the samples
+// observe (field names and arity); they are host-side descriptors with no
+// kernel-observed layout, so the same policy as the CUmem* records applies.
+struct cudaGraphNodeRef {
+  uint64_t graph;
+  uint32_t index;
+};
+using cudaGraph_t = detail::AscifyGraphObj *;
+using cudaGraphExec_t = detail::AscifyGraphExecObj *;
+using cudaGraphNode_t = cudaGraphNodeRef;
+
+enum cudaStreamCaptureMode {
+  cudaStreamCaptureModeGlobal = 0,
+  cudaStreamCaptureModeThreadLocal = 1,
+  cudaStreamCaptureModeRelaxed = 2
+};
+
+struct cudaMemsetParams {
+  void *dst;
+  int value;
+  size_t pitch;
+  unsigned int elementSize;
+  size_t width;
+  size_t height;
+};
+
+struct cudaHostNodeParams {
+  cudaHostFn_t fn;
+  void *userData;
+};
+
+// dim3 is native in the DPP host environment; the plain-C++ header test
+// build has no dim3, so an equivalent fallback keeps the header parsable
+// there (only field names x/y/z are observed by this layer).
+#if defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
+struct cudaKernelNodeParams {
+  void *func;  // converter bridge: typed <<<>>> thunk address
+  ::dim3 gridDim;
+  ::dim3 blockDim;
+  unsigned int sharedMemBytes;
+  void **kernelParams;
+  void **extra;
+};
+#else
+struct cudaGraphDim3Fallback {
+  unsigned int x, y, z;
+};
+struct cudaKernelNodeParams {
+  void *func;
+  cudaGraphDim3Fallback gridDim;
+  cudaGraphDim3Fallback blockDim;
+  unsigned int sharedMemBytes;
+  void **kernelParams;
+  void **extra;
+};
+#endif
+
+enum cudaMemAllocationType {
+  cudaMemAllocationTypeInvalid = 0x0,
+  cudaMemAllocationTypePinned = 0x1,
+  cudaMemAllocationTypeManaged = 0x2
+};
+enum cudaMemAllocationHandleType {
+  cudaMemHandleTypeNone = 0x0
+};
+struct cudaMemPoolProps {
+  cudaMemAllocationType allocType;
+  cudaMemAllocationHandleType handleTypes;
+  cudaMemLocation location;
+  void *win32SecurityAttributes;
+  size_t maxSize;
+  unsigned short usage;
+  unsigned char reserved[54];
+};
+struct cudaMemAllocNodeParams {
+  cudaMemPoolProps poolProps;
+  const cudaMemAccessDesc *accessDescs;
+  size_t accessDescCount;
+  size_t bytesize;
+  void *dptr;
+};
+
+namespace detail {
+
+using GraphRealLaunchV2 = int32_t (*)(const void *, uint32_t, void *, void *,
+                                      void *, uint32_t, void *);
+inline GraphRealLaunchV2 graphRealLaunchV2() {
+  static GraphRealLaunchV2 entry = reinterpret_cast<GraphRealLaunchV2>(
+      nextRuntimeSymbol("rtKernelLaunchWithFlagV2"));
+  return entry;
+}
+using GraphRealLaunchLegacy = int32_t (*)(const void *, uint32_t, void *,
+                                          uint32_t, void *, void *);
+inline GraphRealLaunchLegacy graphRealLaunchLegacy() {
+  static GraphRealLaunchLegacy entry = reinterpret_cast<GraphRealLaunchLegacy>(
+      nextRuntimeSymbol("rtKernelLaunch"));
+  return entry;
+}
+
+// cudaMemcpyDefault classification for replayed copies: a pointer is
+// device memory exactly when it lies in a registered cudaMalloc allocation.
+inline bool graphPointerIsDeviceMemory(const void *pointer) {
+  if (pointer == nullptr) return false;
+  detail::RuntimeLockGuard guard(runtimeAllocationRegistry().lock);
+  return runtimeAllocationLocked(pointer) != nullptr;
+}
+
+inline aclrtMemcpyKind graphClassifyMemcpyKind(void *dst, const void *src,
+                                               aclrtMemcpyKind kind) {
+  if (kind != cudaMemcpyDefault) return kind;
+  const bool dstDevice = graphPointerIsDeviceMemory(dst);
+  const bool srcDevice = graphPointerIsDeviceMemory(src);
+  if (dstDevice && srcDevice) return ACL_MEMCPY_DEVICE_TO_DEVICE;
+  if (dstDevice) return ACL_MEMCPY_HOST_TO_DEVICE;
+  if (srcDevice) return ACL_MEMCPY_DEVICE_TO_HOST;
+  return ACL_MEMCPY_HOST_TO_HOST;
+}
+
+inline aclError graphAppendNode(AscifyGraphObj *graph, GraphNode &node,
+                                const cudaGraphNode_t *dependencies,
+                                size_t dependency_count, uint32_t *index_out) {
+  if (graph == nullptr || graph->node_count == 64)
+    return ACL_ERROR_BAD_ALLOC;
+  if (dependency_count > 8) return ACL_ERROR_RT_PARAM_INVALID;
+  for (size_t i = 0; i < dependency_count; ++i) {
+    if (dependencies[i].graph != graph->id ||
+        dependencies[i].index >= graph->node_count)
+      return ACL_ERROR_RT_PARAM_INVALID;
+  }
+  node.dep_count = dependency_count;
+  for (size_t i = 0; i < dependency_count; ++i)
+    node.deps[i] = dependencies[i].index;
+  *index_out = static_cast<uint32_t>(graph->node_count);
+  graph->nodes[graph->node_count++] = node;
+  return ACL_SUCCESS;
+}
+
+inline aclError graphTopologicalOrder(AscifyGraphObj *graph,
+                                      AscifyGraphExecObj *exec) {
+  size_t indegree[64] = {};
+  bool consumed[64] = {};
+  for (size_t i = 0; i < graph->node_count; ++i) {
+    const GraphNode &node = graph->nodes[i];
+    for (size_t d = 0; d < node.dep_count; ++d) {
+      if (node.deps[d] >= graph->node_count)
+        return ACL_ERROR_RT_PARAM_INVALID;
+      ++indegree[node.deps[d]];
+    }
+  }
+  // Kahn's algorithm preferring lower node indices: deterministic and, for
+  // graphs built in submission order, identical to the recorded order.
+  size_t produced = 0;
+  while (produced < graph->node_count) {
+    bool progressed = false;
+    for (size_t i = 0; i < graph->node_count; ++i) {
+      if (consumed[i] || indegree[i] != 0) continue;
+      consumed[i] = true;
+      exec->order[produced++] = static_cast<uint32_t>(i);
+      progressed = true;
+    }
+    if (!progressed) return ACL_ERROR_RT_PARAM_INVALID;  // cycle
+  }
+  exec->order_count = produced;
+  return ACL_SUCCESS;
+}
+
+inline aclError graphReplayNode(AscifyGraphObj *graph, const GraphNode &node,
+                                aclrtStream stream) {
+  switch (node.type) {
+    case GraphNodeKernelV2: {
+      if (graphRealLaunchV2() == nullptr) return ACL_ERROR_FEATURE_UNSUPPORTED;
+      uint8_t *scratch = nullptr;
+      if (node.blob_bytes != 0) {
+        scratch = static_cast<uint8_t *>(malloc(node.blob_bytes));
+        if (scratch == nullptr) return ACL_ERROR_BAD_ALLOC;
+        __builtin_memcpy(scratch, node.blob, node.blob_bytes);
+      }
+      AscifyRtArgsEx args = node.args_ex;
+      args.args = scratch;
+      stagePeerKernelArguments(scratch, node.blob_bytes);
+      managedStageKernelArguments(scratch, node.blob_bytes, stream);
+      void *const cfg = node.has_cfg ? const_cast<uint8_t *>(node.cfg)
+                                     : nullptr;
+      const int32_t status = graphRealLaunchV2()(
+          node.stub, node.num_blocks, &args, node.sm_desc, stream, node.flags,
+          cfg);
+      managedPublishAfterLaunch(stream);
+      free(scratch);
+      return status == 0 ? ACL_SUCCESS : ACL_ERROR_RT_PARAM_INVALID;
+    }
+    case GraphNodeKernelLegacy: {
+      if (graphRealLaunchLegacy() == nullptr)
+        return ACL_ERROR_FEATURE_UNSUPPORTED;
+      uint8_t *scratch = nullptr;
+      if (node.blob_bytes != 0) {
+        scratch = static_cast<uint8_t *>(malloc(node.blob_bytes));
+        if (scratch == nullptr) return ACL_ERROR_BAD_ALLOC;
+        __builtin_memcpy(scratch, node.blob, node.blob_bytes);
+      }
+      stagePeerKernelArguments(scratch, node.blob_bytes);
+      managedStageKernelArguments(scratch, node.blob_bytes, stream);
+      const int32_t status = graphRealLaunchLegacy()(
+          node.stub, node.num_blocks, scratch, node.blob_bytes, node.sm_desc,
+          stream);
+      managedPublishAfterLaunch(stream);
+      free(scratch);
+      return status == 0 ? ACL_SUCCESS : ACL_ERROR_RT_PARAM_INVALID;
+    }
+    case GraphNodeKernelThunk: {
+      if (node.manual.thunk == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+      // The typed <<<>>> thunk re-enters the runtime launch ABI, so peer
+      // staging and managed staging run on its freshly packed blob.
+      node.manual.thunk(node.manual.grid_x, node.manual.grid_y,
+                        node.manual.grid_z, node.manual.block_x,
+                        node.manual.block_y, node.manual.block_z,
+                        node.manual.shared_mem_bytes, stream,
+                        node.manual.kernel_params);
+      return ACL_SUCCESS;
+    }
+    case GraphNodeMemcpy: {
+      const aclrtMemcpyKind kind =
+          graphClassifyMemcpyKind(node.dst, node.src, node.kind);
+      // A blocking copy preserves the sequential dependency contract of
+      // the replay (the documented concurrency degradation).
+      if (kind != ACL_MEMCPY_HOST_TO_HOST) {
+        const aclError drained = aclrtSynchronizeStream(nullptr);
+        if (drained != ACL_SUCCESS) return drained;
+      }
+      return aclrtMemcpy(node.dst, node.bytes, node.src, node.bytes, kind);
+    }
+    case GraphNodeMemset:
+      return aclrtMemset(node.dst, node.bytes, node.value, node.bytes);
+    case GraphNodeMemAlloc: {
+      RuntimeLockGuard guard(graph->lock);
+      if (node.alloc_slot >= graph->alloc_count)
+        return ACL_ERROR_RT_PARAM_INVALID;
+      graph->allocs[node.alloc_slot].live = true;
+      return ACL_SUCCESS;
+    }
+    case GraphNodeMemFree:
+      graphMarkOwnedPointerDead(node.free_ptr);
+      return ACL_SUCCESS;
+    case GraphNodeHost:
+      if (node.host_fn == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+      node.host_fn(node.host_data);
+      return ACL_SUCCESS;
+  }
+  return ACL_ERROR_RT_PARAM_INVALID;
+}
+
+}  // namespace detail
+
+inline aclError cudaGraphCreate(cudaGraph_t *graph, unsigned int flags) {
+  if (graph == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  *graph = nullptr;
+  if (flags != 0U) return ACL_ERROR_RT_PARAM_INVALID;
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) return ready;
+  detail::AscifyGraphObj *object = detail::newGraphObject();
+  if (object == nullptr) return ACL_ERROR_BAD_ALLOC;
+  *graph = object;
+  return ACL_SUCCESS;
+}
+
+inline aclError cudaGraphDestroy(cudaGraph_t graph) {
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) return ready;
+  return detail::graphReleaseReference(graph);
+}
+
+inline aclError cudaGraphAddKernelNode(cudaGraphNode_t *node,
+                                       cudaGraph_t graph,
+                                       const cudaGraphNode_t *dependencies,
+                                       size_t dependency_count,
+                                       cudaKernelNodeParams *params) {
+  if (node == nullptr || params == nullptr)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  *node = {};
+  if (params->extra != nullptr) return ACL_ERROR_FEATURE_UNSUPPORTED;
+  if (params->kernelParams == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  detail::GraphNode record = {};
+  record.type = detail::GraphNodeKernelThunk;
+  record.manual.thunk = reinterpret_cast<void (*)(
+      unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
+      aclrtStream, void **)>(params->func);
+  record.manual.grid_x = params->gridDim.x;
+  record.manual.grid_y = params->gridDim.y;
+  record.manual.grid_z = params->gridDim.z;
+  record.manual.block_x = params->blockDim.x;
+  record.manual.block_y = params->blockDim.y;
+  record.manual.block_z = params->blockDim.z;
+  record.manual.shared_mem_bytes = params->sharedMemBytes;
+  record.manual.kernel_params = params->kernelParams;
+  detail::RuntimeLockGuard guard(graph->lock);
+  uint32_t index = 0;
+  const aclError appended = detail::graphAppendNode(
+      graph, record, dependencies, dependency_count, &index);
+  if (appended != ACL_SUCCESS) return appended;
+  *node = {graph->id, index};
+  return ACL_SUCCESS;
+}
+
+inline aclError cudaGraphAddMemcpyNode1D(cudaGraphNode_t *node,
+                                         cudaGraph_t graph,
+                                         const cudaGraphNode_t *dependencies,
+                                         size_t dependency_count, void *dst,
+                                         const void *src, size_t count,
+                                         aclrtMemcpyKind kind) {
+  if (node == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  *node = {};
+  if (!detail::isSupportedMemcpyKind(kind)) return ACL_ERROR_RT_PARAM_INVALID;
+  detail::GraphNode record = {};
+  record.type = detail::GraphNodeMemcpy;
+  record.dst = dst;
+  record.src = src;
+  record.bytes = count;
+  record.kind = kind;
+  detail::RuntimeLockGuard guard(graph->lock);
+  uint32_t index = 0;
+  const aclError appended = detail::graphAppendNode(
+      graph, record, dependencies, dependency_count, &index);
+  if (appended != ACL_SUCCESS) return appended;
+  *node = {graph->id, index};
+  return ACL_SUCCESS;
+}
+
+inline aclError cudaGraphAddMemsetNode(cudaGraphNode_t *node,
+                                       cudaGraph_t graph,
+                                       const cudaGraphNode_t *dependencies,
+                                       size_t dependency_count,
+                                       const cudaMemsetParams *params) {
+  if (node == nullptr || params == nullptr)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  *node = {};
+  if (params->elementSize == 0U || params->elementSize > 4U)
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  detail::GraphNode record = {};
+  record.type = detail::GraphNodeMemset;
+  record.dst = params->dst;
+  record.value = params->value;
+  record.bytes = params->width * params->height * params->elementSize;
+  detail::RuntimeLockGuard guard(graph->lock);
+  uint32_t index = 0;
+  const aclError appended = detail::graphAppendNode(
+      graph, record, dependencies, dependency_count, &index);
+  if (appended != ACL_SUCCESS) return appended;
+  *node = {graph->id, index};
+  return ACL_SUCCESS;
+}
+
+inline aclError cudaGraphAddHostNode(cudaGraphNode_t *node,
+                                     cudaGraph_t graph,
+                                     const cudaGraphNode_t *dependencies,
+                                     size_t dependency_count,
+                                     const cudaHostNodeParams *params) {
+  if (node == nullptr || params == nullptr)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  *node = {};
+  if (params->fn == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  detail::GraphNode record = {};
+  record.type = detail::GraphNodeHost;
+  record.host_fn = params->fn;
+  record.host_data = params->userData;
+  detail::RuntimeLockGuard guard(graph->lock);
+  uint32_t index = 0;
+  const aclError appended = detail::graphAppendNode(
+      graph, record, dependencies, dependency_count, &index);
+  if (appended != ACL_SUCCESS) return appended;
+  *node = {graph->id, index};
+  return ACL_SUCCESS;
+}
+
+inline aclError cudaGraphAddMemAllocNode(cudaGraphNode_t *node,
+                                         cudaGraph_t graph,
+                                         const cudaGraphNode_t *dependencies,
+                                         size_t dependency_count,
+                                         cudaMemAllocNodeParams *params) {
+  if (node == nullptr || params == nullptr)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  *node = {};
+  if (params->bytesize == 0) return ACL_ERROR_RT_PARAM_INVALID;
+  if (params->poolProps.allocType != cudaMemAllocationTypePinned)
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  if (params->poolProps.location.type != cudaMemLocationTypeDevice)
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  detail::RuntimeLockGuard guard(graph->lock);
+  void *assigned = nullptr;
+  uint32_t slot = 0;
+  const aclError assigned_status = detail::graphAssignAllocationLocked(
+      graph, params->bytesize, &assigned, &slot);
+  if (assigned_status != ACL_SUCCESS) return assigned_status;
+  detail::GraphNode record = {};
+  record.type = detail::GraphNodeMemAlloc;
+  record.alloc_slot = slot;
+  uint32_t index = 0;
+  const aclError appended = detail::graphAppendNode(
+      graph, record, dependencies, dependency_count, &index);
+  if (appended != ACL_SUCCESS) {
+    // The address was published to the caller only on success.
+    for (size_t s = 0; s < graph->alloc_count; ++s)
+      if (graph->allocs[s].pointer == assigned)
+        graph->allocs[s].live = false;
+    return appended;
+  }
+  graph->has_alloc_nodes = true;
+  params->dptr = assigned;  // CUDA assigns the address at node-add time
+  *node = {graph->id, index};
+  return ACL_SUCCESS;
+}
+
+inline aclError cudaGraphAddMemFreeNode(cudaGraphNode_t *node,
+                                        cudaGraph_t graph,
+                                        const cudaGraphNode_t *dependencies,
+                                        size_t dependency_count, void *dptr) {
+  if (node == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  *node = {};
+  if (dptr == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  detail::GraphNode record = {};
+  record.type = detail::GraphNodeMemFree;
+  record.free_ptr = dptr;
+  detail::RuntimeLockGuard guard(graph->lock);
+  uint32_t index = 0;
+  const aclError appended = detail::graphAppendNode(
+      graph, record, dependencies, dependency_count, &index);
+  if (appended != ACL_SUCCESS) return appended;
+  *node = {graph->id, index};
+  // CUDA frees the virtual address at build time (that is what makes the
+  // documented address reuse observable to the builder); the physical
+  // block stays mapped for address-stable replays.
+  for (size_t s = 0; s < graph->alloc_count; ++s)
+    if (graph->allocs[s].pointer == dptr) graph->allocs[s].live = false;
+  return ACL_SUCCESS;
+}
+
+inline aclError cudaGraphGetNodes(cudaGraph_t graph, cudaGraphNode_t *nodes,
+                                  size_t *numNodes) {
+  if (numNodes == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  detail::RuntimeLockGuard guard(graph->lock);
+  if (nodes == nullptr) {
+    *numNodes = graph->node_count;
+    return ACL_SUCCESS;
+  }
+  size_t capacity = *numNodes;
+  *numNodes = graph->node_count;
+  for (size_t i = 0; i < graph->node_count && i < capacity; ++i)
+    nodes[i] = {graph->id, static_cast<uint32_t>(i)};
+  return ACL_SUCCESS;
+}
+
+inline aclError cudaGraphInstantiateExec(cudaGraphExec_t *exec,
+                                         cudaGraph_t graph) {
+  if (exec == nullptr || graph == nullptr)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  *exec = nullptr;
+  detail::AscifyGraphExecObj *object = static_cast<detail::AscifyGraphExecObj *>(
+      calloc(1, sizeof(detail::AscifyGraphExecObj)));
+  if (object == nullptr) return ACL_ERROR_BAD_ALLOC;
+  object->graph = graph;
+  {
+    detail::RuntimeLockGuard guard(graph->lock);
+    const aclError ordered =
+        detail::graphTopologicalOrder(graph, object);
+    if (ordered != ACL_SUCCESS) {
+      free(object);
+      return ordered;
+    }
+  }
+  {
+    detail::RuntimeLockGuard guard(detail::graphRegistry().lock);
+    ++graph->refs;
+  }
+  *exec = object;
+  return ACL_SUCCESS;
+}
+
+inline aclError cudaGraphInstantiate(cudaGraphExec_t *pGraphExec,
+                                     cudaGraph_t graph,
+                                     cudaGraphNode_t *pErrorNode,
+                                     char *pErrorLogBuffer,
+                                     size_t bufferSize) {
+  (void)pErrorLogBuffer;
+  (void)bufferSize;
+  const aclError status = cudaGraphInstantiateExec(pGraphExec, graph);
+  if (status != ACL_SUCCESS && pErrorNode != nullptr) *pErrorNode = {};
+  return status;
+}
+
+inline aclError cudaGraphInstantiate(cudaGraphExec_t *pGraphExec,
+                                     cudaGraph_t graph,
+                                     unsigned long long flags) {
+  if (flags != 0ULL) return ACL_ERROR_FEATURE_UNSUPPORTED;
+  return cudaGraphInstantiateExec(pGraphExec, graph);
+}
+
+inline aclError cudaGraphExecDestroy(cudaGraphExec_t exec) {
+  if (exec == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  const aclError released = detail::graphReleaseReference(exec->graph);
+  free(exec);
+  return released;
+}
+
+inline aclError cudaGraphClone(cudaGraph_t *clone, cudaGraph_t graph) {
+  if (clone == nullptr || graph == nullptr)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  *clone = nullptr;
+  detail::AscifyGraphObj *copy = detail::newGraphObject();
+  if (copy == nullptr) return ACL_ERROR_BAD_ALLOC;
+  detail::RuntimeLockGuard guard(graph->lock);
+  if (graph->has_alloc_nodes) {
+    // Graph-owned allocation slots cannot be duplicated (each clone would
+    // own the same physical block); a clone of a memory-node graph is not
+    // admitted by this emulation.
+    (void)detail::graphReleaseReference(copy);
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  }
+  copy->node_count = graph->node_count;
+  for (size_t i = 0; i < graph->node_count; ++i) {
+    copy->nodes[i] = graph->nodes[i];
+    copy->nodes[i].blob = nullptr;
+    copy->nodes[i].blob_bytes = graph->nodes[i].blob_bytes;
+    if (graph->nodes[i].blob != nullptr) {
+      copy->nodes[i].blob =
+          detail::graphCopyBlob(graph->nodes[i].blob, graph->nodes[i].blob_bytes);
+      if (copy->nodes[i].blob == nullptr) {
+        copy->node_count = i;
+        (void)detail::graphReleaseReference(copy);
+        return ACL_ERROR_BAD_ALLOC;
+      }
+    }
+  }
+  *clone = copy;
+  return ACL_SUCCESS;
+}
+
+inline aclError cudaGraphLaunch(cudaGraphExec_t exec, aclrtStream stream) {
+  if (exec == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  if (detail::graphCaptureActive())
+    return ACL_ERROR_FEATURE_UNSUPPORTED;  // nested graph capture
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) return ready;
+  detail::AscifyGraphObj *graph = exec->graph;
+  for (size_t i = 0; i < exec->order_count; ++i) {
+    const uint32_t index = exec->order[i];
+    if (index >= graph->node_count) return ACL_ERROR_RT_PARAM_INVALID;
+    const aclError status =
+        detail::graphReplayNode(graph, graph->nodes[index], stream);
+    if (status != ACL_SUCCESS) return status;
+  }
+  return ACL_SUCCESS;
+}
+
+inline aclError cudaStreamBeginCapture(aclrtStream stream,
+                                       cudaStreamCaptureMode mode) {
+  if (stream == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  if (mode != cudaStreamCaptureModeGlobal &&
+      mode != cudaStreamCaptureModeThreadLocal &&
+      mode != cudaStreamCaptureModeRelaxed)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) return ready;
+  detail::GraphCaptureState &capture = detail::graphCaptureState();
+  if (capture.active) return ACL_ERROR_RT_PARAM_INVALID;
+  detail::AscifyGraphObj *graph = detail::newGraphObject();
+  if (graph == nullptr) return ACL_ERROR_BAD_ALLOC;
+  capture.active = true;
+  capture.graph = graph;
+  capture.root = stream;
+  capture.stream_count = 1;
+  capture.streams[0] = stream;
+  capture.tail[0] = -1;
+  capture.pending_count[0] = 0;
+  capture.event_count = 0;
+  capture.invalid = false;
+  capture.error = ACL_SUCCESS;
+  return ACL_SUCCESS;
+}
+
+inline aclError cudaStreamEndCapture(aclrtStream stream, cudaGraph_t *graph) {
+  if (graph == nullptr || stream == nullptr)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  *graph = nullptr;
+  detail::GraphCaptureState &capture = detail::graphCaptureState();
+  if (!capture.active) return ACL_ERROR_RT_PARAM_INVALID;
+  if (stream != capture.root) return ACL_ERROR_RT_PARAM_INVALID;
+  detail::AscifyGraphObj *recorded = capture.graph;
+  const bool invalid = capture.invalid;
+  const aclError error = capture.error;
+  capture.active = false;
+  capture.graph = nullptr;
+  capture.root = nullptr;
+  capture.stream_count = 0;
+  capture.event_count = 0;
+  capture.invalid = false;
+  capture.error = ACL_SUCCESS;
+  if (invalid) {
+    (void)detail::graphReleaseReference(recorded);
+    return error == ACL_SUCCESS ? ACL_ERROR_RT_PARAM_INVALID : error;
+  }
+  *graph = recorded;
+  return ACL_SUCCESS;
+}
+
+// ---- managed memory (cudaMallocManaged) ------------------------------------
+inline constexpr unsigned int cudaMemAttachGlobal = 0U;
+inline constexpr unsigned int cudaMemAttachHost = 1U;
+inline constexpr unsigned int cudaMemAttachSingle = 0x2U;
+
+inline aclError cudaMallocManaged(void **pointer, size_t bytes,
+                                  unsigned int flags) {
+  if (pointer == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  *pointer = nullptr;
+  if (flags != cudaMemAttachGlobal && flags != cudaMemAttachHost &&
+      flags != cudaMemAttachSingle)
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) return ready;
+  void *host = calloc(bytes == 0 ? 1 : bytes, 1);
+  unsigned char *shadow = static_cast<unsigned char *>(calloc(bytes == 0 ? 1 : bytes, 1));
+  if (host == nullptr || shadow == nullptr) {
+    free(host);
+    free(shadow);
+    return ACL_ERROR_BAD_ALLOC;
+  }
+  void *device = nullptr;
+  const aclError status =
+      aclrtMalloc(&device, bytes == 0 ? 1 : bytes, ACL_MEM_MALLOC_HUGE_FIRST);
+  if (status != ACL_SUCCESS) {
+    free(host);
+    free(shadow);
+    return status;
+  }
+  // CUDA demand-paging observes zero-filled pages on both sides.
+  (void)aclrtMemset(device, bytes == 0 ? 1 : bytes, 0, bytes == 0 ? 1 : bytes);
+  {
+    detail::RuntimeLockGuard guard(detail::managedTable().lock);
+    if (detail::managedTable().count == 16) {
+      (void)aclrtFree(device);
+      free(host);
+      free(shadow);
+      return ACL_ERROR_BAD_ALLOC;
+    }
+    detail::managedTable().records[detail::managedTable().count++] =
+        {host, device, shadow, bytes};
+  }
+  *pointer = host;
+  return ACL_SUCCESS;
+}
+
+template <typename T>
+inline aclError cudaMallocManaged(T **pointer, size_t bytes,
+                                  unsigned int flags = cudaMemAttachGlobal) {
+  if (pointer == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  *pointer = nullptr;
+  void *raw = nullptr;
+  const aclError status = cudaMallocManaged(&raw, bytes, flags);
+  if (status == ACL_SUCCESS) *pointer = static_cast<T *>(raw);
+  return status;
+}
+
+// The translated runtime reports the SDK version the converter admitted
+// (value-pinned CUDART_VERSION); graph memory nodes require >= 11040 and
+// the emulated capability answers the sample's waiver gates truthfully
+// for this implementation.
+inline aclError cudaDriverGetVersion(int *version) {
+  if (version == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+#if defined(CUDART_VERSION)
+  *version = CUDART_VERSION;
+#else
+  *version = 13040;
+#endif
+  return ACL_SUCCESS;
 }
 
 inline aclError cudaGetLastError() {

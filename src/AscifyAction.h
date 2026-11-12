@@ -434,6 +434,9 @@ private:
   // replacement coexists with them (same coexistence contract as the proven
   // max-callee exemption).
   std::vector<SemanticRewriteRange> cooperativeLaunchStatementRanges;
+  // CDP emulation: device-side <<<>>> launches are queued for host replay.
+  std::map<const clang::FunctionDecl *, unsigned> cdpKernelIds_;
+  bool cdpUsed = false;
   std::set<unsigned> rewrittenDeviceMemoryOffsets;
   std::set<unsigned> rewrittenIntegerIntrinsicArgumentOffsets;
   std::set<unsigned> rewrittenCudaSmDiagnosticOffsets;
@@ -528,6 +531,8 @@ public:
   std::set<unsigned> rewrittenCudaFloatFrexpOffsets;
   bool rewriteProvenGenericAtomicExchCall(const clang::ast_matchers::MatchFinder::MatchResult &Result);
   bool rewriteProvenGenericAtomicMaxCall(const clang::ast_matchers::MatchFinder::MatchResult &Result);
+  bool rewriteDeviceCdpLaunch(const mat::MatchFinder::MatchResult &Result);
+  bool rewriteDeviceCdpStreamCall(const mat::MatchFinder::MatchResult &Result);
   bool rewriteDeviceMixedFloatDoubleDivision(
       const mat::MatchFinder::MatchResult &Result);
   bool rewriteDeviceStdMove(const mat::MatchFinder::MatchResult &Result);

@@ -124,5 +124,28 @@ inline cudaChannelFormatDesc cudaCreateChannelDesc() {
       ? cudaChannelFormatKindUnsigned : cudaChannelFormatKindFloat};
 }
 
+
+// ---- CUDA Graph emulation: memcpy node from 3-D parameters ---------------
+// Admitted only with the graph engine from ascify_cuda_compat.hpp (included
+// above): linear pitched copies; array sources/destinations have no graph
+// representation on this platform.
+inline aclError cudaGraphAddMemcpyNode(cudaGraphNode_t *node,
+                                       cudaGraph_t graph,
+                                       const cudaGraphNode_t *dependencies,
+                                       size_t dependency_count,
+                                       const cudaMemcpy3DParms *params) {
+  if (node == nullptr || params == nullptr)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  *node = {};
+  if (params->srcArray != nullptr || params->dstArray != nullptr)
+    return ACL_ERROR_FEATURE_UNSUPPORTED;
+  if (!detail::isSupportedMemcpyKind(params->kind))
+    return ACL_ERROR_RT_PARAM_INVALID;
+  const size_t bytes = params->extent.width * params->extent.height *
+                       params->extent.depth;
+  return cudaGraphAddMemcpyNode1D(node, graph, dependencies, dependency_count,
+                                  params->dstPtr.ptr, params->srcPtr.ptr,
+                                  bytes, params->kind);
+}
 } // namespace ascify
 #endif
