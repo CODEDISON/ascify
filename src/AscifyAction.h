@@ -390,6 +390,12 @@ private:
   std::set<unsigned> hostCudaRuntimeLiteralRootLines;
   std::set<std::string> cudaRuntimeApiSdkMacros;
   std::set<std::string> cudaRuntimeApiExternalMacroUses;
+  // Caller-code observations of the SDK version identity constant. Admitted
+  // only while every evaluated definition is the physically entered SDK
+  // header's single identical integer literal; the target build must
+  // re-provide exactly that literal (e.g. -DCUDART_VERSION=<literal>).
+  std::map<std::string, std::string> cudaRuntimeApiSdkVersionMacroValues;
+  std::string cudaRuntimeApiSdkVersionMacroConflict;
   struct RuntimeCgMacroObservation {
     std::string name;
     clang::FileID file;

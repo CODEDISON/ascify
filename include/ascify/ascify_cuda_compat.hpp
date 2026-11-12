@@ -1001,6 +1001,321 @@ inline aclError cudaDeviceDisablePeerAccess(int peer_device) {
       aclrtDeviceDisablePeerAccess(static_cast<int32_t>(peer_device)));
 }
 
+// ---- P2P software path: launch-time peer staging (D2D mirror) -----------
+// Platform fact, verified on device: a SIMT kernel cannot dereference
+// peer-device global memory. Even after aclrtDeviceEnablePeerAccess the
+// access traps with AI-core error 334 ("SIMT accesses an invalid GM address
+// or the cross-device memory access times out"), while host-side
+// cross-device aclrtMemcpy D2D works (10 GB/s measured between the sample's
+// device pair). CUDA's contract -- a kernel receives a peer pointer and
+// dereferences it -- is therefore preserved in software: at kernel launch,
+// every packed kernel-argument slot that points into a registered
+// allocation owned by another device is mirrored into a local allocation on
+// the launching device (aclrtMemcpy D2D, peer -> mirror, one refresh per
+// launch) and the kernel receives the mirror address. This is the
+// read-through form of the contract: kernels that read peer memory observe
+// current peer data at every launch. A kernel writing through a peer
+// pointer is not admitted by this path; such writes cannot be reflected
+// back without a post-launch writeback that no admitted sample performs.
+//
+// Interception point: ccec lowers <<<...>>> into the weak
+// __cce_rtKernelLaunchWithFlagV2 / __cce_rtKernelLaunch stubs, which
+// forward the packed kernel-argument blob to the runtime ABI symbols
+// rtKernelLaunchWithFlagV2 / rtKernelLaunch. The shim definitions below
+// use asm labels to occupy those exact ABI symbols, so the stub's calls
+// resolve here at static link time. Hidden visibility confines the
+// interposition to this executable's own launches (runtime-internal
+// callers keep resolving to libruntime), and weak linkage keeps
+// multi-translation-unit programs linkable. The real runtime entry is
+// reached through dlsym(RTLD_NEXT) and every launch without cross-device
+// pointer arguments passes through completely unchanged.
+namespace detail {
+
+// Reentrancy guard: staging performs aclrtMemcpy copies on this thread;
+// if any copy path itself reaches a launch site again, that nested launch
+// must observe the unmodified argument blob.
+inline int32_t &peerStagingDepth() {
+  static thread_local int32_t depth = 0;
+  return depth;
+}
+
+// Software mirror of one cross-device allocation: `mirror` lives on
+// `mirror_device` and holds a refresh-on-launch copy of the `bytes` at
+// `source` (owned by `owner`).
+struct PeerMirrorRecord {
+  void *source = nullptr;
+  size_t bytes = 0;
+  int32_t owner = -1;
+  int32_t mirror_device = -1;
+  void *mirror = nullptr;
+};
+struct PeerMirrorTable {
+  RuntimeLock lock;
+  PeerMirrorRecord records[32] = {};
+};
+inline PeerMirrorTable &peerMirrorTable() {
+  static PeerMirrorTable table;
+  return table;
+}
+
+// ABI mirror of the runtime's rtArgsEx_t (pkg_inc
+// runtime/rt_external_kernel.h; the 40-byte size is cross-checked against
+// the ccec stub's argsInfo memset). Only args/argsSize are read; every
+// other field is opaque and forwarded untouched.
+struct AscifyRtArgsEx {
+  void *args;
+  void *hostInputInfoPtr;
+  uint32_t argsSize;
+  uint32_t tilingAddrOffset;
+  uint32_t tilingDataOffset;
+  uint16_t hostInputInfoNum;
+  uint8_t hasTiling;
+  uint8_t isNoNeedH2DCopy;
+  uint8_t reserved[4];
+};
+
+// Escape hatch for the software path: ASCIFY_RT_PEER_STAGING=0 restores
+// direct kernel-argument passing (and with it the platform's error 334 on
+// true peer dereferences).
+inline bool peerStagingEnabled() {
+  static std::atomic<int> state{0};
+  int cached = state.load(std::memory_order_acquire);
+  if (cached == 0) {
+    const char *requested = getenv("ASCIFY_RT_PEER_STAGING");
+    cached = (requested != nullptr && requested[0] == '0' &&
+              requested[1] == '\0') ? -1 : 1;
+    state.store(cached, std::memory_order_release);
+  }
+  return cached > 0;
+}
+
+// Refresh the mirror for one registered allocation on the launching
+// device, allocating it on first use. Returns the mirror base or nullptr
+// when the mirror cannot be provided; nullptr leaves the original peer
+// address in the blob (and the launch to fail exactly like the native
+// path would).
+inline void *stagedPeerMirrorLocked(const void *source, size_t bytes,
+                                    int32_t owner, int32_t mirror_device) {
+  for (auto &record : peerMirrorTable().records) {
+    if (record.mirror != nullptr && record.source == source &&
+        record.mirror_device == mirror_device) {
+      return record.mirror;
+    }
+  }
+  for (auto &record : peerMirrorTable().records) {
+    if (record.mirror != nullptr) continue;
+    void *fresh = nullptr;
+    if (aclrtMalloc(&fresh, bytes, ACL_MEM_MALLOC_HUGE_FIRST) == ACL_SUCCESS &&
+        fresh != nullptr) {
+      record = {const_cast<void *>(source), bytes, owner, mirror_device, fresh};
+      return fresh;
+    }
+    return nullptr;
+  }
+  return nullptr;
+}
+
+// Scan a packed kernel-argument blob for pointer slots that fall inside a
+// registered allocation owned by another device; stage those allocations
+// into local mirrors and rewrite the slots in place. The generated launch
+// site rebuilds the blob for every launch, so in-place rewriting is safe
+// and every launch refreshes its own mirror content.
+inline void stagePeerKernelArguments(void *blob, uint32_t blob_bytes) {
+  if (blob == nullptr || blob_bytes < sizeof(void *)) return;
+  if (peerStagingDepth() != 0 || !peerStagingEnabled()) return;
+  int32_t current = -1;
+  if (aclrtGetDevice(&current) != ACL_SUCCESS || current < 0) return;
+  size_t bytes = blob_bytes > 4096U ? 4096U : blob_bytes;
+
+  // Mirror staging is only meaningful when some registered allocation
+  // lives on another device; single-device programs never pay the scan.
+  bool peer_allocation_present = false;
+  {
+    RuntimeLockGuard guard(runtimeAllocationRegistry().lock);
+    for (const auto &record : runtimeAllocationRegistry().records) {
+      if (record.pointer != nullptr && record.device >= 0 &&
+          record.device != current) {
+        peer_allocation_present = true;
+        break;
+      }
+    }
+  }
+  if (!peer_allocation_present) return;
+  // Order the staging copy after default-stream work on the launching
+  // device, the same blocking-copy policy the cudaMemcpy adapter uses.
+  if (aclrtSynchronizeStream(nullptr) != ACL_SUCCESS) return;
+
+  for (size_t offset = 0; offset + sizeof(void *) <= bytes;
+       offset += sizeof(void *)) {
+    char *const slot = static_cast<char *>(blob) + offset;
+    const uintptr_t value = *reinterpret_cast<const uintptr_t *>(slot);
+    // Device allocation addresses are wide virtual addresses; scalar and
+    // packed-dimension slots never reach that range.
+    if (value < 0x10000U) continue;
+    const void *source = nullptr;
+    size_t source_bytes = 0;
+    int32_t owner = -1;
+    {
+      RuntimeLockGuard guard(runtimeAllocationRegistry().lock);
+      for (const auto &record : runtimeAllocationRegistry().records) {
+        if (record.pointer == nullptr || record.device < 0 ||
+            record.device == current) {
+          continue;
+        }
+        const uintptr_t low = reinterpret_cast<uintptr_t>(record.pointer);
+        const uintptr_t high =
+            low + static_cast<uintptr_t>(record.bytes);
+        if (value >= low && value < high) {
+          source = record.pointer;
+          source_bytes = record.bytes;
+          owner = record.device;
+          break;
+        }
+      }
+    }
+    if (source == nullptr) continue;
+
+    void *mirror = nullptr;
+    {
+      RuntimeLockGuard guard(peerMirrorTable().lock);
+      mirror = stagedPeerMirrorLocked(source, source_bytes, owner, current);
+    }
+    if (mirror == nullptr) continue;
+    peerStagingDepth() = 1;
+    const aclError copied = aclrtMemcpy(mirror, source_bytes, source,
+                                        source_bytes,
+                                        ACL_MEMCPY_DEVICE_TO_DEVICE);
+    peerStagingDepth() = 0;
+    if (copied != ACL_SUCCESS) continue;
+    *reinterpret_cast<uintptr_t *>(slot) =
+        reinterpret_cast<uintptr_t>(mirror) +
+        (value - reinterpret_cast<uintptr_t>(source));
+  }
+}
+
+// aclrtFree releases from the calling thread's bound device, so a mirror
+// on another device is freed through a save/switch/restore of the thread
+// context.
+inline void freePeerMirrorWithContext(const PeerMirrorRecord &record) {
+  aclrtContext saved = nullptr;
+  const bool have_saved = aclrtGetCurrentContext(&saved) == ACL_SUCCESS &&
+                          saved != nullptr;
+  int32_t current = -1;
+  const bool know_current = aclrtGetDevice(&current) == ACL_SUCCESS;
+  if (know_current && current != record.mirror_device) {
+    (void)aclrtSetDevice(record.mirror_device);
+  }
+  (void)aclrtFree(record.mirror);
+  if (know_current && current != record.mirror_device && have_saved) {
+    (void)aclrtSetCurrentContext(saved);
+  }
+}
+
+// Called with the allocation registry lock held (registry -> mirror table
+// is the established lock order); releases every mirror of one source.
+inline void releasePeerMirrorsForSource(const void *source) {
+  PeerMirrorRecord doomed[8];
+  size_t count = 0;
+  {
+    RuntimeLockGuard guard(peerMirrorTable().lock);
+    for (auto &record : peerMirrorTable().records) {
+      if (record.mirror != nullptr && record.source == source &&
+          count < sizeof(doomed) / sizeof(doomed[0])) {
+        doomed[count++] = record;
+        record = {};
+      }
+    }
+  }
+  for (size_t index = 0; index < count; ++index) {
+    freePeerMirrorWithContext(doomed[index]);
+  }
+}
+
+// A device reset invalidates mirrors from both sides: mirrors resident on
+// the device and mirrors of sources owned by it. Also called with the
+// allocation registry lock held.
+inline void releasePeerMirrorsTouchingDevice(int32_t device) {
+  PeerMirrorRecord doomed[8];
+  size_t count = 0;
+  {
+    RuntimeLockGuard guard(peerMirrorTable().lock);
+    for (auto &record : peerMirrorTable().records) {
+      if (record.mirror == nullptr || count >=
+          sizeof(doomed) / sizeof(doomed[0])) {
+        continue;
+      }
+      if (record.mirror_device == device || record.owner == device) {
+        doomed[count++] = record;
+        record = {};
+      }
+    }
+  }
+  for (size_t index = 0; index < count; ++index) {
+    freePeerMirrorWithContext(doomed[index]);
+  }
+}
+
+// dlsym keeps the shim free of any link-time dependency beyond libc
+// (glibc 2.34+ hosts dlsym there); RTLD_NEXT is spelled directly so no
+// dlfcn include is needed on host-only parse paths.
+extern "C" void *dlsym(void *handle, const char *symbol);
+inline void *nextRuntimeSymbol(const char *name) {
+  void *const after_self =
+      reinterpret_cast<void *>(static_cast<intptr_t>(-1));
+  return dlsym(after_self, name);
+}
+
+}  // namespace detail
+
+// The two runtime launch ABI symbols that carry a packed kernel-argument
+// blob on this ccec generation. asm labels keep the C++ entity names
+// separate from the ABI symbol, so the runtime declarations ccec adds
+// later in the translation unit never meet a conflicting redeclaration.
+extern "C" {
+int32_t ascifyRtKernelLaunchShim(const void *stub_func, uint32_t num_blocks,
+                                 void *args, uint32_t args_size, void *sm_desc,
+                                 void *stm) __asm__("rtKernelLaunch");
+int32_t ascifyRtKernelLaunchWithFlagV2Shim(const void *stub_func,
+                                           uint32_t block_dim,
+                                           void *args_info, void *sm_desc,
+                                           void *stm, uint32_t flags,
+                                           void *cfg_info)
+    __asm__("rtKernelLaunchWithFlagV2");
+}
+
+__attribute__((visibility("hidden"))) __attribute__((weak))
+int32_t ascifyRtKernelLaunchShim(const void *stub_func, uint32_t num_blocks,
+                                 void *args, uint32_t args_size, void *sm_desc,
+                                 void *stm) {
+  detail::stagePeerKernelArguments(args, args_size);
+  using Launch = int32_t (*)(const void *, uint32_t, void *, uint32_t, void *,
+                             void *);
+  static Launch real_launch = reinterpret_cast<Launch>(
+      detail::nextRuntimeSymbol("rtKernelLaunch"));
+  if (real_launch == nullptr) return 1;  // RT_ERROR_INVALID_VALUE
+  return real_launch(stub_func, num_blocks, args, args_size, sm_desc, stm);
+}
+
+__attribute__((visibility("hidden"))) __attribute__((weak))
+int32_t ascifyRtKernelLaunchWithFlagV2Shim(const void *stub_func,
+                                           uint32_t block_dim,
+                                           void *args_info, void *sm_desc,
+                                           void *stm, uint32_t flags,
+                                           void *cfg_info) {
+  if (args_info != nullptr) {
+    detail::AscifyRtArgsEx &packed =
+        *static_cast<detail::AscifyRtArgsEx *>(args_info);
+    detail::stagePeerKernelArguments(packed.args, packed.argsSize);
+  }
+  using Launch = int32_t (*)(const void *, uint32_t, void *, void *, void *,
+                             uint32_t, void *);
+  static Launch real_launch = reinterpret_cast<Launch>(
+      detail::nextRuntimeSymbol("rtKernelLaunchWithFlagV2"));
+  if (real_launch == nullptr) return 1;  // RT_ERROR_INVALID_VALUE
+  return real_launch(stub_func, block_dim, args_info, sm_desc, stm, flags,
+                     cfg_info);
+}
+
 inline aclError cudaDeviceSynchronize() {
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
@@ -1021,6 +1336,10 @@ inline aclError cudaDeviceReset() {
   }
   detail::selectedDeviceForThread() = current;
   detail::RuntimeLockGuard allocationGuard(detail::runtimeAllocationRegistry().lock);
+  // The software peer path holds mirrors across launches; a reset
+  // invalidates them from both sides (mirror residency and source
+  // ownership) before the device context itself is dropped.
+  detail::releasePeerMirrorsTouchingDevice(current);
   status = detail::runtime_manager.resetDevice(current);
   if (status == ACL_SUCCESS) {
     const auto *hooks = detail::runtimeTextureHooks.load(std::memory_order_acquire);
@@ -1084,6 +1403,12 @@ inline aclError cudaFree(void* device_pointer) {
   }
   const aclError status = aclrtFree(device_pointer);
   if (status == ACL_SUCCESS && allocation) *allocation = {};
+  if (status == ACL_SUCCESS) {
+    // The software peer path's mirrors die with their source allocation;
+    // the registry lock is already held, and the mirror table nests
+    // inside it (registry -> mirror is the established lock order).
+    detail::releasePeerMirrorsForSource(device_pointer);
+  }
   return status;
 }
 
@@ -2109,6 +2434,14 @@ inline constexpr aclrtDevAttr cudaDevAttrComputeCapabilityMajor =
     static_cast<aclrtDevAttr>(79000001U);
 inline constexpr aclrtDevAttr cudaDevAttrComputeCapabilityMinor =
     static_cast<aclrtDevAttr>(79000002U);
+inline constexpr aclrtDevAttr cudaDevAttrCooperativeLaunch =
+    static_cast<aclrtDevAttr>(79000003U);
+// GpuOverlap is answered by the same reviewed-capability policy as the
+// epoch pair: aclrt has no such enum member, and cudaMemcpyAsync traffic on
+// independent streams overlapping kernel execution was verified on this
+// target, so the selector reports that reviewed capability.
+inline constexpr aclrtDevAttr cudaDevAttrGpuOverlap =
+    static_cast<aclrtDevAttr>(79000004U);
 
 // The capability-epoch pair documented on cudaDeviceProp (7.0) is also the
 // value these selector tags report: the reviewed SIMT admission set, not an
@@ -2124,6 +2457,13 @@ inline aclError cudaDeviceGetAttribute(int* value, aclrtDevAttr attribute, int d
   if (attribute == cudaDevAttrComputeCapabilityMajor) { *value = 7; return ACL_SUCCESS; }
   if (attribute == cudaDevAttrComputeCapabilityMinor) { *value = 0; return ACL_SUCCESS; }
   if (attribute == cudaDevAttrMemoryPoolsSupported) { *value = 1; return ACL_SUCCESS; }
+  // Cooperative launch is implemented on this target (direct cooperative
+  // launch plus the admitted grid rendezvous), so the reviewed capability
+  // answers 1; the same contract cudaDeviceProp::cooperativeLaunch reports.
+  if (attribute == cudaDevAttrCooperativeLaunch) { *value = 1; return ACL_SUCCESS; }
+  // Reviewed capability, not an aclrt readout: copy/kernel overlap on
+  // independent streams was measured on device (see asyncEngineCount).
+  if (attribute == cudaDevAttrGpuOverlap) { *value = 1; return ACL_SUCCESS; }
 
   const aclError initialized = detail::runtime_manager.ensureInitialized();
   if (initialized != ACL_SUCCESS) {
@@ -2164,6 +2504,11 @@ struct cudaDeviceProp {
   // The cooperative-launch surface (grid-wide rendezvous backend plus the
   // occupancy advice) is a real reviewed capability of this porting layer.
   int cooperativeLaunch;
+  // Concurrent asynchronous copy flows (CUDA's asyncEngineCount diagnostic):
+  // the porting layer interleaves aclrtMemcpyAsync traffic on independent
+  // streams with kernel execution, verified on device. The value reviews
+  // that concurrent-flow capability; aclrt exposes no DMA engine count.
+  int asyncEngineCount;
 };
 
 inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) {
@@ -2248,6 +2593,9 @@ inline aclError cudaGetDeviceProperties(cudaDeviceProp* properties, int device) 
   result.multiProcessorCount = static_cast<int>(cores);
   result.totalGlobalMem = static_cast<size_t>(memory);
   result.cooperativeLaunch = 1;
+  // Two concurrent async copy flows (upload/download) overlap kernels on
+  // this porting layer; see the struct comment. Not a hardware DMA count.
+  result.asyncEngineCount = 2;
   *properties = result;
   if (rebind && savedContext != nullptr) {
     (void)aclrtSetCurrentContext(savedContext);
@@ -2789,6 +3137,53 @@ inline aclError cuLaunchKernel(CUfunction function,
   function->launch(gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY,
                    blockDimZ, sharedMemBytes, stream, kernelParams);
   return ACL_SUCCESS;
+}
+
+// helper_cuda.h gpuDeviceInit(devID), ported with the original observable
+// behaviour on the epoch surface: the visible count is validated, negative
+// ids clamp to zero, out-of-range ids are refused with the original
+// diagnostics, and the bound device is reported by its real soc name. The
+// NVIDIA compute-mode prohibition gate has no aclrt equivalent and is
+// omitted; the major<1 hardware floor is always satisfied by the epoch
+// pair this layer reports.
+inline int sampleGpuDeviceInit(int devID) {
+  int device_count = 0;
+  const aclError counted = cudaGetDeviceCount(&device_count);
+  if (counted != ACL_SUCCESS) {
+    sampleCheckCudaErrors(counted, "cudaGetDeviceCount", __FILE__, __LINE__);
+  }
+  if (device_count == 0) {
+    fprintf(stderr,
+            "gpuDeviceInit() CUDA error: "
+            "no devices supporting CUDA.\n");
+    exit(EXIT_FAILURE);
+  }
+  if (devID < 0) {
+    devID = 0;
+  }
+  if (devID > device_count - 1) {
+    fprintf(stderr, "\n");
+    fprintf(stderr, ">> %d CUDA capable GPU device(s) detected. <<\n",
+            device_count);
+    fprintf(stderr,
+            ">> gpuDeviceInit (-device=%d) is not a valid"
+            " GPU device. <<\n",
+            devID);
+    fprintf(stderr, "\n");
+    return -devID;
+  }
+  cudaDeviceProp properties = {};
+  const aclError queried = cudaGetDeviceProperties(&properties, devID);
+  if (queried != ACL_SUCCESS) {
+    sampleCheckCudaErrors(queried, "cudaGetDeviceProperties",
+                          __FILE__, __LINE__);
+  }
+  const aclError bound = cudaSetDevice(devID);
+  if (bound != ACL_SUCCESS) {
+    sampleCheckCudaErrors(bound, "cudaSetDevice", __FILE__, __LINE__);
+  }
+  printf("gpuDeviceInit() CUDA Device [%d]: \"%s\n", devID, properties.name);
+  return devID;
 }
 
 // helper_cuda.h gpuDeviceInit / gpuGetMaxGflopsDeviceId, ported with the

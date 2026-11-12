@@ -79,6 +79,10 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_TYPE_NAME_MAP = [] {
   m["cudaStreamNonBlocking"]                           = {"ascify::cudaStreamNonBlocking", CONV_TYPE, API_RUNTIME, SEC::STREAM};
   m["cudaDevAttrComputeCapabilityMajor"]             = {"ascify::cudaDevAttrComputeCapabilityMajor", CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};
   m["cudaDevAttrComputeCapabilityMinor"]             = {"ascify::cudaDevAttrComputeCapabilityMinor", CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};
+  // Reviewed-capability selectors answered by the compat layer (see
+  // cudaDeviceGetAttribute): no aclrt enum member exists for either.
+  m["cudaDevAttrGpuOverlap"]                          = {"ascify::cudaDevAttrGpuOverlap", CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};
+  m["cudaDevAttrCooperativeLaunch"]                   = {"ascify::cudaDevAttrCooperativeLaunch", CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};
   m["cudaDevAttrMaxSharedMemoryPerBlockOptin"]      = {"ascify::cudaDevAttrLocalMemoryPerVectorCore", CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};
   // Minimal kernel-attribute surface used by layer_norm.cuh.
   m["cudaFuncAttributes"]                            = {"ascify::cudaFuncAttributes",               CONV_TYPE, API_RUNTIME, SEC::DEVICE_MGMT};

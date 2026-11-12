@@ -1488,6 +1488,7 @@ bool ascifySourceWithLocalHeaderClosure(
       jointContext.sourcePath = jointPlan.rootSourcePath();
       jointContext.artifactPath = jointPlan.rootArtifactPath();
       jointContext.virtualInput = &flattened;
+      jointContext.inlinedContextualHeaders = &inlined;
       jointContext.inputEvidence = &jointEvidence;
       jointContext.requireHelperTransaction = requireHelperTransaction;
       jointContext.sourceOnlyJointInput = !requireHelperTransaction &&

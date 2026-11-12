@@ -266,6 +266,11 @@ struct LocalHeaderRewriteContext {
   // after the original root, include boundaries and leaf bytes are verified.
   // It grants no publication before the outer token/macro/path/input checks.
   bool sourceOnlyJointInput = false;
+  // Contextual joint parse only: the SHA-verified selected headers spliced
+  // into the virtual main buffer behind #line markers. Their bytes are
+  // proven identical to the original parse; a main-position directive inside
+  // one of these regions stays boundary-bound to that physical header file.
+  const std::vector<LocalHeaderContextInline> *inlinedContextualHeaders = nullptr;
   // Internal recursive discovery only. A deferred parse supplies evidence,
   // never an artifact; the strict joint parse must commit the helper proof.
   bool allowInheritedHelperDiscovery = false;

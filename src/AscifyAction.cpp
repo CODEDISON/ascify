@@ -839,12 +839,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 144224)
+  if (contents.size() != 161344)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "510cf77c862fec59fcbb267e6a1b866e4a2f38c7bb4a15f99fee80767e5ce1b4");
+      "e45bb7d9e27fcc427d63cbfb3a05623bdc93caca8ba2257fdcb3d9fddcd0f1f1");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -871,12 +871,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 144224)
+  if (invalidBuffer || contents.size() != 161344)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "510cf77c862fec59fcbb267e6a1b866e4a2f38c7bb4a15f99fee80767e5ce1b4");
+      "e45bb7d9e27fcc427d63cbfb3a05623bdc93caca8ba2257fdcb3d9fddcd0f1f1");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -7096,6 +7096,34 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
       localHeaderContext->plan != nullptr && localHeaderContext->depth != 0 &&
       localHeaderContext->virtualInput == nullptr &&
       hasCompleteMainOuterGuard(getCompilerInstance());
+  // A contextual joint parse splices SHA-verified selected-header bytes into
+  // the virtual main buffer behind #line markers. A runtime-API include in a
+  // spliced region is that header's own literal directive: the bytes and the
+  // whole expanded token/macro stream are proven equal to the original parse
+  // before publication, and this joint root is the artifact-bearing parse.
+  // No caller main file, arbitrary virtual input or non-inlined region
+  // qualifies; enclosing root conditions stay proven by the token equality.
+  bool jointInlinedRuntimeRoot = false;
+  if (file_name == "cuda_runtime_api.h" && localHeaderContext != nullptr &&
+      localHeaderContext->plan != nullptr &&
+      localHeaderContext->virtualInput != nullptr &&
+      localHeaderContext->inlinedContextualHeaders != nullptr) {
+    const clang::PresumedLoc presumed =
+        SM.getPresumedLoc(SM.getExpansionLoc(hash_loc));
+    if (presumed.isValid() && presumed.getFilename() != nullptr) {
+      const std::string presumedCanonical =
+          contextualCanonicalPath(presumed.getFilename());
+      if (!presumedCanonical.empty()) {
+        for (const LocalHeaderContextInline &inlined :
+             *localHeaderContext->inlinedContextualHeaders) {
+          if (contextualCanonicalPath(inlined.sourcePath) == presumedCanonical) {
+            jointInlinedRuntimeRoot = true;
+            break;
+          }
+        }
+      }
+    }
+  }
   // This is only an additional physical SDK provenance root. It does not
   // enable the broader Runtime-header projection or exempt any AST/layout,
   // macro-observation, transitive dependency or publication check.
@@ -7119,7 +7147,8 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
     // Its ordinary whole-file guard is preserved in the emitted header. No
     // arbitrary main-TU condition or nested local condition is admitted here.
     if (!directRange || !directSpelling ||
-        (preprocessorConditionalDepth != 0 && !guardedLocalRuntimeRoot) ||
+        (preprocessorConditionalDepth != 0 && !guardedLocalRuntimeRoot &&
+         !jointInlinedRuntimeRoot) ||
         !isConfiguredCudaRuntimeApiPath(resolved_file_name, SM)) {
       cudaRuntimeApiBoundaryFailed = true;
       const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
@@ -7463,6 +7492,15 @@ void AscifyAction::PragmaDirective(
           << "macro-generated pragma keeps all helper edits\n";
       return;
     }
+    // The whole configured --cuda-path include tree is audited producer
+    // input (same exemption as the frontend host-math guard above): its
+    // macro-generated diagnostic pragmas (e.g. vector_types.h
+    // __NV_SILENCE_DEPRECATION_BEGIN diag_suppress/diag_default pairs)
+    // conceal no caller-controlled guard stack and need no later
+    // diagnostic pragma to resolve them.
+    if (pathIsWithinConfiguredCudaInclude(
+            sourceManager.getFilename(expansion)))
+      return;
     nvidiaSampleHelperPendingMacroGeneratedPragma = true;
     return;
   }
@@ -8259,19 +8297,32 @@ bool AscifyAction::rewriteCudaDefaultDim3(
       Result.Nodes.getNodeAs<clang::VarDecl>(sCudaDefaultDim3);
   if (variable == nullptr || Result.SourceManager == nullptr ||
       variable->isImplicit() || llvm::isa<clang::ParmVarDecl>(variable) ||
-      variable->getIdentifier() == nullptr || !variable->isLocalVarDecl() ||
-      variable->hasExternalStorage())
+      variable->getIdentifier() == nullptr ||
+      variable->hasExternalStorage() ||
+      variable->hasAttr<clang::CUDADeviceAttr>() ||
+      variable->hasAttr<clang::CUDAGlobalAttr>() ||
+      variable->hasAttr<clang::CUDASharedAttr>())
     return false;
 
-  // This lowering repairs host launch-shape declarations only. Global,
-  // device, kernel, shared, and extern declarations retain their source
-  // semantics and fail closed if the target cannot compile them.
-  const auto *function =
-      llvm::dyn_cast<clang::FunctionDecl>(variable->getDeclContext());
-  if (function == nullptr ||
-      function->hasAttr<clang::CUDADeviceAttr>() ||
-      function->hasAttr<clang::CUDAGlobalAttr>())
+  // This lowering repairs host launch-shape declarations only: function
+  // locals plus file-scope host globals (NVIDIA samples declare grid/block
+  // launch shapes at file scope). Device, kernel, shared, extern, and
+  // namespace-qualified declarations retain their source semantics and
+  // fail closed if the target cannot compile them.
+  const clang::DeclContext *declarationContext =
+      variable->getDeclContext();
+  if (declarationContext == nullptr) return false;
+  if (variable->isLocalVarDecl()) {
+    const auto *function =
+        llvm::dyn_cast<clang::FunctionDecl>(declarationContext);
+    if (function == nullptr ||
+        function->hasAttr<clang::CUDADeviceAttr>() ||
+        function->hasAttr<clang::CUDAGlobalAttr>())
+      return false;
+  } else if (!variable->isFileVarDecl() ||
+             !declarationContext->isTranslationUnit()) {
     return false;
+  }
 
   auto &sourceManager = *Result.SourceManager;
   const clang::CXXRecordDecl *record =
@@ -10006,18 +10057,33 @@ bool AscifyAction::rewriteCudaLaunchCooperativeKernel(
       return false;
     }
   }
-  // Whole-call literal range in the main file.
-  const auto begin = call->getBeginLoc(), last = call->getEndLoc();
-  if (begin.isInvalid() || last.isInvalid() || begin.isMacroID() || last.isMacroID() ||
+  // Whole-call literal range in the main file. The samples commonly wrap the
+  // cooperative launch in checkCudaErrors(...): a call spelled as a macro
+  // ARGUMENT is admitted through its file spelling, and only the argument
+  // span is replaced (the macro name token belongs to the separate
+  // sample-helper closure rewrite). A macro-BODY expansion (pasted or
+  // generated tokens) proves no literal range and stays refused.
+  const bool macroArgument = call->getBeginLoc().isMacroID() ||
+      call->getEndLoc().isMacroID();
+  if (macroArgument &&
+      (!source.isMacroArgExpansion(call->getBeginLoc()) ||
+       !source.isMacroArgExpansion(call->getEndLoc())))
+    return false;
+  const auto begin = source.getFileLoc(call->getBeginLoc());
+  const auto last = source.getFileLoc(call->getEndLoc());
+  if (begin.isInvalid() || last.isInvalid() ||
       !source.isWrittenInMainFile(begin) || !source.isWrittenInMainFile(last))
     return false;
   const auto &options = getCompilerInstance().getLangOpts();
   const auto end = clang::Lexer::getLocForEndOfToken(last, 0, source, options);
   if (end.isInvalid()) return false;
   const auto argumentText = [&](unsigned index) {
+    const auto *argument = call->getArg(index);
+    const auto argBegin = source.getFileLoc(argument->getBeginLoc());
+    const auto argEnd = source.getFileLoc(argument->getEndLoc());
+    if (argBegin.isInvalid() || argEnd.isInvalid()) return std::string();
     return clang::Lexer::getSourceText(
-        clang::CharSourceRange::getTokenRange(
-            call->getArg(index)->getSourceRange()),
+        clang::CharSourceRange::getTokenRange(argBegin, argEnd),
         source, options).str();
   };
   std::string invocation = kernel->getNameAsString() + "<<<" + argumentText(1) +
@@ -10028,6 +10094,12 @@ bool AscifyAction::rewriteCudaLaunchCooperativeKernel(
     invocation += passed[index]->getNameAsString();
   }
   invocation += ")";
+  if (macroArgument) {
+    // The wrapper takes a value: keep that contract with a statement
+    // expression that performs the direct launch and yields the launch
+    // error, so checkCudaErrors(launch) keeps its run-and-check semantics.
+    invocation = "({ " + invocation + "; ::ascify::cudaGetLastError(); })";
+  }
   const auto offset = source.getFileOffset(begin);
   if (!rewrittenGlobalAtomicOffsets.insert(offset).second) return true;
   const auto length = source.getFileOffset(end) - offset;
@@ -11525,6 +11597,33 @@ void AscifyAction::observeCudaRuntimeApiMacroUse(
         frontendCgMacroExpansionMatches(name, definition.getMacroInfo(), file,
             getCompilerInstance(), frontendCompatibility)) {
       cudaRuntimeApiCgMacroObservations.push_back({name.str(), file, location});
+    } else if (name == "CUDART_VERSION") {
+      // The runtime version identity is not removed API surface: the target
+      // build re-provides it as a pinned -D literal. Admit only a direct
+      // observation whose definition is the physically entered SDK header's
+      // single decimal integer literal; any other origin, redefinition or
+      // composite value stays a removed-SDK-macro observation.
+      const auto *info = definition.getMacroInfo();
+      if (info != nullptr && !info->isFunctionLike() &&
+          info->getNumTokens() == 1 &&
+          info->tokens()[0].is(clang::tok::numeric_constant)) {
+        const auto definitionFile = source.getFileID(info->getDefinitionLoc());
+        if (definitionFile.isValid() &&
+            cudaRuntimeApiSdkFileIds.count(definitionFile.getHashValue())) {
+          bool invalid = false;
+          const auto literal = clang::Lexer::getSpelling(
+              info->tokens()[0], source, getCompilerInstance().getLangOpts(), &invalid);
+          if (!invalid && !literal.empty() &&
+              literal.find_first_not_of("0123456789") == std::string::npos) {
+            const auto inserted = cudaRuntimeApiSdkVersionMacroValues.emplace(
+                name.str(), literal);
+            if (!inserted.second && inserted.first->second != literal)
+              cudaRuntimeApiSdkVersionMacroConflict = name.str();
+            return;
+          }
+        }
+      }
+      cudaRuntimeApiExternalMacroUses.insert(name.str());
     } else {
       cudaRuntimeApiExternalMacroUses.insert(name.str());
     }
@@ -11667,6 +11766,13 @@ bool AscifyAction::auditCudaRuntimeApiSurface(bool includeRecords) {
     for (const auto &dependency : macro.second)
       if (isCudaCompilerCondition(dependency))
         unprovedRetainedMacros.insert(dependency);
+  // The version identity is proven at every evaluated use when its single
+  // physical SDK literal is pinned. A retained replacement list depending
+  // only on it stays subject to the ordinary dependency audit instead of
+  // inheriting the removed-SDK taint transitively.
+  if (cudaRuntimeApiSdkVersionMacroConflict.empty() &&
+      cudaRuntimeApiSdkVersionMacroValues.count("CUDART_VERSION") != 0)
+    unprovedRetainedMacros.erase("CUDART_VERSION");
   bool changed = true;
   while (changed) {
     changed = false;
@@ -11679,8 +11785,21 @@ bool AscifyAction::auditCudaRuntimeApiSurface(bool includeRecords) {
   // Expansion callbacks also expose SDK macro names assembled by ##. Raw
   // scanning below covers inactive branches, #if/#ifdef/defined, replacement
   // lists, undefinitions and string operands to pragma macro-stack operations.
+  if (!cudaRuntimeApiSdkVersionMacroConflict.empty())
+    return reject({}, "observes conflicting SDK version macro",
+                  cudaRuntimeApiSdkVersionMacroConflict);
+  // A pinned version-identity literal is proven at every evaluated use above.
+  // Directive and replacement-list spellings in caller bytes then refer to
+  // that one physical SDK literal; a caller redefinition only matters when
+  // evaluated, and that evaluation is pinned or rejected on the spot.
+  const auto pinnedSdkVersionMacro = [&](llvm::StringRef name) {
+    return name == "CUDART_VERSION" &&
+        cudaRuntimeApiSdkVersionMacroConflict.empty() &&
+        cudaRuntimeApiSdkVersionMacroValues.count(name.str()) != 0;
+  };
   for (const auto &name : cudaRuntimeApiExternalMacroUses) {
-    if (isSdkMacro(name) && !admittedCodeMacro(name))
+    if (isSdkMacro(name) && !admittedCodeMacro(name) &&
+        !pinnedSdkVersionMacro(name))
       return reject({}, "observes removed SDK macro", name);
     if (isCudaCompilerCondition(name) && !admittedCodeMacro(name))
       return reject({}, "observes CUDA compiler condition", name);
@@ -11897,7 +12016,7 @@ bool AscifyAction::auditCudaRuntimeApiSurface(bool includeRecords) {
         // spelling the builtin __func__, libstdc++ mentioning SDK names) is
         // producer-side content; caller code keeps the full observation ban.
         if (!physicalNativeSystemHeader && !provedFalseNativeCondition &&
-            !provedCgControl &&
+            !provedCgControl && !pinnedSdkVersionMacro(name) &&
             isSdkMacro(name) && (directive || !admittedCodeMacro(name)) &&
             !(frozenSdkGuardProbeFile && directive))
           return reject(token.getLocation(), "observes removed SDK macro", name);
@@ -11910,6 +12029,7 @@ bool AscifyAction::auditCudaRuntimeApiSurface(bool includeRecords) {
         // implementation files are retained, but their caller-side use has
         // no proof of the removed SDK observation or future expansion domain.
         if (!physicalNativeSystemHeader && !provedCgControl &&
+            !pinnedSdkVersionMacro(name) &&
             unprovedRetainedMacros.count(name) &&
             (directive || !admittedCodeMacro(name)) &&
             !(frozenSdkGuardProbeFile && directive))
