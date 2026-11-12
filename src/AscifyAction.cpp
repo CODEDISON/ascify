@@ -986,6 +986,14 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cuMemcpyHtoD_v2_ptds", "cuMemcpyDtoH_v2_ptds",
       "cudaProfilerStart", "cudaProfilerStop",
       "cudaLaunchHostFunc", "cudaStreamAddCallback",
+      "cudaGraphCreate", "cudaGraphDestroy", "cudaGraphAddKernelNode",
+      "cudaGraphAddMemcpyNode", "cudaGraphAddMemcpyNode1D",
+      "cudaGraphAddMemsetNode", "cudaGraphAddHostNode",
+      "cudaGraphAddMemAllocNode", "cudaGraphAddMemFreeNode",
+      "cudaGraphGetNodes", "cudaGraphInstantiate", "cudaGraphLaunch",
+      "cudaGraphClone", "cudaGraphExecDestroy",
+      "cudaStreamBeginCapture", "cudaStreamEndCapture",
+      "cudaMallocManaged", "cudaDriverGetVersion",
       "cudaFreeHost", "cudaGetDevice", "cudaSetDevice",
       "cudaGetDeviceCount", "cudaDeviceGetAttribute",
       "cudaDeviceCanAccessPeer", "cudaDeviceEnablePeerAccess",
@@ -2446,6 +2454,32 @@ static auto traverseRuntimeIdentityTypeLoc(Visitor &visitor,
   return visitor.TraverseTemplateSpecializationTypeLoc(type);
 }
 
+// Names of the CUDA Graph host-emulation surface: every one of them is
+// implemented by ascify_cuda_compat.hpp, and the memcpy-node parameter
+// records additionally need the pitched-copy descriptors that
+// texture_types.hpp owns.
+static bool isCudaGraphEmulationName(llvm::StringRef name) {
+  return name == "cudaGraphCreate" || name == "cudaGraphDestroy" ||
+         name == "cudaGraphAddKernelNode" ||
+         name == "cudaGraphAddMemcpyNode" ||
+         name == "cudaGraphAddMemcpyNode1D" ||
+         name == "cudaGraphAddMemsetNode" ||
+         name == "cudaGraphAddHostNode" ||
+         name == "cudaGraphAddMemAllocNode" ||
+         name == "cudaGraphAddMemFreeNode" || name == "cudaGraphGetNodes" ||
+         name == "cudaGraphInstantiate" || name == "cudaGraphLaunch" ||
+         name == "cudaGraphClone" || name == "cudaGraphExecDestroy" ||
+         name == "cudaStreamBeginCapture" ||
+         name == "cudaStreamEndCapture" || name == "cudaGraph_t" ||
+         name == "cudaGraphExec_t" || name == "cudaGraphNode_t" ||
+         name == "cudaKernelNodeParams" || name == "cudaMemsetParams" ||
+         name == "cudaHostNodeParams" ||
+         name == "cudaMemAllocNodeParams" || name == "cudaMemPoolProps" ||
+         name == "cudaMallocManaged" || name == "cudaDriverGetVersion" ||
+         name == "make_cudaPitchedPtr" || name == "make_cudaPos" ||
+         name == "make_cudaExtent";
+}
+
 static bool requiresCudaCompatHeader(llvm::StringRef name) {
   return ascify::IsCudaTextureName(name) || name == "__global__" ||
          name == "cudaMalloc" ||
@@ -2505,6 +2539,7 @@ static bool requiresCudaCompatHeader(llvm::StringRef name) {
          name == "cudaPeekAtLastError" ||
          name == "cudaOccupancyMaxActiveBlocksPerMultiprocessor" ||
          name == "cudaOccupancyMaxPotentialBlockSize" ||
+         isCudaGraphEmulationName(name) ||
          name == "cudaErrorAssert" ||
          name == "__shfl_sync" ||
          name == "__shfl_up_sync" ||
@@ -5620,6 +5655,8 @@ bool AscifyAction::RewriteToken(clang::Lexer &, clang::Token &tok) {
   }
   if (requiresCudaCompatHeader(name))
     needsCudaCompatHeader = true;
+  if (isCudaGraphEmulationName(name))
+    needsGraphTextureTypesHeader = true;
 
   FindAndReplace(name, tok.getLocation(), CUDA_RENAMES_MAP());
   return false;
@@ -10443,6 +10480,140 @@ bool AscifyAction::rewriteDeviceCdpStreamCall(
   return true;
 }
 
+// CUDA Graph manual kernel-node bridge. A host-side `(void *)kernel`
+// (or `&kernel`) expression is rewritten to the address of a typed <<<>>>
+// thunk emitted directly after the kernel definition. The compat layer's
+// cudaGraphAddKernelNode stores that address as the node's launcher and
+// replays the node by handing the caller's CUDA kernelParams array to the
+// thunk, which performs a real launch; the ccec argument packing is never
+// reconstructed. Same proof shape as the cooperative-launch projection:
+// unqualified main-file non-template __global__ kernels only.
+bool AscifyAction::rewriteCudaGraphKernelHandle(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *cast = Result.Nodes.getNodeAs<clang::CastExpr>(sWideningFloatCast);
+  if (cast == nullptr || Result.Context == nullptr ||
+      Result.SourceManager == nullptr || cast->isTypeDependent() ||
+      cast->isValueDependent())
+    return false;
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  const bool explicitCast =
+      llvm::isa_and_nonnull<clang::CStyleCastExpr>(cast) ||
+      llvm::isa_and_nonnull<clang::CXXStaticCastExpr>(cast) ||
+      llvm::isa_and_nonnull<clang::CXXReinterpretCastExpr>(cast) ||
+      llvm::isa_and_nonnull<clang::CXXConstCastExpr>(cast);
+  if (!explicitCast) return false;
+  const clang::Expr *sub = cast->getSubExpr()->IgnoreParenImpCasts();
+  const clang::DeclRefExpr *kernelRef = nullptr;
+  if (const auto *address = llvm::dyn_cast<clang::UnaryOperator>(sub)) {
+    if (address->getOpcode() != clang::UO_AddrOf) return false;
+    kernelRef = llvm::dyn_cast<clang::DeclRefExpr>(
+        address->getSubExpr()->IgnoreParenImpCasts());
+  } else {
+    kernelRef = llvm::dyn_cast<clang::DeclRefExpr>(sub);
+  }
+  if (kernelRef == nullptr || kernelRef->hasQualifier()) return false;
+  const auto *kernel =
+      llvm::dyn_cast<clang::FunctionDecl>(kernelRef->getDecl());
+  if (kernel == nullptr || !kernel->hasAttr<clang::CUDAGlobalAttr>() ||
+      kernel->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
+      kernel->getBody() == nullptr)
+    return false;
+  // Host context only: a device or kernel function cannot host the thunk
+  // address (device-side kernel references belong to the CDP path).
+  {
+    // Bounded walk up the semantic parents to the nearest function.
+    const clang::FunctionDecl *owner = nullptr;
+    auto frontier = context.getParents(*cast);
+    int hops = 0;
+    while (!frontier.empty() && hops < 96) {
+      llvm::SmallVector<clang::DynTypedNode, 8> next;
+      for (const auto &node : frontier) {
+        if (const auto *fn = node.get<clang::FunctionDecl>()) {
+          owner = fn;
+          break;
+        }
+        for (const auto &parent : context.getParents(node))
+          next.push_back(parent);
+      }
+      if (owner != nullptr) break;
+      frontier = std::move(next);
+      ++hops;
+    }
+    if (owner != nullptr && (owner->hasAttr<clang::CUDAGlobalAttr>() ||
+                             owner->hasAttr<clang::CUDADeviceAttr>()))
+      return false;
+  }
+  const clang::SourceLocation definition =
+      source.getExpansionLoc(kernel->getLocation());
+  const clang::SourceLocation bodyEnd =
+      source.getExpansionLoc(kernel->getBody()->getEndLoc());
+  if (definition.isInvalid() || bodyEnd.isInvalid() ||
+      !source.isWrittenInMainFile(definition) ||
+      !source.isWrittenInMainFile(bodyEnd))
+    return false;
+  const std::string kernelName = kernel->getNameAsString();
+  const std::string thunkName = "ascify_graphglue_" + kernelName;
+  const auto &options = getCompilerInstance().getLangOpts();
+  if (graphGlueKernels.insert(kernelName).second) {
+    const clang::SourceLocation afterBody =
+        clang::Lexer::getLocForEndOfToken(bodyEnd, 0, source, options);
+    if (afterBody.isInvalid()) return false;
+    clang::PrintingPolicy policy(context.getLangOpts());
+    std::string glue;
+    llvm::raw_string_ostream stream(glue);
+    stream << "\n\n// Ascify graph kernel-node bridge: typed <<<>>> thunk for "
+           << kernelName << " (CUDA graph emulation).\n"
+           << "namespace {\n"
+           << "static void " << thunkName
+           << "(unsigned gx, unsigned gy, unsigned gz, unsigned bx, "
+              "unsigned by, unsigned bz, unsigned shm, ::aclrtStream s, "
+              "void **kp) {\n"
+           << "  " << kernelName
+           << "<<<::dim3(gx, gy, gz), ::dim3(bx, by, bz), shm, s>>>(";
+    bool first = true;
+    for (const auto *parameter : kernel->parameters()) {
+      if (!first) stream << ", ";
+      first = false;
+      const std::string spelling = parameter->getType().getAsString(policy);
+      stream << "*static_cast<" << spelling << " *>(kp["
+             << parameter->getFunctionScopeIndex() << "])";
+    }
+    stream << ");\n}\n}  // namespace\n";
+    stream.flush();
+    const ct::Replacement glueEdit(source, afterBody, 0, glue);
+    if (!insertSemanticReplacement(
+            glueEdit, clang::FullSourceLoc(afterBody, source), afterBody,
+            afterBody)) {
+      graphGlueKernels.erase(kernelName);
+      return false;
+    }
+  }
+  const auto begin = source.getFileLoc(cast->getBeginLoc());
+  const auto last = source.getFileLoc(cast->getEndLoc());
+  if (begin.isInvalid() || last.isInvalid() ||
+      !source.isWrittenInMainFile(begin) ||
+      !source.isWrittenInMainFile(last))
+    return true;  // thunk stays; a macro-spelled site keeps its own text
+  const auto end = clang::Lexer::getLocForEndOfToken(last, 0, source, options);
+  if (end.isInvalid()) return false;
+  const auto offset = source.getFileOffset(begin);
+  if (!graphKernelHandleOffsets.insert(offset).second) return true;
+  const auto length = source.getFileOffset(end) - offset;
+  const std::string replacement = "(void *)&" + thunkName;
+  if (!insertSemanticReplacement(
+          ct::Replacement(source, begin, length, replacement),
+          clang::FullSourceLoc(begin, source), begin, end)) {
+    graphKernelHandleOffsets.erase(offset);
+    return false;
+  }
+  static const dppCounter counter = {
+      "CUDA graph kernel bridge", CONV_EXECUTION, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(counter,
+                                         kernelName + " graph kernel thunk");
+  return true;
+}
+
 bool AscifyAction::rewriteCudaLaunchCooperativeKernel(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
@@ -13624,6 +13795,24 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
                       .starts_with("CUmem"))
                 return true;
       }
+      // CUDA Graph node-parameter records (cudaKernelNodeParams,
+      // cudaMemsetParams, cudaHostNodeParams, cudaMemAllocNodeParams,
+      // cudaMemPoolProps and the graph handle typedefs' pointee tags) are
+      // host-side descriptors of the graph emulation in the compat header;
+      // they carry no kernel-observed layout.
+      if (const auto *graphRecord = type->getAsTagDecl()) {
+        const llvm::StringRef graphName = graphRecord->getNameAsString();
+        if (graphName.starts_with("cudaKernelNode") ||
+            graphName.starts_with("cudaMemsetNode") ||
+            graphName.starts_with("cudaMemsetParams") ||
+            graphName.starts_with("cudaHostNode") ||
+            graphName.starts_with("cudaMemAllocNode") ||
+            graphName.starts_with("cudaMemPool") ||
+            graphName.starts_with("cudaMemFreeNode") ||
+            graphName.starts_with("cudaGraphNode") ||
+            graphName.starts_with("cudaMemcpyNode"))
+          return true;
+      }
       // A cudaLaunchCooperativeKernel call is wholly proven and rewritten to
       // a direct <<<>>> launch by its own projection; the SDK prototype
       // surface observed through that call is not retained in the target.
@@ -13676,6 +13865,17 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
         if (llvm::StringRef(type->getAsTagDecl() ?
                 type->getAsTagDecl()->getNameAsString() : "").contains("CUmem"))
           return true;
+        // Graph node-parameter records are host-side graph-emulation
+        // descriptors owned by the compat header (same policy as CUmem*).
+        if (llvm::StringRef(type->getAsTagDecl() ?
+                type->getAsTagDecl()->getNameAsString() : "")
+                .starts_with("cuda"))
+          if (llvm::StringRef(type->getAsTagDecl()
+                  ->getNameAsString())
+                  .contains("NodeParams") ||
+              llvm::StringRef(type->getAsTagDecl()->getNameAsString())
+                  .starts_with("cudaMemPoolProps"))
+            return true;
         // The profile-pinned admission headers declare the owned group and
         // reduce facades; their dependent types are the reviewed product
         // templates, not caller layout probes.
@@ -16254,6 +16454,12 @@ void AscifyAction::EndSourceFileAction() {
     includes += "#include <ascify/cuda_vec3_layout.hpp>\n";
   if (needsCudaTextureHeader)
     includes += "#include <ascify/texture_compat.hpp>\n";
+  // Graph memcpy/memset node parameter records reuse the pitched-copy
+  // descriptor types owned by texture_types.hpp (cudaMemcpy3DParms and
+  // the make_cuda* helpers); graph-using samples get exactly that leaf
+  // header, not the whole texture adapter.
+  if (needsGraphTextureTypesHeader)
+    includes += "#include <ascify/texture_types.hpp>\n";
   if (dynamicWarpGroups.used())
     includes += "#include <ascify/cooperative_groups_compat.hpp>\n"
                 "#include <ascify/dynamic_warp_groups_compat.hpp>\n";
@@ -18446,7 +18652,8 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
     return;
   }
   if (Result.Nodes.getNodeAs<clang::CastExpr>(sWideningFloatCast) != nullptr) {
-    (void)rewriteDeviceWideningFloatCast(Result);
+    if (!rewriteCudaGraphKernelHandle(Result))
+      (void)rewriteDeviceWideningFloatCast(Result);
     return;
   }
   if (Result.Nodes.getNodeAs<clang::CallExpr>(
