@@ -3141,23 +3141,25 @@ struct cudaHostNodeParams {
 #if defined(__NPU_COMPILER_INTERNAL_PURE_SIMT__)
 struct cudaKernelNodeParams {
   void *func;  // converter bridge: typed <<<>>> thunk address
-  ::dim3 gridDim;
-  ::dim3 blockDim;
-  unsigned int sharedMemBytes;
-  void **kernelParams;
-  void **extra;
+  // Default member initializers keep the CUDA `= {0}` aggregate spelling
+  // valid: dpp's dim3 has no default constructor.
+  ::dim3 gridDim{1, 1, 1};
+  ::dim3 blockDim{1, 1, 1};
+  unsigned int sharedMemBytes = 0;
+  void **kernelParams = nullptr;
+  void **extra = nullptr;
 };
 #else
 struct cudaGraphDim3Fallback {
-  unsigned int x, y, z;
+  unsigned int x = 1, y = 1, z = 1;
 };
 struct cudaKernelNodeParams {
-  void *func;
+  void *func = nullptr;
   cudaGraphDim3Fallback gridDim;
   cudaGraphDim3Fallback blockDim;
-  unsigned int sharedMemBytes;
-  void **kernelParams;
-  void **extra;
+  unsigned int sharedMemBytes = 0;
+  void **kernelParams = nullptr;
+  void **extra = nullptr;
 };
 #endif
 

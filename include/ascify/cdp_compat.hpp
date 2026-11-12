@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "ascify_cuda_compat.hpp"
+#include "symbol_compat.hpp"
 
 namespace ascify {
 namespace cdp {
@@ -41,28 +42,28 @@ inline ReplayFn &replayFn() {
   static ReplayFn value = nullptr;
   return value;
 }
-ASCIFY_GLOBAL void ascify_cdp_resolve(unsigned long long *head,
-                                      unsigned long long *tasks);
-
 inline int drainOnce() {
   static unsigned long long headAddress = 0, tasksAddress = 0;
   if (headAddress == 0) {
     const aclError ready = cudaRuntimeEnsureReady();
     if (ready != ACL_SUCCESS) return ready;
-    void *probe = nullptr;
-    aclError status = aclrtMalloc(&probe, 16, ACL_MEM_MALLOC_NORMAL_ONLY);
-    if (status != ACL_SUCCESS) return status;
-    ascify_cdp_resolve<<<1, 1>>>(
-        static_cast<unsigned long long *>(probe),
-        static_cast<unsigned long long *>(probe) + 1);
-    status = aclrtSynchronizeStream(nullptr);
-    unsigned long long addresses[2] = {0, 0};
-    if (status == ACL_SUCCESS)
-      status = aclrtMemcpy(addresses, 16, probe, 16, ACL_MEMCPY_DEVICE_TO_HOST);
-    aclrtFree(probe);
-    if (status != ACL_SUCCESS || addresses[0] == 0) return ACL_ERROR_FAILURE;
-    headAddress = addresses[0];
-    tasksAddress = addresses[1];
+    std::size_t bytes = 0;
+    const auto headResolve = detail::DeviceSymbolResolver::find(
+        __builtin_addressof(g_head), bytes);
+    const auto tasksResolve = detail::DeviceSymbolResolver::find(
+        __builtin_addressof(g_tasks), bytes);
+    if (headResolve == nullptr || tasksResolve == nullptr)
+      return ACL_ERROR_FAILURE;
+    void *headPointer = nullptr, *tasksPointer = nullptr;
+    aclError status = headResolve(&headPointer);
+    if (status == ACL_SUCCESS) status = tasksResolve(&tasksPointer);
+    if (status != ACL_SUCCESS || headPointer == nullptr ||
+        tasksPointer == nullptr)
+      return ACL_ERROR_FAILURE;
+    headAddress = static_cast<unsigned long long>(
+        reinterpret_cast<uintptr_t>(headPointer));
+    tasksAddress = static_cast<unsigned long long>(
+        reinterpret_cast<uintptr_t>(tasksPointer));
   }
   unsigned processed = 0;
   std::vector<TaskHeader> batch;
@@ -162,13 +163,8 @@ __SIMT_DEVICE_FUNCTIONS_DECL__ inline aclError deviceStreamDestroy(void *) {
 }  // namespace cdp
 }  // namespace ascify
 
-// Address kernel: writes the queue's device addresses for the host drain.
-ASCIFY_GLOBAL void ascify_cdp_resolve(unsigned long long *head,
-                                      unsigned long long *tasks) {
-  *head = static_cast<unsigned long long>(
-      reinterpret_cast<uintptr_t>(&::ascify::cdp::g_head));
-  *tasks = static_cast<unsigned long long>(
-      reinterpret_cast<uintptr_t>(&::ascify::cdp::g_tasks[0]));
-}
-
+// Device-symbol registration (address kernels + resolvers), the same
+// proven pattern cudaMemcpyToSymbol uses (see symbol_compat.hpp).
+ASCIFY_REGISTER_DEVICE_SYMBOL(::ascify::cdp::g_head, asc_cdp_head);
+ASCIFY_REGISTER_DEVICE_SYMBOL(::ascify::cdp::g_tasks, asc_cdp_tasks);
 #endif  // ASCIFY_CDP_COMPAT_HPP

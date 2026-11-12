@@ -852,12 +852,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 232345)
+  if (contents.size() != 232558)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "2554b713746a1c4fa9acc9d16b4e9054f461527ecf880354b97697604e937892");
+      "1d97f8261d49ddd81e3779c2af79998465b1032685e854b02724cf2647cfce18");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -884,12 +884,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 232345)
+  if (invalidBuffer || contents.size() != 232558)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "2554b713746a1c4fa9acc9d16b4e9054f461527ecf880354b97697604e937892");
+      "1d97f8261d49ddd81e3779c2af79998465b1032685e854b02724cf2647cfce18");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -10497,8 +10497,6 @@ bool AscifyAction::rewriteCudaGraphKernelHandle(
     return false;
   auto &context = *Result.Context;
   auto &source = *Result.SourceManager;
-  llvm::errs() << "ASCIFY DBG graphhandle cast kind="
-               << cast->getStmtClassName() << "\n";
   const bool explicitCast =
       llvm::isa_and_nonnull<clang::CStyleCastExpr>(cast) ||
       llvm::isa_and_nonnull<clang::CXXStaticCastExpr>(cast) ||
@@ -10514,17 +10512,9 @@ bool AscifyAction::rewriteCudaGraphKernelHandle(
   } else {
     kernelRef = llvm::dyn_cast<clang::DeclRefExpr>(sub);
   }
-  if (kernelRef == nullptr || kernelRef->hasQualifier()) {
-    llvm::errs() << "ASCIFY DBG graphhandle: no kernel ref\n";
-    return false;
-  }
+  if (kernelRef == nullptr || kernelRef->hasQualifier()) return false;
   const auto *kernel =
       llvm::dyn_cast<clang::FunctionDecl>(kernelRef->getDecl());
-  llvm::errs() << "ASCIFY DBG graphhandle ref="
-               << kernelRef->getNameInfo().getAsString();
-  if (kernel == nullptr) { llvm::errs() << " NOTFN\n"; return false; }
-  llvm::errs() << " global=" << (kernel->hasAttr<clang::CUDAGlobalAttr>() ? 1 : 0)
-               << " body=" << (kernel->getBody() != nullptr ? 1 : 0) << "\n";
   if (kernel == nullptr || !kernel->hasAttr<clang::CUDAGlobalAttr>() ||
       kernel->getTemplatedKind() != clang::FunctionDecl::TK_NonTemplate ||
       kernel->getBody() == nullptr)
@@ -10565,24 +10555,32 @@ bool AscifyAction::rewriteCudaGraphKernelHandle(
     return false;
   const std::string kernelName = kernel->getNameAsString();
   const std::string thunkName = "ascify_graphglue_" + kernelName;
-  const auto &options = getCompilerInstance().getLangOpts();
   if (graphGlueKernels.insert(kernelName).second) {
-    const clang::SourceLocation afterBody =
-        clang::Lexer::getLocForEndOfToken(bodyEnd, 0, source, options);
-    if (afterBody.isInvalid()) return false;
+    // The thunk forward-declares the kernel and is emitted with the
+    // injected includes block (the same materialization path the CDP
+    // replay glue uses); the use-site rewrite below points the graph
+    // node's launcher at the thunk.
     clang::PrintingPolicy policy(context.getLangOpts());
     std::string glue;
     llvm::raw_string_ostream stream(glue);
-    stream << "\n\n// Ascify graph kernel-node bridge: typed <<<>>> thunk for "
-           << kernelName << " (CUDA graph emulation).\n"
-           << "namespace {\n"
+    stream << "// Ascify graph kernel-node bridge: typed <<<>>> thunk for "
+           << kernelName << " (CUDA graph emulation).\n";
+    stream << "ASCIFY_GLOBAL void " << kernelName << "(";
+    bool first = true;
+    for (const auto *parameter : kernel->parameters()) {
+      if (!first) stream << ", ";
+      first = false;
+      stream << parameter->getType().getAsString(policy);
+    }
+    stream << ");\n";
+    stream << "namespace {\n"
            << "static void " << thunkName
            << "(unsigned gx, unsigned gy, unsigned gz, unsigned bx, "
               "unsigned by, unsigned bz, unsigned shm, ::aclrtStream s, "
               "void **kp) {\n"
            << "  " << kernelName
-           << "<<<::dim3(gx, gy, gz), ::dim3(bx, by, bz), shm, s>>>(";
-    bool first = true;
+           << "<<<dim3(gx, gy, gz), dim3(bx, by, bz), shm, s>>>(";
+    first = true;
     for (const auto *parameter : kernel->parameters()) {
       if (!first) stream << ", ";
       first = false;
@@ -10592,17 +10590,10 @@ bool AscifyAction::rewriteCudaGraphKernelHandle(
     }
     stream << ");\n}\n}  // namespace\n";
     stream.flush();
-    const ct::Replacement glueEdit(source, afterBody, 0, glue);
-    const bool glueInserted = insertSemanticReplacement(
-        glueEdit, clang::FullSourceLoc(afterBody, source), afterBody,
-        afterBody);
-    llvm::errs() << "ASCIFY DBG graphhandle glue " << kernelName
-                 << " inserted=" << (glueInserted ? 1 : 0) << "\n";
-    if (!glueInserted) {
-      graphGlueKernels.erase(kernelName);
-      return false;
-    }
+    graphGlueText += glue;
+    needsGraphTextureTypesHeader = true;
   }
+  const auto &options = getCompilerInstance().getLangOpts();
   const auto begin = source.getFileLoc(cast->getBeginLoc());
   const auto last = source.getFileLoc(cast->getEndLoc());
   if (begin.isInvalid() || last.isInvalid() ||
@@ -10615,13 +10606,9 @@ bool AscifyAction::rewriteCudaGraphKernelHandle(
   if (!graphKernelHandleOffsets.insert(offset).second) return true;
   const auto length = source.getFileOffset(end) - offset;
   const std::string replacement = "(void *)&" + thunkName;
-  const bool siteInserted = insertSemanticReplacement(
-      ct::Replacement(source, begin, length, replacement),
-      clang::FullSourceLoc(begin, source), begin, end);
-  llvm::errs() << "ASCIFY DBG graphhandle site " << kernelName
-               << " off=" << offset << " inserted=" << (siteInserted ? 1 : 0)
-               << "\n";
-  if (!siteInserted) {
+  if (!insertSemanticReplacement(
+          ct::Replacement(source, begin, length, replacement),
+          clang::FullSourceLoc(begin, source), begin, end)) {
     graphKernelHandleOffsets.erase(offset);
     return false;
   }
@@ -11374,6 +11361,10 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
   originalCgCompilerDefaultDefinition = {};
   originalCgCompilerDefaultInput = {};
   davC310TargetRecipe.reset();
+  graphGlueKernels.clear();
+  graphKernelHandleOffsets.clear();
+  graphGlueText.clear();
+  needsGraphTextureTypesHeader = false;
   if (!NoLowerDeviceDoubleParams) {
     Finder->addMatcher(
         mat::parmVarDecl(mat::isExpansionInMainFile())
@@ -16478,6 +16469,8 @@ void AscifyAction::EndSourceFileAction() {
   // header, not the whole texture adapter.
   if (needsGraphTextureTypesHeader)
     includes += "#include <ascify/texture_types.hpp>\n";
+  if (!graphGlueText.empty())
+    includes += graphGlueText;
   if (dynamicWarpGroups.used())
     includes += "#include <ascify/cooperative_groups_compat.hpp>\n"
                 "#include <ascify/dynamic_warp_groups_compat.hpp>\n";

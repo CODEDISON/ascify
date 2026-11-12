@@ -1398,6 +1398,29 @@ class Proof {
                 }
                 return false;
               }
+              // The graph-emulation bridge: the kernel address stored
+              // into a cudaKernelNodeParams.func field is rewritten to a
+              // typed <<<>>> thunk address by the converter (same escape
+              // class as the cooperative launch operand).
+              if (const auto* assignment =
+                      llvm::dyn_cast<clang::BinaryOperator>(parent)) {
+                if (assignment->getOpcode() == clang::BO_Assign &&
+                    assignment->getRHS() == node) {
+                  const auto* member = llvm::dyn_cast<clang::MemberExpr>(
+                      assignment->getLHS()->IgnoreParenImpCasts());
+                  if (member != nullptr) {
+                    const auto* field =
+                        llvm::dyn_cast<clang::FieldDecl>(member->getMemberDecl());
+                    if (field != nullptr &&
+                        field->getName() == "func" &&
+                        field->getParent() != nullptr &&
+                        field->getParent()->getName() ==
+                            "cudaKernelNodeParams")
+                      return true;
+                  }
+                }
+                return false;
+              }
               const auto kind = parent->getStmtClass();
               const bool link =
                   kind == Stmt::UnaryOperatorClass ||

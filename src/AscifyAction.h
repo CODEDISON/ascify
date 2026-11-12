@@ -436,6 +436,7 @@ private:
   // emitted typed <<<>>> thunk each) and the already-rewritten cast sites.
   std::set<std::string> graphGlueKernels;
   std::set<unsigned> graphKernelHandleOffsets;
+  std::string graphGlueText;
   // Argument spans inside checkCudaErrors(...) that the cooperative-launch
   // rewrite turned into statement expressions; the closure's identifier
   // replacement coexists with them (same coexistence contract as the proven
