@@ -2540,6 +2540,25 @@ inline aclError cuDeviceGetName(char *name, int length, CUdevice device) {
   return ACL_SUCCESS;
 }
 
+// Driver skin of the runtime peer query: same aclrtDeviceCanAccessPeer
+// backend and the same epoch semantics. A query never creates a peer
+// context; the int32_t ACL result is committed to the int output only on
+// success, matching the runtime mapping.
+inline aclError cuDeviceCanAccessPeer(int *can_access_peer, CUdevice device,
+                                      CUdevice peer_device) {
+  if (can_access_peer == nullptr || device < 0 || peer_device < 0) {
+    return ACL_ERROR_RT_PARAM_INVALID;
+  }
+  const aclError ready = cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  int32_t result = 0;
+  const aclError status = aclrtDeviceCanAccessPeer(
+      &result, static_cast<int32_t>(device),
+      static_cast<int32_t>(peer_device));
+  if (status == ACL_SUCCESS) { *can_access_peer = static_cast<int>(result); }
+  return status;
+}
+
 inline aclError cuDeviceGetAttribute(int *value, CUdevice_attribute attribute,
                                      CUdevice device) {
   if (value == nullptr || device < 0) { return ACL_ERROR_RT_PARAM_INVALID; }
@@ -2558,6 +2577,16 @@ inline aclError cuDeviceGetAttribute(int *value, CUdevice_attribute attribute,
       return ACL_SUCCESS;
     case CU_DEVICE_ATTRIBUTE_COMPUTE_MODE:
       // No compute-mode restriction exists on this runtime.
+      *value = 0;
+      return ACL_SUCCESS;
+    case CU_DEVICE_ATTRIBUTE_VIRTUAL_ADDRESS_MANAGEMENT_SUPPORTED:
+      // The VMM compat surface is implemented on this target: every
+      // reserved address is immediately backed by real memory, so the
+      // cuMem* allocation contract holds.
+      *value = 1;
+      return ACL_SUCCESS;
+    case CU_DEVICE_ATTRIBUTE_GENERIC_COMPRESSION_SUPPORTED:
+      // No generic-memory-compression hardware exists on this target.
       *value = 0;
       return ACL_SUCCESS;
     case CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT:

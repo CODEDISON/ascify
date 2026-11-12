@@ -19,21 +19,35 @@ enum CUmemAllocationGranularity_flags {
   CU_MEM_ALLOC_GRANULARITY_RECOMMENDED = 1
 };
 enum CUmemHandleType { CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR = 1 };
+// The descriptor enums keep the CUDA constant values: the samples compare
+// them symbolically (compression readback waive check) and the compat
+// definitions make those comparisons value-identical in the target.
+enum CUmemAllocationType { CU_MEM_ALLOCATION_TYPE_PINNED = 1 };
+enum CUmemAllocationCompType {
+  CU_MEM_ALLOCATION_COMP_NONE = 0,
+  CU_MEM_ALLOCATION_COMP_GENERIC = 1
+};
+enum CUmemAccess_flags { CU_MEM_ACCESS_FLAGS_PROT_READWRITE = 3 };
 
 struct CUmemLocation_st {
   CUmemAllocationLocationType type;
   int id;
 };
 struct CUmemAllocationProp_st {
-  CUmemAllocationLocationType locationType;
+  CUmemAllocationType type;
   CUmemLocation_st location;
-  CUmemHandleType allocFlagsHandleType;
-  unsigned compressionType;
-  unsigned requestedHandleTypes;
+  struct {
+    CUmemAllocationCompType compressionType;
+  } allocFlags;
+};
+struct CUmemAccessDesc_st {
+  CUmemLocation_st location;
+  CUmemAccess_flags flags;
 };
 
 typedef struct CUmemLocation_st CUmemLocation;
 typedef struct CUmemAllocationProp_st CUmemAllocationProp;
+typedef struct CUmemAccessDesc_st CUmemAccessDesc;
 
 enum CUdevice_attribute_vmm {
   CU_DEVICE_ATTRIBUTE_VIRTUAL_ADDRESS_MANAGEMENT_SUPPORTED = 102,
@@ -111,10 +125,10 @@ inline CUresult cuMemGetAllocationGranularity(
 inline CUresult cuMemGetAllocationPropertiesFromHandle(
     CUmemAllocationProp *prop, CUmemGenericAllocationHandle handle) {
   if (prop == nullptr || handle == nullptr) return CUDA_ERROR_INVALID_VALUE;
-  prop->locationType = CU_MEM_LOCATION_TYPE_DEVICE;
+  prop->type = CU_MEM_ALLOCATION_TYPE_PINNED;
   prop->location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   prop->location.id = 0;
-  prop->compressionType = 0;
+  prop->allocFlags.compressionType = CU_MEM_ALLOCATION_COMP_NONE;
   return CUDA_SUCCESS;
 }
 

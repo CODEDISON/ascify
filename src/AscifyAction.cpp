@@ -839,12 +839,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 142619)
+  if (contents.size() != 143953)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "e623f518b54277b8f31ffb6bb6c69922d565ed6da41dd2e9788107b7cd80446d");
+      "0b1595ccc2db9bf97a8eba1d45cf8b3f4b722c3d4802912151b74969bc94a7cd");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -871,12 +871,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 142619)
+  if (invalidBuffer || contents.size() != 143953)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "e623f518b54277b8f31ffb6bb6c69922d565ed6da41dd2e9788107b7cd80446d");
+      "0b1595ccc2db9bf97a8eba1d45cf8b3f4b722c3d4802912151b74969bc94a7cd");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -960,7 +960,7 @@ bool isAdmittedCudaRuntimeStatusCall(
       "cudaHostAlloc", "cudaHostRegister", "cudaHostUnregister",
       "cudaHostGetDevicePointer", "cudaSetDeviceFlags",
       "cuInit", "cuDeviceGetCount", "cuDeviceGet", "cuDeviceGetName",
-      "cuDeviceGetAttribute", "cuGetErrorString",
+      "cuDeviceGetAttribute", "cuGetErrorString", "cuDeviceCanAccessPeer",
       "cuCtxCreate", "cuCtxDestroy", "cuCtxSynchronize", "cuCtxGetDevice", "cuGetErrorName", "cuGetErrorString",
       "cuMemAddressReserve", "cuMemAddressFree", "cuMemCreate", "cuMemMap",
       "cuMemUnmap", "cuMemSetAccess", "cuMemRelease",
@@ -995,16 +995,28 @@ bool isAdmittedCudaRuntimeStatusCall(
                    [&](const char *admitted) { return name == admitted; }) ==
       std::end(admittedNames)) {
     // A local function whose declared return type is exactly cudaError_t
-    // (= aclError) IS the status domain by type: checkCudaErrors checking
-    // its return value is semantically correct without tracing the body
-    // (which may live in another TU of the original build).
+    // or CUresult (both = aclError after mapping: the Runtime and Driver
+    // status domains) IS the status domain by type: checkCudaErrors
+    // checking its return value is semantically correct without tracing
+    // the body (which may live in another TU of the original build).
+    // CUDA 13 declares the Driver CUresult as a typedef over the shared
+    // cudaError_enum tag, so the public typedef spelling is the proof
+    // there; the Runtime cudaError_t keeps its cudaError tag check.
     const auto *functionType = callee->getType()->getAs<clang::FunctionProtoType>();
     if (functionType == nullptr ||
         !functionType->getReturnType()->isEnumeralType())
       return false;
-    const auto *returnEnum = functionType->getReturnType()->getAs<clang::EnumType>();
-    if (returnEnum == nullptr || returnEnum->getDecl()->getName() != "cudaError")
+    const clang::QualType returned = functionType->getReturnType();
+    const auto *returnEnum = returned->getAs<clang::EnumType>();
+    if (returnEnum == nullptr)
       return false;
+    if (returnEnum->getDecl()->getName() != "cudaError") {
+      const auto *driverStatus =
+          llvm::dyn_cast<clang::TypedefType>(returned.getTypePtr());
+      if (driverStatus == nullptr ||
+          driverStatus->getDecl()->getName() != "CUresult")
+        return false;
+    }
     return sourceManager.isWrittenInMainFile(callee->getLocation()) == false;
   }
   const auto mapped = CUDA_RENAMES_MAP().find(name);
@@ -12393,6 +12405,22 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
             return true;
         }
       }
+      // A named constant of a compat-owned VMM descriptor enum (CUmem*)
+      // observed through an integral cast is value-identical in the target:
+      // the VMM compat defines that enum family with the CUDA values, and
+      // descriptor field fill/readback is the documented pattern.
+      {
+        const auto *enumRef = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
+            expression->getSubExpr()->IgnoreParenImpCasts());
+        if (enumRef != nullptr) {
+          if (const auto *constant =
+                  llvm::dyn_cast<clang::EnumConstantDecl>(enumRef->getDecl()))
+            if (const auto *owner = llvm::dyn_cast_or_null<clang::EnumDecl>(
+                    constant->getDeclContext()))
+              if (llvm::StringRef(owner->getName()).starts_with("CUmem"))
+                return true;
+        }
+      }
       const auto *enumeration = sdkEnumeration(
           expression->getSubExpr()->IgnoreParenImpCasts()->getType());
       const auto destination = expression->getType();
@@ -12442,7 +12470,8 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
                  comparison->getOpcode() == clang::BO_NE) &&
                 sdkEnumeration(comparison->getLHS()->IgnoreParenImpCasts()->getType()) == enumeration &&
                 sdkEnumeration(comparison->getRHS()->IgnoreParenImpCasts()->getType()) == enumeration &&
-                provedSdkEnumEquality(comparison, enumeration))
+                (provedSdkEnumEquality(comparison, enumeration) ||
+                 comparisonHasAdmittedStatusCall(comparison)))
               return true;
       }
       // SHA-frozen official helper bytes (including their excluded
@@ -12472,14 +12501,8 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       // value against a constant of the same enum is the same status-domain
       // proof checkCudaErrors performs; the callee's aclError result IS the
       // enum domain.
-      for (const clang::Expr *side : {expression->getLHS(), expression->getRHS()}) {
-        const auto *call = llvm::dyn_cast_or_null<clang::CallExpr>(
-            side->IgnoreParenImpCasts());
-        if (call == nullptr || call->getDirectCallee() == nullptr) continue;
-        if (isAdmittedCudaRuntimeStatusCall(
-                source, call, sdk))
-          return true;
-      }
+      if (comparisonHasAdmittedStatusCall(expression))
+        return true;
       badLocation = location;
       badName = enumeration->getNameAsString();
       badReason = "unproved SDK enum symbolic comparison";
@@ -12795,12 +12818,33 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       // arguments have no associated classes/namespaces, so ADL adds nothing.
       return result;
     }
+    // The status-domain proof the operator check applies: an admitted
+    // runtime/Driver API result compared with a constant of its own error
+    // enum. An operand's integral promotion into such a comparison carries
+    // no additional numeric claim beyond the operator's own proof.
+    bool comparisonHasAdmittedStatusCall(
+        const clang::BinaryOperator *comparison) const {
+      for (const clang::Expr *side :
+           {comparison->getLHS(), comparison->getRHS()}) {
+        const auto *call = llvm::dyn_cast_or_null<clang::CallExpr>(
+            side->IgnoreParenImpCasts());
+        if (call == nullptr || call->getDirectCallee() == nullptr) continue;
+        if (isAdmittedCudaRuntimeStatusCall(source, call, sdk))
+          return true;
+      }
+      return false;
+    }
     bool provedSdkEnumEquality(const clang::BinaryOperator *comparison,
                               const clang::EnumDecl *enumeration) const {
       // The supported error symbols and memcpy directions have distinct target
       // values. Device attributes do not: two CUDA attributes share one adapter.
       if (enumeration->getName() == "cudaError" ||
           enumeration->getName() == "cudaMemcpyKind")
+        return true;
+      // The VMM compat owns the CUmem* descriptor enums and keeps the CUDA
+      // constant values, so a comparison over them is value-identical in the
+      // target (the compressible-property readback waive check).
+      if (enumeration->getName() == "CUmemAllocationCompType")
         return true;
       const auto *left = llvm::dyn_cast<clang::DeclRefExpr>(
           comparison->getLHS()->IgnoreParenImpCasts());
@@ -12962,9 +13006,20 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
         return true;
       // VMM allocation descriptors (CUmem* types from the compat header)
       // are host-side request descriptors with no kernel-observed layout.
-      if (const auto *vmmRecord = type->getAsTagDecl())
+      // Their anonymous nested unions/structs (CUmemLocation's id union,
+      // CUmemAllocationProp's allocFlags struct) are part of the same
+      // compat-owned descriptor layout.
+      if (const auto *vmmRecord = type->getAsTagDecl()) {
         if (llvm::StringRef(vmmRecord->getNameAsString()).starts_with("CUmem"))
           return true;
+        if (vmmRecord->getNameAsString().empty())
+          if (const auto *owner = vmmRecord->getDeclContext())
+            if (const auto *ownerRecord =
+                    llvm::dyn_cast_or_null<clang::RecordDecl>(owner))
+              if (llvm::StringRef(ownerRecord->getNameAsString())
+                      .starts_with("CUmem"))
+                return true;
+      }
       // A cudaLaunchCooperativeKernel call is wholly proven and rewritten to
       // a direct <<<>>> launch by its own projection; the SDK prototype
       // surface observed through that call is not retained in the target.

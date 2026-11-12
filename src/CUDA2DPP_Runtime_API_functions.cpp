@@ -63,6 +63,7 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   m["cuDeviceGet"] = {"ascify::cuDeviceGet", CONV_DEVICE, API_DRIVER, 0};
   m["cuDeviceGetName"] = {"ascify::cuDeviceGetName", CONV_DEVICE, API_DRIVER, 0};
   m["cuDeviceGetAttribute"] = {"ascify::cuDeviceGetAttribute", CONV_DEVICE, API_DRIVER, 0};
+  m["cuDeviceCanAccessPeer"] = {"ascify::cuDeviceCanAccessPeer", CONV_DEVICE, API_DRIVER, 0};
   m["cuGetErrorString"] = {"ascify::cuGetErrorString", CONV_DEVICE, API_DRIVER, 0};
   m["cuCtxCreate"] = {"ascify::cuCtxCreate", CONV_DEVICE, API_DRIVER, 0};
   m["cuCtxDestroy"] = {"ascify::cuCtxDestroy", CONV_DEVICE, API_DRIVER, 0};
