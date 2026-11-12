@@ -20,17 +20,20 @@ enum CUmemAllocationGranularity_flags {
 };
 enum CUmemHandleType { CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR = 1 };
 
-struct CUmemLocation {
+struct CUmemLocation_st {
   CUmemAllocationLocationType type;
   int id;
 };
-struct CUmemAllocationProp {
+struct CUmemAllocationProp_st {
   CUmemAllocationLocationType locationType;
-  CUmemLocation location;
+  CUmemLocation_st location;
   CUmemHandleType allocFlagsHandleType;
   unsigned compressionType;
   unsigned requestedHandleTypes;
 };
+
+typedef struct CUmemLocation_st CUmemLocation;
+typedef struct CUmemAllocationProp_st CUmemAllocationProp;
 
 enum CUdevice_attribute_vmm {
   CU_DEVICE_ATTRIBUTE_VIRTUAL_ADDRESS_MANAGEMENT_SUPPORTED = 102,

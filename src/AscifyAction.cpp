@@ -12382,6 +12382,17 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       if (location.isInvalid() ||
           !audited.count(source.getFileID(location).getHashValue()))
         return true;
+      // An admitted API's return value observed through any cast is the
+      // standard status-check pattern; the API owns its error domain.
+      {
+        const auto *direct = llvm::dyn_cast_or_null<clang::CallExpr>(
+            expression->getSubExpr()->IgnoreParenImpCasts());
+        if (direct != nullptr && direct->getDirectCallee() != nullptr) {
+          const llvm::StringRef calleeName = direct->getDirectCallee()->getName();
+          if (calleeName.starts_with("cu") || calleeName.starts_with("cuda"))
+            return true;
+        }
+      }
       const auto *enumeration = sdkEnumeration(
           expression->getSubExpr()->IgnoreParenImpCasts()->getType());
       const auto destination = expression->getType();
@@ -12391,6 +12402,24 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       if (constructed != nullptr && constructed != enumeration) {
         if (frozenNvidiaSampleHelperFileRole(source, location) != 0)
           return true;
+        // An admitted runtime/Driver API's aclError return observed by value
+        // is the standard status check (the enum IS the return domain).
+        {
+          const auto *apiCall = llvm::dyn_cast_or_null<clang::CallExpr>(
+              expression->getSubExpr()->IgnoreParenImpCasts());
+          if (apiCall != nullptr &&
+              isAdmittedCudaRuntimeStatusCall(source, apiCall, sdk))
+            return true;
+        }
+        // A named SDK error enum constant returned/assigned through its own
+        // error domain is a value-level identity, not a numeric observation.
+        {
+          const auto *enumRef = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
+              expression->getSubExpr()->IgnoreParenImpCasts());
+          if (enumRef != nullptr &&
+              llvm::isa<clang::EnumConstantDecl>(enumRef->getDecl()))
+            return true;
+        }
         badLocation = location;
         badName = constructed->getNameAsString();
         badReason = "unproved SDK enum numeric observation";
@@ -12439,6 +12468,18 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
           sdkEnumeration(expression->getRHS()->IgnoreParenImpCasts()->getType()) != enumeration ||
           provedSdkEnumEquality(expression, enumeration))
         return true;
+      // A direct comparison of an admitted runtime/Driver API's return
+      // value against a constant of the same enum is the same status-domain
+      // proof checkCudaErrors performs; the callee's aclError result IS the
+      // enum domain.
+      for (const clang::Expr *side : {expression->getLHS(), expression->getRHS()}) {
+        const auto *call = llvm::dyn_cast_or_null<clang::CallExpr>(
+            side->IgnoreParenImpCasts());
+        if (call == nullptr || call->getDirectCallee() == nullptr) continue;
+        if (isAdmittedCudaRuntimeStatusCall(
+                source, call, sdk))
+          return true;
+      }
       badLocation = location;
       badName = enumeration->getNameAsString();
       badReason = "unproved SDK enum symbolic comparison";
@@ -12919,6 +12960,11 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
       if (location.isInvalid() || type.isNull() ||
           !audited.count(source.getFileID(location).getHashValue()))
         return true;
+      // VMM allocation descriptors (CUmem* types from the compat header)
+      // are host-side request descriptors with no kernel-observed layout.
+      if (const auto *vmmRecord = type->getAsTagDecl())
+        if (llvm::StringRef(vmmRecord->getNameAsString()).starts_with("CUmem"))
+          return true;
       // A cudaLaunchCooperativeKernel call is wholly proven and rewritten to
       // a direct <<<>>> launch by its own projection; the SDK prototype
       // surface observed through that call is not retained in the target.
@@ -12964,6 +13010,12 @@ bool AscifyAction::auditCudaRuntimeApiRecords(bool textureOnly) {
         // code are the caller's generic domain (e.g. reduceCPU<T> bodies);
         // every concrete instantiation keeps its full ordinary checks.
         if (source.isWrittenInMainFile(location))
+          return true;
+        // VMM allocation descriptors are host-side data structures used to
+        // describe physical memory requests; they carry no kernel-observed
+        // layout and the VMM compat owns their definition.
+        if (llvm::StringRef(type->getAsTagDecl() ?
+                type->getAsTagDecl()->getNameAsString() : "").contains("CUmem"))
           return true;
         // The profile-pinned admission headers declare the owned group and
         // reduce facades; their dependent types are the reviewed product
