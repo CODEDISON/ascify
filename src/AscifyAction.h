@@ -338,6 +338,9 @@ private:
   bool needsCudaCompatHeader = false;
   bool needsCudaVec3LayoutHeader = false;
   bool needsCudaTextureHeader = false;
+  // Graph-using samples need the pitched-copy descriptor leaf header
+  // (texture_types.hpp) for cudaMemcpy3DParms and the make_cuda* helpers.
+  bool needsGraphTextureTypesHeader = false;
   std::set<unsigned> cudaTextureLiteralOffsets;
   std::set<unsigned> cudaTextureRequiredHelperOffsets;
   bool isAdmittedCudaTextureMacroUse(clang::SourceLocation location);
@@ -429,6 +432,10 @@ private:
   std::set<unsigned> rewrittenCudaHalf2DirectInitOffsets;
   std::set<unsigned> rewrittenCudaHalf2OperatorOffsets;
   std::set<unsigned> rewrittenGlobalAtomicOffsets;
+  // CUDA Graph kernel-node bridge: kernels whose address was taken (one
+  // emitted typed <<<>>> thunk each) and the already-rewritten cast sites.
+  std::set<std::string> graphGlueKernels;
+  std::set<unsigned> graphKernelHandleOffsets;
   // Argument spans inside checkCudaErrors(...) that the cooperative-launch
   // rewrite turned into statement expressions; the closure's identifier
   // replacement coexists with them (same coexistence contract as the proven
@@ -537,6 +544,7 @@ public:
       const mat::MatchFinder::MatchResult &Result);
   bool rewriteDeviceStdMove(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaLaunchCooperativeKernel(const clang::ast_matchers::MatchFinder::MatchResult &Result);
+  bool rewriteCudaGraphKernelHandle(const clang::ast_matchers::MatchFinder::MatchResult &Result);
   bool rewriteDeviceWideningFloatCast(const clang::ast_matchers::MatchFinder::MatchResult &Result);
   bool rewriteProvenGenericAtomicAddCall(
       const mat::MatchFinder::MatchResult &Result);

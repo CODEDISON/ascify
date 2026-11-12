@@ -47,6 +47,26 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   m["cudaProfilerStart"] = {"ascify::cudaProfilerStart", CONV_PROFILER, API_RUNTIME, 0};
   m["cudaProfilerStop"] = {"ascify::cudaProfilerStop", CONV_PROFILER, API_RUNTIME, 0};
   m["cudaLaunchHostFunc"] = {"ascify::cudaLaunchHostFunc", CONV_EXECUTION, API_RUNTIME, 0};
+  // CUDA Graph host-emulation line (simpleCudaGraphs / graphMemoryNodes):
+  // the compat layer records and replays graphs entirely on the host.
+  m["cudaGraphCreate"] = {"ascify::cudaGraphCreate", CONV_EXECUTION, API_RUNTIME, 0};
+  m["cudaGraphDestroy"] = {"ascify::cudaGraphDestroy", CONV_EXECUTION, API_RUNTIME, 0};
+  m["cudaGraphAddKernelNode"] = {"ascify::cudaGraphAddKernelNode", CONV_EXECUTION, API_RUNTIME, 0};
+  m["cudaGraphAddMemcpyNode"] = {"ascify::cudaGraphAddMemcpyNode", CONV_EXECUTION, API_RUNTIME, 0};
+  m["cudaGraphAddMemcpyNode1D"] = {"ascify::cudaGraphAddMemcpyNode1D", CONV_EXECUTION, API_RUNTIME, 0};
+  m["cudaGraphAddMemsetNode"] = {"ascify::cudaGraphAddMemsetNode", CONV_EXECUTION, API_RUNTIME, 0};
+  m["cudaGraphAddHostNode"] = {"ascify::cudaGraphAddHostNode", CONV_EXECUTION, API_RUNTIME, 0};
+  m["cudaGraphAddMemAllocNode"] = {"ascify::cudaGraphAddMemAllocNode", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaGraphAddMemFreeNode"] = {"ascify::cudaGraphAddMemFreeNode", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaGraphGetNodes"] = {"ascify::cudaGraphGetNodes", CONV_EXECUTION, API_RUNTIME, 0};
+  m["cudaGraphInstantiate"] = {"ascify::cudaGraphInstantiate", CONV_EXECUTION, API_RUNTIME, 0};
+  m["cudaGraphLaunch"] = {"ascify::cudaGraphLaunch", CONV_EXECUTION, API_RUNTIME, 0};
+  m["cudaGraphClone"] = {"ascify::cudaGraphClone", CONV_EXECUTION, API_RUNTIME, 0};
+  m["cudaGraphExecDestroy"] = {"ascify::cudaGraphExecDestroy", CONV_EXECUTION, API_RUNTIME, 0};
+  m["cudaStreamBeginCapture"] = {"ascify::cudaStreamBeginCapture", CONV_EXECUTION, API_RUNTIME, 0};
+  m["cudaStreamEndCapture"] = {"ascify::cudaStreamEndCapture", CONV_EXECUTION, API_RUNTIME, 0};
+  m["cudaMallocManaged"] = {"ascify::cudaMallocManaged", CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
+  m["cudaDriverGetVersion"] = {"ascify::cudaDriverGetVersion", CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
   m["cudaStreamAddCallback"] = {"ascify::cudaStreamAddCallback", CONV_EXECUTION, API_RUNTIME, 0};
   m["cudaFreeHost"]                                            = {"ascify::cudaFreeHost",                                   CONV_MEMORY, API_RUNTIME, SEC::MEMORY};
   // Mapped/pinned host memory (CUDA zero-copy) and device flags; see

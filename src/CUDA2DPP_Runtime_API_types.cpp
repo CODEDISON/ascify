@@ -73,6 +73,21 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_TYPE_NAME_MAP = [] {
   m["CU_DEVICE_ATTRIBUTE_VIRTUAL_ADDRESS_MANAGEMENT_SUPPORTED"] = {"CU_DEVICE_ATTRIBUTE_VIRTUAL_ADDRESS_MANAGEMENT_SUPPORTED", CONV_TYPE, API_DRIVER, 0};
   m["CU_DEVICE_ATTRIBUTE_GENERIC_COMPRESSION_SUPPORTED"] = {"CU_DEVICE_ATTRIBUTE_GENERIC_COMPRESSION_SUPPORTED", CONV_TYPE, API_DRIVER, 0};
   m["cudaMemcpyDefault"] = {"ascify::cudaMemcpyDefault", CONV_TYPE, API_RUNTIME, SEC::MEMORY};
+  // CUDA Graph host-emulation handles and node-parameter records: host-side
+  // descriptors owned by the compat layer (no kernel-observed layout).
+  m["cudaGraph_t"] = {"ascify::cudaGraph_t", CONV_TYPE, API_RUNTIME, SEC::STREAM};
+  m["cudaGraphExec_t"] = {"ascify::cudaGraphExec_t", CONV_TYPE, API_RUNTIME, SEC::STREAM};
+  m["cudaGraphNode_t"] = {"ascify::cudaGraphNode_t", CONV_TYPE, API_RUNTIME, SEC::STREAM};
+  m["cudaKernelNodeParams"] = {"ascify::cudaKernelNodeParams", CONV_TYPE, API_RUNTIME, SEC::STREAM};
+  m["cudaMemsetParams"] = {"ascify::cudaMemsetParams", CONV_TYPE, API_RUNTIME, SEC::MEMORY};
+  m["cudaHostNodeParams"] = {"ascify::cudaHostNodeParams", CONV_TYPE, API_RUNTIME, SEC::STREAM};
+  m["cudaMemAllocNodeParams"] = {"ascify::cudaMemAllocNodeParams", CONV_TYPE, API_RUNTIME, SEC::MEMORY};
+  m["cudaMemPoolProps"] = {"ascify::cudaMemPoolProps", CONV_TYPE, API_RUNTIME, SEC::MEMORY};
+  m["cudaMemAllocationTypePinned"] = {"ascify::cudaMemAllocationTypePinned", CONV_TYPE, API_RUNTIME, SEC::MEMORY};
+  m["cudaStreamCaptureModeGlobal"] = {"ascify::cudaStreamCaptureModeGlobal", CONV_TYPE, API_RUNTIME, SEC::STREAM};
+  m["cudaStreamCaptureModeThreadLocal"] = {"ascify::cudaStreamCaptureModeThreadLocal", CONV_TYPE, API_RUNTIME, SEC::STREAM};
+  m["cudaStreamCaptureModeRelaxed"] = {"ascify::cudaStreamCaptureModeRelaxed", CONV_TYPE, API_RUNTIME, SEC::STREAM};
+  m["cudaMemAttachGlobal"] = {"ascify::cudaMemAttachGlobal", CONV_TYPE, API_RUNTIME, SEC::MEMORY};
   m["cudaMemPool_t"]                                   = {"ascify::cudaMemPool_t", CONV_TYPE, API_RUNTIME, SEC::MEMORY};
   m["cudaMemPoolAttrReleaseThreshold"]                 = {"ascify::cudaMemPoolAttrReleaseThreshold", CONV_TYPE, API_RUNTIME, SEC::MEMORY};
   m["cudaDevAttrMemoryPoolsSupported"]                 = {"ascify::cudaDevAttrMemoryPoolsSupported", CONV_TYPE, API_RUNTIME, SEC::MEMORY};

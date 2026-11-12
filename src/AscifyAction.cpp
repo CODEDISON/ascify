@@ -852,12 +852,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 228045)
+  if (contents.size() != 231160)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "1cfb4ff959b42f27618090741b167ad90e72ce7a2ee6a772b9337e4eb591dde1");
+      "4686af916a387363134b3473bfa6113f633e9bb2d1306b0d3f7f7cd8bf86707b");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -884,12 +884,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 228045)
+  if (invalidBuffer || contents.size() != 231160)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "1cfb4ff959b42f27618090741b167ad90e72ce7a2ee6a772b9337e4eb591dde1");
+      "4686af916a387363134b3473bfa6113f633e9bb2d1306b0d3f7f7cd8bf86707b");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -10524,10 +10524,11 @@ bool AscifyAction::rewriteCudaGraphKernelHandle(
   {
     // Bounded walk up the semantic parents to the nearest function.
     const clang::FunctionDecl *owner = nullptr;
-    auto frontier = context.getParents(*cast);
+    const auto roots = context.getParents(*cast);
+    std::vector<clang::DynTypedNode> frontier(roots.begin(), roots.end());
     int hops = 0;
     while (!frontier.empty() && hops < 96) {
-      llvm::SmallVector<clang::DynTypedNode, 8> next;
+      std::vector<clang::DynTypedNode> next;
       for (const auto &node : frontier) {
         if (const auto *fn = node.get<clang::FunctionDecl>()) {
           owner = fn;

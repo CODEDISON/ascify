@@ -2612,12 +2612,66 @@ inline aclError cudaMemsetAsync(void* destination, int value, size_t bytes,
   return aclrtMemsetAsync(destination, bytes, value, bytes, stream);
 }
 
+namespace detail {
+// Ledger of the device each stream was created on. rtStreamDestroy rejects a
+// stream that does not belong to the calling thread's current context
+// (EE1010), while CUDA's cudaStreamDestroy frees any stream from any current
+// device; the ledger lets the destroy adapter switch to the owner's binding
+// for foreign streams. Converted samples create streams on their own current
+// device, so the creation-site device is the stream's device. Leaf-level
+// lock: nothing else is taken while it is held.
+struct StreamRecordSite {
+  aclrtStream stream = nullptr;
+  int32_t device = -1;
+};
+struct StreamRecordSiteTable {
+  RuntimeLock lock;
+  StreamRecordSite records[64] = {};
+};
+inline StreamRecordSiteTable &streamRecordSiteTable() {
+  static StreamRecordSiteTable table;
+  return table;
+}
+inline void rememberStreamDevice(aclrtStream stream, int32_t device) {
+  if (stream == nullptr) return;
+  RuntimeLockGuard guard(streamRecordSiteTable().lock);
+  for (auto &record : streamRecordSiteTable().records) {
+    if (record.stream == stream) { record.device = device; return; }
+  }
+  for (auto &record : streamRecordSiteTable().records) {
+    if (record.stream == nullptr) {
+      record.stream = stream;
+      record.device = device;
+      return;
+    }
+  }
+}
+inline int32_t streamOwnerDevice(aclrtStream stream) {
+  RuntimeLockGuard guard(streamRecordSiteTable().lock);
+  for (const auto &record : streamRecordSiteTable().records) {
+    if (record.stream == stream) { return record.device; }
+  }
+  return -1;
+}
+inline void forgetStreamDevice(aclrtStream stream) {
+  if (stream == nullptr) return;
+  RuntimeLockGuard guard(streamRecordSiteTable().lock);
+  for (auto &record : streamRecordSiteTable().records) {
+    if (record.stream == stream) { record = {}; return; }
+  }
+}
+}  // namespace detail
+
 inline aclError cudaStreamCreate(aclrtStream* stream) {
   if (stream == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
   *stream = nullptr;
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
-  return aclrtCreateStream(stream);
+  const aclError status = aclrtCreateStream(stream);
+  if (status == ACL_SUCCESS && stream != nullptr) {
+    detail::rememberStreamDevice(*stream, detail::selectedDeviceForThread());
+  }
+  return status;
 }
 
 inline aclError cudaStreamCreateWithFlags(
@@ -2699,6 +2753,7 @@ inline aclError cudaStreamCreateWithPriority(aclrtStream* stream,
   if (status != ACL_SUCCESS) { return status; }
   if (created == nullptr) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
   *stream = created;
+  detail::rememberStreamDevice(created, detail::selectedDeviceForThread());
   return ACL_SUCCESS;
 #else
   (void)priority;
@@ -2709,7 +2764,31 @@ inline aclError cudaStreamCreateWithPriority(aclrtStream* stream,
 inline aclError cudaStreamDestroy(aclrtStream stream) {
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
-  return aclrtDestroyStream(stream);
+  // A stream belonging to another device's context is destroyed under its
+  // owner's binding (context save/switch/restore), matching CUDA's
+  // context-agnostic cudaStreamDestroy; same-device destroys are unchanged.
+  const int32_t owner = detail::streamOwnerDevice(stream);
+  if (owner >= 0) {
+    int32_t current = -1;
+    if (aclrtGetDevice(&current) == ACL_SUCCESS && current >= 0 &&
+        current != owner) {
+      aclrtContext saved = nullptr;
+      const bool have_saved =
+          aclrtGetCurrentContext(&saved) == ACL_SUCCESS && saved != nullptr;
+      const aclError switched = aclrtSetDevice(owner);
+      const aclError destroyed = aclrtDestroyStream(stream);
+      if (have_saved) {
+        (void)aclrtSetCurrentContext(saved);
+      } else {
+        (void)aclrtSetDevice(current);
+      }
+      if (destroyed == ACL_SUCCESS) { detail::forgetStreamDevice(stream); }
+      return switched != ACL_SUCCESS ? switched : destroyed;
+    }
+  }
+  const aclError status = aclrtDestroyStream(stream);
+  if (status == ACL_SUCCESS) { detail::forgetStreamDevice(stream); }
+  return status;
 }
 
 inline aclError cudaStreamSynchronize(aclrtStream stream) {
@@ -3102,7 +3181,7 @@ inline GraphRealLaunchLegacy graphRealLaunchLegacy() {
 // device memory exactly when it lies in a registered cudaMalloc allocation.
 inline bool graphPointerIsDeviceMemory(const void *pointer) {
   if (pointer == nullptr) return false;
-  detail::RuntimeLockGuard guard(runtimeAllocationRegistry().lock);
+  RuntimeLockGuard guard(runtimeAllocationRegistry().lock);
   return runtimeAllocationLocked(pointer) != nullptr;
 }
 
