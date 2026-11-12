@@ -610,6 +610,17 @@ bool isDirectlyAllowedHashPragma(
         identifierAt(pragma, "clang")) &&
        identifierAt(pragma + 1, "system_header")))
     return true;
+  // nvcc diagnostic-control pragmas: pure compiler-diagnostic directives
+  // with a numeric or identifier diagnostic code. The token stream, every
+  // boundary proof, and the helper profile are unaffected by them.
+  if (remaining == 2 &&
+      (identifierAt(pragma, "diag_suppress") ||
+       identifierAt(pragma, "diag_default") ||
+       identifierAt(pragma, "diag_warning") ||
+       identifierAt(pragma, "diag_error")) &&
+      (tokens[pragma + 1].kind == DirectPragmaToken::Kind::Number ||
+       tokens[pragma + 1].kind == DirectPragmaToken::Kind::Identifier))
+    return true;
   if (remaining >= 3 &&
       (identifierAt(pragma, "GCC") ||
        identifierAt(pragma, "clang")) &&
@@ -3078,6 +3089,39 @@ static GlobalAtomicScalarKind classifyGlobalAtomicPointer(
   return classifyGlobalAtomicScalar(type->getPointeeType(), context);
 }
 
+// An initializer-position expression has no Stmt parent: its direct parent
+// is the declared variable. This walk additionally steps over that one Decl
+// edge (and only it), so a call initializing a local reaches the owning
+// function exactly like a standalone statement. Everything else, including
+// any lambda boundary, keeps the conservative nullptr of the base walk.
+static const clang::FunctionDecl *enclosingNonLambdaFunctionThroughInits(
+    const clang::Stmt *statement,
+    clang::ASTContext &context) {
+  const void *current = statement;
+  std::set<const void *> active;
+  while (current != nullptr && active.insert(current).second) {
+    const auto parents =
+        current == statement ? context.getParents(*static_cast<const clang::Stmt *>(current))
+                             : context.getParents(*static_cast<const clang::VarDecl *>(current));
+    const void *next = nullptr;
+    for (const clang::DynTypedNode &parent : parents) {
+      if (parent.get<clang::LambdaExpr>() != nullptr)
+        return nullptr;
+      if (const auto *function = parent.get<clang::FunctionDecl>())
+        return function;
+      if (next == nullptr) {
+        if (const auto *nested = parent.get<clang::Stmt>())
+          next = nested;
+        else if (current == statement)
+          if (const auto *declared = parent.get<clang::VarDecl>())
+            next = declared;
+      }
+    }
+    current = next;
+  }
+  return nullptr;
+}
+
 static const clang::FunctionDecl *enclosingNonLambdaFunction(
     const clang::Stmt *statement,
     clang::ASTContext &context) {
@@ -4305,7 +4349,8 @@ static clang::SourceLocation physicalDeclarationPrefixBegin(
 // from the AST. The one optional qualifier token has its own SDK-chain proof.
 static bool hasPhysicalMacroFreeRange(clang::SourceRange range,
                                      clang::Preprocessor &preprocessor,
-                                     clang::SourceLocation allowedQualifier = {}) {
+                                     clang::SourceLocation allowedQualifier = {},
+                                     const std::string *virtualMainInput = {}) {
   if (preprocessor.getPreprocessorOpts().RetainExcludedConditionalBlocks)
     return false;
   auto &source = preprocessor.getSourceManager();
@@ -4313,13 +4358,23 @@ static bool hasPhysicalMacroFreeRange(clang::SourceRange range,
   if (begin.isInvalid() || last.isInvalid() || begin.isMacroID() || last.isMacroID() ||
       source.getFileID(begin) != source.getFileID(last)) return false;
   const auto file = source.getFileID(begin);
-  const auto *entry = source.getFileEntryForID(file);
-  if (entry == nullptr || !physicalSourceFileMatches(
-          source.getFilename(begin), *entry, source)) return false;
   bool invalid = false;
-  const auto physical = llvm::MemoryBuffer::getFile(source.getFilename(begin));
   const auto contents = source.getBufferData(file, &invalid);
-  if (!physical || invalid || contents != (*physical)->getBuffer()) return false;
+  if (invalid) return false;
+  if (virtualMainInput != nullptr) {
+    // The contextual joint parse runs on its proven virtual buffer: spliced
+    // leaf bytes are SHA-verified and the expanded token/macro stream equals
+    // the original parse. On-disk identity can never hold for that buffer;
+    // bind the physical proof to the exact virtual input being parsed.
+    if (file != source.getMainFileID() ||
+        contents != *virtualMainInput) return false;
+  } else {
+    const auto *entry = source.getFileEntryForID(file);
+    if (entry == nullptr || !physicalSourceFileMatches(
+            source.getFilename(begin), *entry, source)) return false;
+    const auto physical = llvm::MemoryBuffer::getFile(source.getFilename(begin));
+    if (!physical || contents != (*physical)->getBuffer()) return false;
+  }
   const auto text = clang::Lexer::getSourceText(
       clang::CharSourceRange::getTokenRange(range), source,
       preprocessor.getLangOpts(), &invalid);
@@ -4377,6 +4432,12 @@ static bool isAdmittedHostRuntimeStatusForwarder(
           source, enumeration->getDecl()->getLocation(), trustedSystemFileIds)) return false;
   const clang::FunctionDecl *definition = nullptr;
   if (!function->hasBody(definition) || definition == nullptr) return false;
+  // A contextual joint parse proves caller forwarders on its virtual buffer;
+  // an ordinary parse keeps the on-disk physical identity requirement.
+  const std::string *virtualMainInput =
+      localHeaders != nullptr && localHeaders->virtualInput != nullptr &&
+      localHeaders->inlinedContextualHeaders != nullptr
+          ? localHeaders->virtualInput : nullptr;
   for (const auto *declaration : function->redecls()) {
     const auto prefix = physicalDeclarationPrefixBegin(
         declaration->getBeginLoc(), preprocessor);
@@ -4384,7 +4445,8 @@ static bool isAdmittedHostRuntimeStatusForwarder(
         locationComesFromInitiallyTrustedSystemFile(
             source, declaration->getLocation(), trustedSystemFileIds) ||
         prefix.isInvalid() || !hasPhysicalMacroFreeRange(
-            {prefix, declaration->getEndLoc()}, preprocessor)) return false;
+            {prefix, declaration->getEndLoc()}, preprocessor, {},
+            virtualMainInput)) return false;
     // Merely parsing an external header does not promise its translation.
     // A selected root header is published only with the closure transaction.
     if (!source.isWrittenInMainFile(declaration->getLocation()) &&
@@ -10109,6 +10171,12 @@ bool AscifyAction::rewriteCudaLaunchCooperativeKernel(
     rewrittenGlobalAtomicOffsets.erase(offset);
     return false;
   }
+  if (macroArgument) {
+    const auto decomposed = source.getDecomposedLoc(begin);
+    cooperativeLaunchStatementRanges.push_back(
+        {decomposed.first, decomposed.second,
+         decomposed.second + length});
+  }
   static const dppCounter counter = {
       "CUDA cooperative launch", CONV_EXECUTION, API_RUNTIME, 0, FULL};
   Statistics::current().incrementCounter(counter,
@@ -10246,7 +10314,8 @@ bool AscifyAction::rewriteProvenGenericAtomicAddCall(
 // The ordinary symbol resolver must also commit before publication.
 static const clang::VarDecl *provedAtomicIncDeviceCounter(
     const clang::Expr *argument, clang::CompilerInstance &compiler,
-    const ascify::FrontendCompatibilityConfig &profile) {
+    const ascify::FrontendCompatibilityConfig &profile,
+    const std::string *virtualMainInput = {}) {
   const auto *address = llvm::dyn_cast_or_null<clang::UnaryOperator>(
       stripParenAndImplicitCasts(argument));
   const auto *reference = address == nullptr ? nullptr :
@@ -10290,7 +10359,8 @@ static const clang::VarDecl *provedAtomicIncDeviceCounter(
       name.isMacroID() || last.isMacroID() ||
       !source.isWrittenInMainFile(qualifier) || !source.isWrittenInMainFile(name) ||
       !source.isWrittenInMainFile(last) ||
-      !hasPhysicalMacroFreeRange(argument->getSourceRange(), preprocessor)) return nullptr;
+      !hasPhysicalMacroFreeRange(argument->getSourceRange(), preprocessor, {},
+                                 virtualMainInput)) return nullptr;
   clang::Token token;
   if (clang::Lexer::getRawToken(qualifier, token, source, compiler.getLangOpts(), true) ||
       token.needsCleaning() || clang::Lexer::getSpelling(token, source, compiler.getLangOpts()) != "__device__")
@@ -10307,7 +10377,8 @@ static const clang::VarDecl *provedAtomicIncDeviceCounter(
             preprocessor.getIdentifierInfo(macro), qualifier).getMacroInfo()) return nullptr;
   const auto prefix = physicalDeclarationPrefixBegin(qualifier, preprocessor);
   if (prefix.isInvalid() ||
-      !hasPhysicalMacroFreeRange({prefix, last}, preprocessor, qualifier)) return nullptr;
+      !hasPhysicalMacroFreeRange({prefix, last}, preprocessor, qualifier,
+                                 virtualMainInput)) return nullptr;
   return variable;
 }
 
@@ -10336,6 +10407,8 @@ bool AscifyAction::rewriteProvenGlobalAtomicCall(
     return false;
   const clang::FunctionDecl *kernel =
       enclosingNonLambdaFunction(call, context);
+  if (kernel == nullptr)
+    kernel = enclosingNonLambdaFunctionThroughInits(call, context);
   if (kernel == nullptr || !kernel->hasAttr<clang::CUDAGlobalAttr>() ||
       call->getArg(0) == nullptr)
     return false;
@@ -10364,7 +10437,12 @@ bool AscifyAction::rewriteProvenGlobalAtomicCall(
         if (!llvm::isa<clang::CUDADeviceAttr>(attribute) &&
             !llvm::isa<clang::AlwaysInlineAttr>(attribute)) return false;
     }
-    deviceCounter = provedAtomicIncDeviceCounter(call->getArg(0), getCompilerInstance(), frontendCompatibility);
+    deviceCounter = provedAtomicIncDeviceCounter(
+        call->getArg(0), getCompilerInstance(), frontendCompatibility,
+        localHeaderContext != nullptr &&
+                localHeaderContext->virtualInput != nullptr &&
+                localHeaderContext->inlinedContextualHeaders != nullptr
+            ? localHeaderContext->virtualInput : nullptr);
     if (deviceCounter == nullptr) return false;
   }
 
@@ -15274,7 +15352,18 @@ void AscifyAction::finalizeNvidiaSampleHelperClosure() {
                                  proved.beginOffset == existing.beginOffset &&
                                  proved.endOffset == existing.endOffset;
                         });
-        if (exactProvenMaxCallee)
+        const bool exactCooperativeLaunch =
+            candidate.kind == NvidiaSampleHelperMacroKind::CheckCudaErrors &&
+            existing.beginOffset >= candidate.invocationRange.beginOffset + 15U &&
+            existing.endOffset < candidate.invocationRange.endOffset &&
+            std::any_of(cooperativeLaunchStatementRanges.begin(),
+                        cooperativeLaunchStatementRanges.end(),
+                        [&](const SemanticRewriteRange &proved) {
+                          return proved.file == existing.file &&
+                                 proved.beginOffset == existing.beginOffset &&
+                                 proved.endOffset == existing.endOffset;
+                        });
+        if (exactProvenMaxCallee || exactCooperativeLaunch)
           continue;
         stagingError = "overlap with an existing semantic rewrite";
         break;

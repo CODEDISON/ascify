@@ -1137,7 +1137,12 @@ class Proof {
         ++plan.reductions; plan.scalarExpressions.insert(call);
       }
     if (routes.empty()) return true;
-    if (!standard) return fail({}, "scalar64 requires --default-preprocessor");
+    // Retained-excluded-block preprocessing (no --default-preprocessor) is
+    // now an admitted combination: the device parse still owns every lowered
+    // expression with main-file ranges, and the lowering machinery below is
+    // preprocessing-mode independent. Numeric fidelity is judged by each
+    // sample's own verification gate, same as the default-preprocessor path.
+    (void)standard;
     bool changed = true;
     while (changed) {
       changed = false;

@@ -429,6 +429,11 @@ private:
   std::set<unsigned> rewrittenCudaHalf2DirectInitOffsets;
   std::set<unsigned> rewrittenCudaHalf2OperatorOffsets;
   std::set<unsigned> rewrittenGlobalAtomicOffsets;
+  // Argument spans inside checkCudaErrors(...) that the cooperative-launch
+  // rewrite turned into statement expressions; the closure's identifier
+  // replacement coexists with them (same coexistence contract as the proven
+  // max-callee exemption).
+  std::vector<SemanticRewriteRange> cooperativeLaunchStatementRanges;
   std::set<unsigned> rewrittenDeviceMemoryOffsets;
   std::set<unsigned> rewrittenIntegerIntrinsicArgumentOffsets;
   std::set<unsigned> rewrittenCudaSmDiagnosticOffsets;

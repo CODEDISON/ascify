@@ -78,7 +78,7 @@ class barrier<thread_scope_block> {
     }
     return barrier_arrival_token(local_sense);
 #else
-    return barrier_arrival_token(0u);  // non-target parse environments only
+    return barrier_arrival_token();  // non-target parse environments only
 #endif
   }
 
