@@ -2842,118 +2842,157 @@ inline void streamCallbackTrampoline(void *data) {
 // stream subscription; producer threads only enqueue the stream once. The
 // worker subscribes with its own thread id and then drains callback reports
 // with a bounded poll, so sample main threads never block on reports.
-struct CallbackWorker {
-  detail::RuntimeLock lock;
+// One worker per device: the native report-subscription key of a thread is
+// created by that thread's first device bind and is scoped to exactly that
+// device (verified on target: subscribing a second device's stream from the
+// same thread fails with rtSubscribeReport 107012), so a single process-wide
+// worker cannot own stream subscriptions across devices.
+struct DeviceCallbackWorker {
   bool started = false;
   bool stopping = false;
   pthread_t thread = 0;
-  int32_t boundDevice = -1;
-  struct Pending {
-    aclrtStream stream;
-    int32_t device;
-  };
-  Pending pending[64] = {};
+  int32_t device = -1;
+  aclrtStream pending[64] = {};
   size_t pendingCount = 0;
-  aclrtStream subscribedByWorker[64] = {};
-  size_t subscribedByWorkerCount = 0;
+  aclrtStream subscribed[64] = {};
+  size_t subscribedCount = 0;
 };
-inline CallbackWorker &callbackWorker() {
-  static CallbackWorker worker;
-  return worker;
+struct CallbackWorkerTable {
+  detail::RuntimeLock lock;
+  DeviceCallbackWorker workers[16] = {};
+};
+inline CallbackWorkerTable &callbackWorkerTable() {
+  static CallbackWorkerTable table;
+  return table;
 }
-// Process-exit drain stop: sets the stop flag and joins the worker so no
+// Process-exit drain stop: flags every started worker and joins it so no
 // aclrtProcessReport call can race the RuntimeManager device reset and
-// aclFinalize teardown. Idempotent and safe when the worker never started.
-inline void stopCallbackWorker() {
-  pthread_t thread = 0;
+// aclFinalize teardown. Idempotent and safe when no worker ever started.
+inline void stopCallbackWorkers() {
+  pthread_t threads[16] = {};
+  size_t count = 0;
   {
-    detail::RuntimeLockGuard guard(callbackWorker().lock);
-    if (!callbackWorker().started || callbackWorker().stopping) { return; }
-    callbackWorker().stopping = true;
-    thread = callbackWorker().thread;
+    detail::RuntimeLockGuard guard(callbackWorkerTable().lock);
+    for (auto &worker : callbackWorkerTable().workers) {
+      if (!worker.started || worker.stopping) { continue; }
+      worker.stopping = true;
+      threads[count++] = worker.thread;
+    }
   }
-  if (thread != 0) { (void)pthread_join(thread, nullptr); }
+  for (size_t i = 0; i < count; ++i) {
+    (void)pthread_join(threads[i], nullptr);
+  }
 }
-inline void *callbackWorkerLoop(void *) {
+inline void *deviceCallbackWorkerLoop(void *arg) {
+  const uintptr_t slot = reinterpret_cast<uintptr_t>(arg);
   const uint64_t self = static_cast<uint64_t>(pthread_self());
+  int32_t device = -1;
+  {
+    detail::RuntimeLockGuard guard(callbackWorkerTable().lock);
+    device = callbackWorkerTable().workers[slot].device;
+  }
+  // The first device bind of this thread creates its report-subscription
+  // key, scoped to this device only; this worker never binds another device.
+  if (runtime_manager.bindDevice(device) != ACL_SUCCESS) {
+    detail::RuntimeLockGuard guard(callbackWorkerTable().lock);
+    callbackWorkerTable().workers[slot].stopping = true;
+    return nullptr;
+  }
   while (true) {
-    CallbackWorker::Pending todo[64];
+    aclrtStream todo[64];
     size_t count = 0;
     bool stopping = false;
     {
-      detail::RuntimeLockGuard guard(callbackWorker().lock);
-      stopping = callbackWorker().stopping;
-      for (size_t i = 0; i < callbackWorker().pendingCount && count < 64; ++i)
-        todo[count++] = callbackWorker().pending[i];
-      callbackWorker().pendingCount = 0;
+      detail::RuntimeLockGuard guard(callbackWorkerTable().lock);
+      DeviceCallbackWorker &worker = callbackWorkerTable().workers[slot];
+      stopping = worker.stopping;
+      for (size_t i = 0; i < worker.pendingCount && count < 64; ++i)
+        todo[count++] = worker.pending[i];
+      worker.pendingCount = 0;
     }
     if (stopping) break;
     for (size_t i = 0; i < count; ++i) {
       bool known = false;
-      for (size_t k = 0; k < callbackWorker().subscribedByWorkerCount; ++k)
-        known = known ||
-            callbackWorker().subscribedByWorker[k] == todo[i].stream;
-      if (known) continue;
-      if (callbackWorker().subscribedByWorkerCount == 64) break;
-      // Subscription and report drain both execute on this worker thread;
-      // bind the stream's device context first so the worker shares the
-      // same context that produced the stream.
-      if (callbackWorker().boundDevice != todo[i].device) {
-        if (runtime_manager.bindDevice(todo[i].device) != ACL_SUCCESS) {
-          continue;
-        }
-        callbackWorker().boundDevice = todo[i].device;
+      bool full = false;
+      {
+        detail::RuntimeLockGuard guard(callbackWorkerTable().lock);
+        const DeviceCallbackWorker &worker =
+            callbackWorkerTable().workers[slot];
+        for (size_t k = 0; k < worker.subscribedCount; ++k)
+          known = known || worker.subscribed[k] == todo[i];
+        full = worker.subscribedCount == 64;
       }
-      if (aclrtSubscribeReport(self, todo[i].stream) == 0) {
-        detail::RuntimeLockGuard guard(callbackWorker().lock);
-        callbackWorker().subscribedByWorker[
-            callbackWorker().subscribedByWorkerCount++] = todo[i].stream;
+      if (known || full) continue;
+      if (aclrtSubscribeReport(self, todo[i]) == 0) {
+        detail::RuntimeLockGuard guard(callbackWorkerTable().lock);
+        DeviceCallbackWorker &worker = callbackWorkerTable().workers[slot];
+        worker.subscribed[worker.subscribedCount++] = todo[i];
       }
     }
-    aclrtProcessReport(100);
+    // An idle report wait returns a timeout status and leaves it in this
+    // thread's last-error slot (verified on target: repeated aclrtProcessReport
+    // calls yield 507012 there). Consume it so the status snapshot taken
+    // inside the next report cannot observe drain noise; a report that
+    // genuinely fails keeps surfacing through the next callback snapshot.
+    if (aclrtProcessReport(100) != ACL_SUCCESS) {
+      (void)aclrtGetLastError(ACL_RT_THREAD_LEVEL);
+    }
   }
   return nullptr;
 }
 
-// The worker lock is a non-recursive spinlock: the enqueue below must be a
+// The table lock is a non-recursive spinlock: the enqueue below must be a
 // separately scoped critical section, and the bounded wait must run with the
-// lock released so the worker can drain the pending queue at all.
+// lock released so the device worker can drain the pending queue at all.
 inline aclError ensureStreamCallbackSubscription(aclrtStream stream,
                                                  int32_t device) {
+  if (device < 0 ||
+      static_cast<size_t>(device) >=
+          sizeof(callbackWorkerTable().workers) /
+              sizeof(callbackWorkerTable().workers[0])) {
+    return ACL_ERROR_RT_PARAM_INVALID;
+  }
   {
-    detail::RuntimeLockGuard guard(callbackWorker().lock);
-    if (!callbackWorker().started) {
-      callbackWorker().started = true;
-      if (pthread_create(&callbackWorker().thread, nullptr,
-                         callbackWorkerLoop, nullptr) != 0) {
-        callbackWorker().started = false;
+    detail::RuntimeLockGuard guard(callbackWorkerTable().lock);
+    DeviceCallbackWorker &worker =
+        callbackWorkerTable().workers[device];
+    if (!worker.started) {
+      worker.started = true;
+      worker.device = device;
+      if (pthread_create(&worker.thread, nullptr, deviceCallbackWorkerLoop,
+                         reinterpret_cast<void *>(
+                             static_cast<uintptr_t>(device))) != 0) {
+        worker.started = false;
+        worker.device = -1;
         return ACL_ERROR_BAD_ALLOC;
       }
       // atexit handlers run LIFO: the RuntimeManager cleanup callbacks were
       // registered by the earlier runtime calls, so this later registration
-      // stops and joins the worker before the device reset and aclFinalize.
-      if (::atexit(stopCallbackWorker) != 0) {
-        callbackWorker().stopping = true;
-        (void)pthread_join(callbackWorker().thread, nullptr);
-        callbackWorker().started = false;
-        callbackWorker().stopping = false;
-        callbackWorker().thread = 0;
+      // stops and joins every worker before the device reset and aclFinalize.
+      if (::atexit(stopCallbackWorkers) != 0) {
+        worker.stopping = true;
+        (void)pthread_join(worker.thread, nullptr);
+        worker.started = false;
+        worker.stopping = false;
+        worker.thread = 0;
+        worker.device = -1;
         return ACL_ERROR_BAD_ALLOC;
       }
     }
-    if (callbackWorker().pendingCount == 64) return ACL_ERROR_BAD_ALLOC;
-    callbackWorker().pending[callbackWorker().pendingCount++] = {stream,
-                                                                 device};
+    if (worker.pendingCount == 64) return ACL_ERROR_BAD_ALLOC;
+    worker.pending[worker.pendingCount++] = stream;
   }
   // The native launch checks that the stream is already registered, so wait
-  // bounded for the worker's subscription to complete before returning.
+  // bounded for the device worker's subscription to complete before
+  // returning.
   for (int spin = 0; spin < 2000000; ++spin) {
     bool ready = false;
     {
-      detail::RuntimeLockGuard guard(callbackWorker().lock);
-      for (size_t k = 0; k < callbackWorker().subscribedByWorkerCount; ++k)
-        ready = ready ||
-            callbackWorker().subscribedByWorker[k] == stream;
+      detail::RuntimeLockGuard guard(callbackWorkerTable().lock);
+      const DeviceCallbackWorker &worker =
+          callbackWorkerTable().workers[device];
+      for (size_t k = 0; k < worker.subscribedCount; ++k)
+        ready = ready || worker.subscribed[k] == stream;
     }
     if (ready) return ACL_SUCCESS;
     struct timespec pause = {0, 1000};
