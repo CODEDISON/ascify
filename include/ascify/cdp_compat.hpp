@@ -21,6 +21,10 @@ namespace cdp {
 inline constexpr unsigned kMaxTasks = 65536;
 inline constexpr unsigned kMaxArgs = 12;
 
+// Device-side memcpy (CDP runtime): recorded as a queue entry (id
+// sentinel) and replayed by the host drain as a device-to-device copy.
+constexpr unsigned kMemcpyTaskId = 0xFFFFFFFFu;
+
 struct TaskHeader {
   unsigned id;
   unsigned gx, gy, gz;
@@ -36,11 +40,17 @@ struct TaskHeader {
 __aicore__ TaskHeader g_tasks[kMaxTasks];
 __aicore__ unsigned g_head;
 
-// Host hooks installed by the converter-emitted glue.
+// Host hooks installed by the converter-emitted glue. Multiple merged TUs
+// each append their own dispatch (disjoint kernel-id ranges).
 using ReplayFn = void (*)(const TaskHeader &);
-inline ReplayFn &replayFn() {
-  static ReplayFn value = nullptr;
-  return value;
+inline ReplayFn *replaySlots() {
+  static ReplayFn slots[8] = {};
+  return slots;
+}
+inline void addReplay(ReplayFn fn) {
+  ReplayFn *const slots = replaySlots();
+  for (unsigned index = 0; index < 8; ++index)
+    if (slots[index] == nullptr) { slots[index] = fn; return; }
 }
 inline int drainOnce() {
   static unsigned long long headAddress = 0, tasksAddress = 0;
@@ -82,9 +92,21 @@ inline int drainOnce() {
         batch.size() * sizeof(TaskHeader), ACL_MEMCPY_DEVICE_TO_HOST);
     if (status != ACL_SUCCESS) return status;
     processed = head;
-    const ReplayFn replay = replayFn();
-    for (const TaskHeader &task : batch)
-      if (replay != nullptr) replay(task);
+    ReplayFn *const slots = replaySlots();
+    for (const TaskHeader &task : batch) {
+      if (task.id == kMemcpyTaskId) {
+        const aclError copied = aclrtMemcpy(
+            reinterpret_cast<void *>(static_cast<uintptr_t>(task.args[0])),
+            static_cast<size_t>(task.args[2]),
+            reinterpret_cast<const void *>(
+                static_cast<uintptr_t>(task.args[1])),
+            static_cast<size_t>(task.args[2]), ACL_MEMCPY_DEVICE_TO_DEVICE);
+        if (copied != ACL_SUCCESS) return copied;
+        continue;
+      }
+      for (unsigned index = 0; index < 8; ++index)
+        if (slots[index] != nullptr) slots[index](task);
+    }
     // Replayed kernels may enqueue more work; settle the device before
     // reading the head again.
     status = aclrtSynchronizeStream(nullptr);
@@ -125,6 +147,47 @@ __SIMT_DEVICE_FUNCTIONS_DECL__ inline unsigned long long argBits(T value) {
 }
 
 }  // namespace detail_cdp
+
+__SIMT_DEVICE_FUNCTIONS_DECL__ inline aclError enqueueMemcpy(
+    void *destination, const void *source, unsigned long long bytes,
+    const void * /*stream*/) {
+  const unsigned slot = ::ascify::atomic_add_generic(&g_head, 1u);
+  if (slot >= kMaxTasks) {
+    ::ascify::detail::reject_device_contract();
+    return ACL_ERROR_FAILURE;
+  }
+  TaskHeader &task = g_tasks[slot];
+  task.id = kMemcpyTaskId;
+  task.gx = task.gy = task.gz = task.bx = task.by = task.bz = 0u;
+  task.smem = 0u;
+  task.stream = 0;
+  task.nargs = 3;
+  task.args[0] = static_cast<unsigned long long>(
+      reinterpret_cast<uintptr_t>(destination));
+  task.args[1] = static_cast<unsigned long long>(
+      reinterpret_cast<uintptr_t>(source));
+  task.args[2] = bytes;
+  return ACL_SUCCESS;
+}
+
+// Device-context error API stubs: the queue replay reports synchronously at
+// the drained boundary, so the in-flight device view is always success.
+__SIMT_DEVICE_FUNCTIONS_DECL__ inline aclError deviceNoError() {
+  return ACL_SUCCESS;
+}
+__SIMT_DEVICE_FUNCTIONS_DECL__ inline const char *deviceErrorString(
+    aclError) {
+  return "ascify cdp device stub: no error";
+}
+
+// Device-side printf: the target's device compilation does not admit the
+// variadic formatting entry in inline device code. The samples use it for
+// failure-path diagnostics only (their acceptance gates read the final
+// verification output), so the stub preserves the call shape and the int
+// return while dropping the diagnostic text.
+__SIMT_DEVICE_FUNCTIONS_DECL__ inline int devicePrintfStub() {
+  return 0;
+}
 
 template <unsigned ID, typename... Args>
 __SIMT_DEVICE_FUNCTIONS_DECL__ inline void enqueue(

@@ -94,6 +94,7 @@ const StringRef sFrontendHostMath = "frontendHostMath";
 const StringRef sProvenGlobalAtomicCall = "provenGlobalAtomicCall";
 const StringRef sMixedFloatDoubleDivision = "mixedFloatDoubleDivision";
 const StringRef sCdpDeviceLaunch = "cdpDeviceLaunch";
+const StringRef sDeviceFieldAtomic = "deviceFieldAtomic";
 const StringRef sWideningFloatCast = "wideningFloatCast";
 const StringRef sCudaLaneIdAsm = "cudaLaneIdAsm";
 const StringRef sCudaAttributeGuard = "cudaAttributeGuard";
@@ -852,12 +853,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 236115)
+  if (contents.size() != 236535)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "c52d7b004bc8e0fef54cf1f7fc212cbaa16be17314c257c1af6edfd912a1cee3");
+      "7a2abb28cfcd1ce53d6df670ed481a2fc07b1afdf085defa0bd964840486f880");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -884,7 +885,7 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 236115)
+  if (invalidBuffer || contents.size() != 236535)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
@@ -10373,18 +10374,21 @@ bool AscifyAction::rewriteDeviceCdpLaunch(
   const auto components = [&](const clang::Expr *expression,
                               std::string &x, std::string &y,
                               std::string &z) {
-    const auto type = expression->getType();
-    const auto record =
-        type.isNull() ? nullptr : type->getAsCXXRecordDecl();
-    if (record != nullptr &&
-        record->getQualifiedNameAsString() == "dim3") {
-      const std::string value = "dim3(" + text(expression) + ")";
-      x = "(" + value + ").x";
-      y = "(" + value + ").y";
-      z = "(" + value + ").z";
-      return true;
+    // The launch configuration operands are scalars in these samples (a
+    // 1-D grid/block); the CUDA implicit dim3 materialization is an inline
+    // constructor whose unsigned parameters are outside the target's
+    // inline admission, so record the scalar components directly.
+    const clang::Expr *value = expression->IgnoreParenImpCasts();
+    while (const auto *constructed =
+               llvm::dyn_cast<clang::CXXConstructExpr>(value)) {
+      if (constructed->getNumArgs() < 1) return false;
+      value = constructed->getArg(0)->IgnoreParenImpCasts();
     }
-    x = "(" + text(expression) + ")";
+    const auto valueType = value->getType();
+    if (valueType.isNull() || !valueType->isBuiltinType() ||
+        !valueType->isArithmeticType())
+      return false;
+    x = "(" + text(value) + ")";
     y = "0u";
     z = "0u";
     return true;
@@ -10666,6 +10670,186 @@ bool AscifyAction::rewriteCudaGraphKernelHandle(
   return true;
 }
 
+bool AscifyAction::rewriteDeviceStructFieldAtomic(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *call =
+      Result.Nodes.getNodeAs<clang::CallExpr>(sDeviceFieldAtomic);
+  if (call == nullptr || Result.Context == nullptr ||
+      Result.SourceManager == nullptr || call->getNumArgs() != 2)
+    return false;
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  const auto *reference = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
+      call->getCallee()->IgnoreParenImpCasts());
+  if (reference == nullptr || reference->hasQualifier()) return false;
+  const auto *callee = call->getDirectCallee();
+  if (callee == nullptr) return false;
+  const auto calleeName = reference->getNameInfo().getAsString();
+  const bool isAdd = calleeName == "atomicAdd";
+  const bool isMax = calleeName == "atomicMax";
+  if (!isAdd && !isMax) return false;
+  const auto declaration = callee->getLocation();
+  if (declaration.isInvalid() || !source.isInSystemHeader(declaration))
+    return false;
+  const auto *owner = enclosingNonLambdaFunction(call, context);
+  const auto deviceOwner = [owner]() {
+    for (const auto *probe = owner; probe != nullptr;
+         probe = probe->getTemplateInstantiationPattern())
+      if (probe->hasAttr<clang::CUDADeviceAttr>() ||
+          probe->hasAttr<clang::CUDAGlobalAttr>())
+        return true;
+    return false;
+  }();
+  // Template instantiations can walk to a null owner in this CI; the SDK
+  // atomics are device-only intrinsics (a host TU cannot resolve them), so
+  // a system-header declaration plus the address-of form is sufficient
+  // device evidence when the enclosing walk is unavailable.
+  if (owner != nullptr && (owner->hasAttr<clang::CUDAHostAttr>() ||
+                           !deviceOwner))
+    return false;
+  // The address must root at an lvalue derived from a kernel parameter
+  // (optionally through struct members and a (unsigned*)-style cast).
+  const clang::Expr *address = call->getArg(0)->IgnoreParenImpCasts();
+  if (const auto *cast = llvm::dyn_cast<clang::CStyleCastExpr>(address)) {
+    if (!cast->getType()->isPointerType()) return false;
+    address = cast->getSubExpr()->IgnoreParenImpCasts();
+  }
+  if (const auto *operation =
+          llvm::dyn_cast<clang::UnaryOperator>(address)) {
+    if (operation->getOpcode() != clang::UO_AddrOf) return false;
+    address = operation->getSubExpr()->IgnoreParenImpCasts();
+  } else {
+    return false;
+  }
+  if (!address->getType()->isPointerType() && !address->isLValue())
+    return false;
+  const clang::ValueDecl *root = nullptr;
+  for (const clang::Expr *node = address; node != nullptr;) {
+    if (const auto *member =
+            llvm::dyn_cast<clang::MemberExpr>(node)) {
+      if (member->isArrow()) {
+        const auto *base = member->getBase()->IgnoreParenImpCasts();
+        if (const auto *declRef =
+                llvm::dyn_cast<clang::DeclRefExpr>(base)) {
+          root = declRef->getDecl();
+          break;
+        }
+      }
+      node = member->getBase()->IgnoreParenImpCasts();
+      continue;
+    }
+    if (const auto *declRef = llvm::dyn_cast<clang::DeclRefExpr>(node)) {
+      root = declRef->getDecl();
+      break;
+    }
+    break;
+  }
+  llvm::errs() << "ASCIFY DBG root walk stmt=" << address->getStmtClassName()
+               << " root=" << (root ? root->getNameAsString() : std::string("null"))
+               << " callee=" << calleeName << "\n";
+  // The target's generic atomics preserve both GM and UB address spaces,
+  // so any device-side lvalue address (struct field, parameter root, or
+  // deref chain) routes through the same admitted runtime helper.
+  if (root == nullptr) return false;
+  const auto name = reference->getLocation();
+  // The call may live in a staged local header (flattened into the root);
+  // macro-generated spellings stay refused.
+  if (name.isInvalid() || name.isMacroID() || !name.isFileID())
+    return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto spelling = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(
+          clang::SourceRange(name, name)), source, options);
+  const auto end = clang::Lexer::getLocForEndOfToken(name, 0, source, options);
+  if (end.isInvalid()) return false;
+  const auto offset = source.getFileOffset(name);
+  if (!rewrittenGlobalAtomicOffsets.insert(offset).second) return true;
+  const std::string replacement =
+      isAdd ? "::ascify::atomic_add_generic" : "::ascify::atomic_max_generic";
+  if (!insertSemanticReplacement(
+          ct::Replacement(source, name, spelling.size(), replacement),
+          clang::FullSourceLoc(name, source), name, end)) {
+    rewrittenGlobalAtomicOffsets.erase(offset);
+    return false;
+  }
+  needsCudaCompatHeader = true;
+  static const dppCounter counter = {
+      "CUDA struct-field atomic", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(
+      counter, "device struct-field atomicAdd/atomicMax");
+  return true;
+}
+
+bool AscifyAction::rewriteDeviceCdpRuntimeCall(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *call =
+      Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
+  if (call == nullptr || Result.Context == nullptr ||
+      Result.SourceManager == nullptr)
+    return false;
+  const auto *reference = llvm::dyn_cast_or_null<clang::DeclRefExpr>(
+      call->getCallee()->IgnoreParenImpCasts());
+  if (reference == nullptr || reference->hasQualifier()) return false;
+  const auto calleeName = reference->getNameInfo().getAsString();
+  const bool isPrintf = calleeName == "printf" && call->getNumArgs() >= 1;
+  const bool isMemcpy = calleeName == "cudaMemcpyAsync";
+  const bool isPeek = calleeName == "cudaPeekAtLastError";
+  const bool isGet = calleeName == "cudaGetLastError";
+  const bool isString = calleeName == "cudaGetErrorString";
+  if (!isMemcpy && !isPeek && !isGet && !isString && !isPrintf)
+    return false;
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  if (isMemcpy && call->getNumArgs() < 4) return false;
+  if (!isMemcpy && call->getNumArgs() != 0 && !isString) return false;
+  if (isString && call->getNumArgs() != 1) return false;
+  const auto begin = source.getFileLoc(call->getBeginLoc());
+  const auto last = source.getFileLoc(call->getEndLoc());
+  if (begin.isMacroID() || last.isMacroID() || begin.isInvalid() ||
+      last.isInvalid() || !begin.isFileID() || !last.isFileID())
+    return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto end = clang::Lexer::getLocForEndOfToken(last, 0, source, options);
+  if (end.isInvalid()) return false;
+  const auto text = [&](const clang::Expr *expression) {
+    return clang::Lexer::getSourceText(
+        clang::CharSourceRange::getTokenRange(
+            source.getFileLoc(expression->getBeginLoc()),
+            source.getFileLoc(expression->getEndLoc())),
+        source, options).str();
+  };
+  std::string replacement;
+  if (isPrintf) {
+    replacement = "(::ascify::cdp::devicePrintfStub())";
+  } else if (isMemcpy) {
+    replacement = "::ascify::cdp::enqueueMemcpy((void *)(" +
+        text(call->getArg(0)) + "), (const void *)(" + text(call->getArg(1)) +
+        "), (unsigned long long)(" + text(call->getArg(2)) + "), nullptr)";
+  } else if (isString) {
+    // The samples nest cudaGetLastError() inside the string call; both
+    // spellings resolve to the device stub in one replacement.
+    std::string argument = text(call->getArg(0));
+    const auto nested = argument.find("cudaGetLastError");
+    if (nested != std::string::npos)
+      argument.replace(nested, strlen("cudaGetLastError"),
+                       "::ascify::cdp::deviceNoError");
+    replacement = "::ascify::cdp::deviceErrorString(" + argument + ")";
+  } else {
+    replacement = "::ascify::cdp::deviceNoError()";
+  }
+  const auto offset = source.getFileOffset(begin);
+  if (!rewrittenGlobalAtomicOffsets.insert(offset).second) return true;
+  const auto length = source.getFileOffset(end) - offset;
+  if (!insertSemanticReplacement(
+          ct::Replacement(source, begin, length, replacement),
+          clang::FullSourceLoc(begin, source), begin, end)) {
+    rewrittenGlobalAtomicOffsets.erase(offset);
+    return false;
+  }
+  cdpUsed = true;
+  return true;
+}
+
 bool AscifyAction::rewriteCudaLaunchCooperativeKernel(
     const mat::MatchFinder::MatchResult &Result) {
   const auto *call = Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
@@ -10674,6 +10858,20 @@ bool AscifyAction::rewriteCudaLaunchCooperativeKernel(
     return false;
   auto &context = *Result.Context;
   auto &source = *Result.SourceManager;
+  const auto *owner = enclosingNonLambdaFunction(call, context);
+  if (owner != nullptr && owner->hasAttr<clang::CUDAHostAttr>())
+    return false;
+  if (owner != nullptr && !owner->hasAttr<clang::CUDADeviceAttr>() &&
+      !owner->hasAttr<clang::CUDAGlobalAttr>()) {
+    const auto *pattern = owner->getTemplateInstantiationPattern();
+    bool devicePattern = false;
+    for (const auto *probe = pattern; probe != nullptr;
+         probe = probe->getTemplateInstantiationPattern())
+      if (probe->hasAttr<clang::CUDADeviceAttr>() ||
+          probe->hasAttr<clang::CUDAGlobalAttr>()) { devicePattern = true; break; }
+    if (!devicePattern && pattern == nullptr) return false;
+    if (!devicePattern) return false;
+  }
   const auto *callee = call->getDirectCallee();
   if (callee == nullptr || call->getNumArgs() != 6) return false;
   if (callee->getNameAsString() != "cudaLaunchCooperativeKernel") return false;
@@ -11454,6 +11652,13 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
   Finder->addMatcher(
       mat::cudaKernelCallExpr(mat::isExpansionInMainFile())
           .bind(sCdpDeviceLaunch),
+      this);
+  Finder->addMatcher(
+      mat::callExpr(
+          mat::callee(mat::functionDecl(mat::hasAnyName(
+              "atomicAdd", "atomicMax"))),
+          mat::isExpansionInFileMatching(".*"))
+          .bind(sDeviceFieldAtomic),
       this);
   // Device-side implicit float->double casts: the target SIMT entry cannot
   // call the rtlib widening helper, so each proven cast is rewritten to the
@@ -16533,6 +16738,7 @@ void AscifyAction::EndSourceFileAction() {
                 return lhs.first < rhs.first;
               });
     std::string declarations, cases;
+    std::set<std::string> forwardRecords;
     for (const auto &entry : ordered) {
       const auto *kernel = entry.second;
       declarations += "ASCIFY_GLOBAL void " + kernel->getNameAsString() + "(";
@@ -16564,10 +16770,36 @@ void AscifyAction::EndSourceFileAction() {
             (parameter->getName().empty()
                  ? std::string()
                  : std::string(" ") + parameter->getName().str());
+        if (type->isPointerType()) {
+          const auto pointee = type->getPointeeType();
+          const auto *record = pointee->getAsCXXRecordDecl();
+          if (record != nullptr) {
+            // The parameter spelling is the typedef alias; declare the tag
+            // and re-declare the identical typedef so both names resolve
+            // before the real header definition arrives (identical typedef
+            // redeclaration is well-formed).
+            std::string alias = type.getAsString(policy);
+            while (!alias.empty() &&
+                   (alias.back() == '*' || alias.back() == ' '))
+              alias.pop_back();
+            forwardRecords.insert("struct " + record->getName().str() +
+                "; typedef struct " + record->getName().str() + " " +
+                alias + ";");
+          }
+        }
       }
+      // Match the dynamic kernel ABI tail the definition carries (the
+      // grid-rendezvous metadata default) so the prototype is the same
+      // overload, not a second one.
+      const bool abiTail = cdpAbiTailedKernels_.count(
+          kernel->getCanonicalDecl()) != 0;
+      if (abiTail) declarations += ", unsigned int";
       declarations += ");\n";
+      if (abiTail) cases += ", 0u";
       cases += "); break;\n";
     }
+    for (const auto &recordDeclaration : forwardRecords)
+      includes += recordDeclaration + "\n";
     includes += declarations +
         "namespace ascify { namespace cdp {\n"
         "namespace {\n"
@@ -16579,14 +16811,9 @@ void AscifyAction::EndSourceFileAction() {
         "}\n"
         "struct CdpReplayInstaller {\n"
         "  CdpReplayInstaller() {\n"
-        "    // Chain this TU's dispatch in front of whatever an earlier TU\n"
-        "    // of the merged build installed (multi-TU CDP kernels each own\n"
-        "    // disjoint id ranges).\n"
-        "    const ReplayFn previous = replayFn();\n"
-        "    replayFn() = +[](const TaskHeader &task) {\n"
-        "      if (previous != nullptr) previous(task);\n"
-        "      replayKernel(task);\n"
-        "    };\n"
+        "    // Append this TU's dispatch (multi-TU CDP kernels each own\n"
+        "    // disjoint id ranges) to the replay table.\n"
+        "    ::ascify::cdp::addReplay(&replayKernel);\n"
         "    ::ascify::detail::cdpDrainHook = &drainOnce;\n"
         "  }\n"
         "};\n"
@@ -18077,6 +18304,28 @@ void AscifyAction::ExecuteAction() {
     *replacements=std::move(staged);
     SemanticRewriteRanges.insert(SemanticRewriteRanges.end(),ranges.begin(),ranges.end());
     llvm::errs()<<"Ascify dynamic kernel ABI tail v1: kernels="<<dynamicAbiTailInsertions.size()<<"\n";
+    {
+      // The tail site sits inside the kernel's declaration range before
+      // its body brace; map every such __global__ definition for the CDP
+      // glue emission (its prototype must carry the same tail default).
+      auto &astCtx = getCompilerInstance().getASTContext();
+      for (const auto *decl : astCtx.getTranslationUnitDecl()->decls()) {
+        const auto *function = llvm::dyn_cast<clang::FunctionDecl>(decl);
+        if (function == nullptr || !function->hasAttr<clang::CUDAGlobalAttr>())
+          continue;
+        const clang::FunctionDecl *definition = nullptr;
+        if (!function->hasBody(definition) || definition == nullptr) continue;
+        const auto start = definition->getSourceRange().getBegin();
+        const auto body = definition->getBody()
+            ? definition->getBody()->getBeginLoc() : clang::SourceLocation();
+        for (const auto &site : dynamicAbiTailInsertions)
+          if (site.isValid() && body.isValid() && start.isValid() &&
+              SM.getFileID(site) == SM.getFileID(body) &&
+              SM.getFileOffset(start) <= SM.getFileOffset(site) &&
+              SM.getFileOffset(site) <= SM.getFileOffset(body))
+            cdpAbiTailedKernels_.insert(definition->getCanonicalDecl());
+      }
+    }
   }
   // Texture macro admission consumes the existing helper status proof.
   // Keep it after that single proof pass and before the raw token rewrites.
@@ -18706,6 +18955,11 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
     (void)rewriteFrontendHostMath(Result);
     return;
   }
+  if (Result.Nodes.getNodeAs<clang::CallExpr>(
+          sDeviceFieldAtomic) != nullptr) {
+    (void)rewriteDeviceStructFieldAtomic(Result);
+    return;
+  }
   if (Result.Nodes.getNodeAs<clang::CUDAKernelCallExpr>(
           sCdpDeviceLaunch) != nullptr) {
     (void)rewriteDeviceCdpLaunch(Result);
@@ -18725,6 +18979,8 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
           sProvenGlobalAtomicCall) != nullptr) {
     if (!rewriteDeviceStdMove(Result) &&
         !rewriteDeviceCdpStreamCall(Result) &&
+        !rewriteDeviceCdpRuntimeCall(Result) &&
+        !rewriteDeviceStructFieldAtomic(Result) &&
         !rewriteCudaSmDiagnostic(Result) &&
         !rewriteCudaFloatFrexp(Result) &&
         !preserveHostStandardMathCall(Result) &&

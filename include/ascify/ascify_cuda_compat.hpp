@@ -99,6 +99,20 @@ extern int ascify_test_register_exit_cleanup(void (*callback)());
 #include <ascify/scalar64_compat.hpp>
 #include <ascify/vmm_compat.hpp>
 
+// CDP pending-launch limit: the host-replay queue keeps every enqueued
+// launch; the limit is advisory on this porting layer and always succeeds.
+enum cudaLimit {
+  cudaLimitStackSize = 0,
+  cudaLimitPrintfFifoSize = 1,
+  cudaLimitMallocHeapSize = 2,
+  cudaLimitDevRuntimeSyncDepth = 3,
+  cudaLimitDevRuntimePendingLaunchCount = 4,
+};
+
+inline aclError cudaDeviceSetLimit(long long, size_t) {
+  return ACL_SUCCESS;
+}
+
 namespace ascify {
 
 // Internal host target for the two exact CUDA int/unsigned-int min orders.
@@ -2058,6 +2072,7 @@ namespace detail {
 // Installed by the converter-emitted CDP replay glue (cdp_compat.hpp).
 inline int (*cdpDrainHook)() = nullptr;
 }  // namespace detail
+
 
 inline aclError cudaDeviceSynchronize() {
   const aclError ready = cudaRuntimeEnsureReady();

@@ -158,6 +158,7 @@ const std::map<llvm::StringRef, dppCounter> CUDA_RUNTIME_FUNCTION_MAP = [] {
   // signature at the call site and adapt it in the compatibility shim.
   m["cudaDeviceGetAttribute"]                                  = {"ascify::cudaDeviceGetAttribute",                         CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
   m["cudaDeviceSynchronize"]                                   = {"ascify::cudaDeviceSynchronize",                          CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
+  m["cudaDeviceSetLimit"] = {"cudaDeviceSetLimit", CONV_DEVICE_FUNC, API_RUNTIME, 0};
   m["cudaDeviceReset"]                                         = {"ascify::cudaDeviceReset",                                CONV_DEVICE, API_RUNTIME, SEC::DEVICE_MGMT};
   // beta3 has no per-kernel attribute API. The compatibility layer exposes the
   // subset needed by OneFlow's dynamic-UB selection code.

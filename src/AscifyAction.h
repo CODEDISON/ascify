@@ -445,6 +445,7 @@ private:
   // CDP emulation: device-side <<<>>> launches are queued for host replay.
   std::map<const clang::FunctionDecl *, unsigned> cdpKernelIds_;
   bool cdpUsed = false;
+  std::set<const clang::FunctionDecl *> cdpAbiTailedKernels_;
   std::set<unsigned> rewrittenDeviceMemoryOffsets;
   std::set<unsigned> rewrittenIntegerIntrinsicArgumentOffsets;
   std::set<unsigned> rewrittenCudaSmDiagnosticOffsets;
@@ -541,6 +542,8 @@ public:
   bool rewriteProvenGenericAtomicMaxCall(const clang::ast_matchers::MatchFinder::MatchResult &Result);
   bool rewriteDeviceCdpLaunch(const mat::MatchFinder::MatchResult &Result);
   bool rewriteDeviceCdpStreamCall(const mat::MatchFinder::MatchResult &Result);
+  bool rewriteDeviceStructFieldAtomic(const mat::MatchFinder::MatchResult &Result);
+  bool rewriteDeviceCdpRuntimeCall(const mat::MatchFinder::MatchResult &Result);
   bool rewriteDeviceMixedFloatDoubleDivision(
       const mat::MatchFinder::MatchResult &Result);
   bool rewriteDeviceStdMove(const mat::MatchFinder::MatchResult &Result);
