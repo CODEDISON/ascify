@@ -2623,6 +2623,11 @@ namespace detail {
 struct StreamRecordSite {
   aclrtStream stream = nullptr;
   int32_t device = -1;
+  // The context the stream was created under. Devices carry more than one
+  // context here (the primary context of aclrtSetDevice plus the explicit
+  // context RuntimeManager creates on first bind), and rtStreamDestroy
+  // checks ownership against the exact context, not the device.
+  aclrtContext context = nullptr;
 };
 struct StreamRecordSiteTable {
   RuntimeLock lock;
@@ -2634,24 +2639,31 @@ inline StreamRecordSiteTable &streamRecordSiteTable() {
 }
 inline void rememberStreamDevice(aclrtStream stream, int32_t device) {
   if (stream == nullptr) return;
+  aclrtContext context = nullptr;
+  (void)aclrtGetCurrentContext(&context);
   RuntimeLockGuard guard(streamRecordSiteTable().lock);
   for (auto &record : streamRecordSiteTable().records) {
-    if (record.stream == stream) { record.device = device; return; }
+    if (record.stream == stream) {
+      record.device = device;
+      record.context = context;
+      return;
+    }
   }
   for (auto &record : streamRecordSiteTable().records) {
     if (record.stream == nullptr) {
       record.stream = stream;
       record.device = device;
+      record.context = context;
       return;
     }
   }
 }
-inline int32_t streamOwnerDevice(aclrtStream stream) {
+inline StreamRecordSite streamRecordSite(aclrtStream stream) {
   RuntimeLockGuard guard(streamRecordSiteTable().lock);
   for (const auto &record : streamRecordSiteTable().records) {
-    if (record.stream == stream) { return record.device; }
+    if (record.stream == stream) { return record; }
   }
-  return -1;
+  return {};
 }
 inline void forgetStreamDevice(aclrtStream stream) {
   if (stream == nullptr) return;
@@ -2764,21 +2776,35 @@ inline aclError cudaStreamCreateWithPriority(aclrtStream* stream,
 inline aclError cudaStreamDestroy(aclrtStream stream) {
   const aclError ready = cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
-  // A stream belonging to another device's context is destroyed under its
-  // owner's binding (context save/switch/restore), matching CUDA's
-  // context-agnostic cudaStreamDestroy; same-device destroys are unchanged.
-  const int32_t owner = detail::streamOwnerDevice(stream);
-  if (owner >= 0) {
+  // CUDA's cudaStreamDestroy is context-agnostic; rtStreamDestroy rejects a
+  // stream that does not belong to the thread's current context (EE1010).
+  // Destroy under the exact creating context when it is known (save /
+  // switch / restore); fall back to the owner device's binding when only
+  // that is known. Same-context destroys take the direct path unchanged.
+  const detail::StreamRecordSite site = detail::streamRecordSite(stream);
+  aclrtContext current_context = nullptr;
+  const bool know_context =
+      aclrtGetCurrentContext(&current_context) == ACL_SUCCESS;
+  if (site.context != nullptr &&
+      (!know_context || current_context != site.context)) {
+    (void)aclrtSetCurrentContext(site.context);
+    const aclError destroyed = aclrtDestroyStream(stream);
+    if (know_context && current_context != nullptr) {
+      (void)aclrtSetCurrentContext(current_context);
+    }
+    if (destroyed == ACL_SUCCESS) { detail::forgetStreamDevice(stream); }
+    return destroyed;
+  }
+  if (site.device >= 0) {
     int32_t current = -1;
     if (aclrtGetDevice(&current) == ACL_SUCCESS && current >= 0 &&
-        current != owner) {
+        current != site.device) {
       aclrtContext saved = nullptr;
-      const bool have_saved =
-          aclrtGetCurrentContext(&saved) == ACL_SUCCESS && saved != nullptr;
-      const aclError switched = aclrtSetDevice(owner);
+      const bool have_saved = know_context && current_context != nullptr;
+      const aclError switched = aclrtSetDevice(site.device);
       const aclError destroyed = aclrtDestroyStream(stream);
       if (have_saved) {
-        (void)aclrtSetCurrentContext(saved);
+        (void)aclrtSetCurrentContext(current_context);
       } else {
         (void)aclrtSetDevice(current);
       }
