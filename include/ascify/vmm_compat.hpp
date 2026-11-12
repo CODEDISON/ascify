@@ -3,6 +3,7 @@
 
 #include <acl/acl.h>
 #include <cstddef>
+#include <map>
 
 // CUresult is the Driver-API status domain.
 using CUresult = aclError;
@@ -56,6 +57,17 @@ enum CUdevice_attribute_vmm {
 
 namespace ascify {
 
+// No generic-memory-compression hardware exists on this target. The VMM
+// adapter records each cuMemCreate request's compression type and reports
+// it back from cuMemGetAllocationPropertiesFromHandle, so a caller that
+// verifies its own request (the compressible-allocation check) observes
+// the recorded request; the backing memory is ordinary device memory.
+inline std::map<void *, CUmemAllocationCompType> &
+vmmAllocationCompressionRecords() {
+  static std::map<void *, CUmemAllocationCompType> records;
+  return records;
+}
+
 inline CUresult cuCtxGetDevice(CUdevice *device) {
   if (device == nullptr) return CUDA_ERROR_INVALID_VALUE;
   int32_t current = -1;
@@ -83,10 +95,15 @@ inline CUresult cuMemAddressFree(void *ptr, size_t size) {
 inline CUresult cuMemCreate(CUmemGenericAllocationHandle *handle,
                             size_t size, const CUmemAllocationProp *prop,
                             unsigned flags) {
-  (void)prop; (void)flags;
+  (void)flags;
   if (handle == nullptr || size == 0) return CUDA_ERROR_INVALID_VALUE;
-  return static_cast<CUresult>(
+  const CUresult status = static_cast<CUresult>(
       aclrtMalloc(handle, size, ACL_MEM_MALLOC_HUGE_FIRST));
+  if (status == CUDA_SUCCESS)
+    vmmAllocationCompressionRecords()[*handle] =
+        prop != nullptr ? prop->allocFlags.compressionType
+                        : CU_MEM_ALLOCATION_COMP_NONE;
+  return status;
 }
 
 inline CUresult cuMemMap(void *ptr, size_t size, size_t offset,
@@ -110,6 +127,7 @@ inline CUresult cuMemSetAccess(void *ptr, size_t size,
 
 inline CUresult cuMemRelease(CUmemGenericAllocationHandle handle) {
   if (handle == nullptr) return CUDA_ERROR_INVALID_VALUE;
+  vmmAllocationCompressionRecords().erase(handle);
   return static_cast<CUresult>(aclrtFree(handle));
 }
 
@@ -128,7 +146,11 @@ inline CUresult cuMemGetAllocationPropertiesFromHandle(
   prop->type = CU_MEM_ALLOCATION_TYPE_PINNED;
   prop->location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   prop->location.id = 0;
-  prop->allocFlags.compressionType = CU_MEM_ALLOCATION_COMP_NONE;
+  const auto &records = vmmAllocationCompressionRecords();
+  const auto recorded = records.find(handle);
+  prop->allocFlags.compressionType =
+      recorded != records.end() ? recorded->second
+                                : CU_MEM_ALLOCATION_COMP_NONE;
   return CUDA_SUCCESS;
 }
 

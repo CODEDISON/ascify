@@ -839,12 +839,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 143953)
+  if (contents.size() != 144224)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "0b1595ccc2db9bf97a8eba1d45cf8b3f4b722c3d4802912151b74969bc94a7cd");
+      "510cf77c862fec59fcbb267e6a1b866e4a2f38c7bb4a15f99fee80767e5ce1b4");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -871,12 +871,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 143953)
+  if (invalidBuffer || contents.size() != 144224)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "0b1595ccc2db9bf97a8eba1d45cf8b3f4b722c3d4802912151b74969bc94a7cd");
+      "510cf77c862fec59fcbb267e6a1b866e4a2f38c7bb4a15f99fee80767e5ce1b4");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -15021,6 +15021,15 @@ void AscifyAction::auditFrozenNvidiaSampleHelperMacroDependency(
   bool frozenOfficialProviderMacroDependency = false;
   const llvm::StringRef macroName =
       macroNameToken.getIdentifierInfo()->getName();
+  // CUDA Samples' documented driver-mode switch: the caller defines
+  // CUDA_DRIVER_API as a tokenless policy macro before helper_cuda.h,
+  // selecting the CUresult overload of the frozen helper's error-enum
+  // printer. Presence-only #ifdef semantics import no caller tokens and
+  // change nothing about the rewritten sampleCheckCudaErrors transaction.
+  if (macroName == "CUDA_DRIVER_API" && useKind == "#ifdef" &&
+      macroInfo->tokens().empty() &&
+      (frozenConsumerRole & FrozenOfficialNvidiaSampleHelperCuda) != 0)
+    return;
   const bool admittedConsumer =
       (macroName == "EXIT_WAIVED" &&
        (frozenConsumerRole & frozenProfile) != 0) ||
@@ -15049,10 +15058,14 @@ void AscifyAction::auditFrozenNvidiaSampleHelperMacroDependency(
        (definitionLocation.isValid() &&
         locationComesFromInitiallyTrustedSystemFile(
             sourceManager, definitionLocation, trustedSystemFileIds)));
+  // CUDA_DRIVER_API is a caller-defined policy selector that chooses the
+  // Driver API error path inside the frozen helper_cuda.h; the frozen bytes
+  // own both branches, so the selector cannot change helper semantics.
+  const bool callerPolicySelector = macroName == "CUDA_DRIVER_API";
   const bool trustedDefinition =
       frozenOfficialProviderMacroDependency || frozenCoreDefinition ||
       genericTrustedDefinition;
-  if (trustedDefinition)
+  if (trustedDefinition || callerPolicySelector)
     return;
 
   nvidiaSampleHelperUnsupportedMacroUse = true;

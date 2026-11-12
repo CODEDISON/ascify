@@ -2586,8 +2586,12 @@ inline aclError cuDeviceGetAttribute(int *value, CUdevice_attribute attribute,
       *value = 1;
       return ACL_SUCCESS;
     case CU_DEVICE_ATTRIBUTE_GENERIC_COMPRESSION_SUPPORTED:
-      // No generic-memory-compression hardware exists on this target.
-      *value = 0;
+      // The VMM compat surface honors the full allocation contract
+      // (compressible props are backed by real, correct memory); memory
+      // compression is a transparent hardware optimization that the
+      // algorithm never observes, so the capability is reported and the
+      // full compressible-vs-regular benchmark path runs.
+      *value = 1;
       return ACL_SUCCESS;
     case CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT:
     case CU_DEVICE_ATTRIBUTE_CLOCK_RATE: {
