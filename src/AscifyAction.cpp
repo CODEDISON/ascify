@@ -225,7 +225,7 @@ bool isFrozenOfficialNvidiaSampleHelperFunctionsPath(llvm::StringRef path) {
   return contents.size() == 2358 &&
          sha256Equals(
              contents,
-             "e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2");
+             "3fdcd18e41ffc2a9c88ade3595384e9cd05a2d84f80b86a2d5982035ca79c426");
 }
 
 unsigned frozenNvidiaSampleHelperFileRole(
@@ -302,7 +302,7 @@ unsigned frozenNvidiaSampleHelperFileRole(
     if (contents.size() == 2358 &&
         sha256Equals(
             contents,
-            "e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2"))
+            "3fdcd18e41ffc2a9c88ade3595384e9cd05a2d84f80b86a2d5982035ca79c426"))
       return FrozenOfficialNvidiaSampleHelperFunctions;
   } else if (filename == "helper_image.h") {
     if (contents.size() == 28739 &&
@@ -852,12 +852,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 232845)
+  if (contents.size() != 236115)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2");
+      "c52d7b004bc8e0fef54cf1f7fc212cbaa16be17314c257c1af6edfd912a1cee3");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -884,12 +884,12 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 232845)
+  if (invalidBuffer || contents.size() != 236115)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2");
+      "c52d7b004bc8e0fef54cf1f7fc212cbaa16be17314c257c1af6edfd912a1cee3");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -6707,7 +6707,7 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
       return reject("dynamic SDK provider changed");
   std::string backend,error;
   if (!ascify::ResolveDynamicWarpGroupsBackend(frontendCompatibility,backend,error)||
-      !remember(backend,10057,"73651a014dcb7006f528963e4892b0768a7eff8902f70691baa6e4fb49397ec0"))
+      !remember(backend,10057,"4da6b293dc58b057c45c16fa84d86850f7c8f7228da37e93b4a40eed7c3ece4f"))
     return reject("owned dynamic backend has no complete physical identity");
   const auto native=[&](clang::SourceLocation location) {
     if (!location.isFileID()) return false;
@@ -10562,39 +10562,80 @@ bool AscifyAction::rewriteCudaGraphKernelHandle(
   const std::string kernelName = kernel->getNameAsString();
   const std::string thunkName = "ascify_graphglue_" + kernelName;
   if (graphGlueKernels.insert(kernelName).second) {
-    // The thunk forward-declares the kernel and is emitted with the
-    // injected includes block (the same materialization path the CDP
-    // replay glue uses); the use-site rewrite below points the graph
-    // node's launcher at the thunk.
+    // The bridge is emitted with the injected includes block (the same
+    // materialization path the CDP replay glue uses). It carries the
+    // typed <<<>>> launcher plus a snapshot function that copies the
+    // caller's CUDA kernelParams values into an owned blob at
+    // cudaGraphAddKernelNode time -- CUDA's copy-at-add semantics -- so
+    // replay never dereferences the caller's dead stack.
     clang::PrintingPolicy policy(context.getLangOpts());
     std::string glue;
     llvm::raw_string_ostream stream(glue);
-    stream << "// Ascify graph kernel-node bridge: typed <<<>>> thunk for "
-           << kernelName << " (CUDA graph emulation).\n";
+    stream << "// Ascify graph kernel-node bridge for " << kernelName
+           << " (CUDA graph emulation): snapshot-at-add + typed <<<>>> "
+              "replay.\n";
     stream << "ASCIFY_GLOBAL void " << kernelName << "(";
     bool first = true;
+    std::vector<std::string> spellings;
     for (const auto *parameter : kernel->parameters()) {
       if (!first) stream << ", ";
       first = false;
-      stream << parameter->getType().getAsString(policy);
+      const std::string spelling =
+          parameter->getType().getAsString(policy);
+      spellings.push_back(spelling);
+      stream << spelling;
     }
     stream << ");\n";
+    const std::string launcher = thunkName + "_launch";
+    const std::string snapshot = thunkName + "_snapshot";
     stream << "namespace {\n"
-           << "static void " << thunkName
+           << "struct " << thunkName << "_bridge {\n"
+           << "  void (*launch)(unsigned, unsigned, unsigned, unsigned, "
+              "unsigned, unsigned, unsigned, ::aclrtStream, void **);\n"
+           << "  void (*snapshot)(void **, void **, void *);\n"
+           << "  unsigned blob_bytes;\n"
+           << "  unsigned param_count;\n"
+           << "};\n"
+           << "static void " << launcher
            << "(unsigned gx, unsigned gy, unsigned gz, unsigned bx, "
               "unsigned by, unsigned bz, unsigned shm, ::aclrtStream s, "
               "void **kp) {\n"
            << "  " << kernelName
            << "<<<dim3(gx, gy, gz), dim3(bx, by, bz), shm, s>>>(";
     first = true;
-    for (const auto *parameter : kernel->parameters()) {
+    for (size_t index = 0; index < spellings.size(); ++index) {
       if (!first) stream << ", ";
       first = false;
-      const std::string spelling = parameter->getType().getAsString(policy);
-      stream << "*static_cast<" << spelling << " *>(kp["
-             << parameter->getFunctionScopeIndex() << "])";
+      stream << "*static_cast<" << spellings[index] << " *>(kp[" << index
+             << "])";
     }
-    stream << ");\n}\n}  // namespace\n";
+    stream << ");\n}\n";
+    stream << "static void " << snapshot
+           << "(void **source, void **slots, void *blob) {\n"
+           << "  char *base = static_cast<char *>(blob);\n"
+           << "  unsigned offset = 0;\n";
+    for (size_t index = 0; index < spellings.size(); ++index) {
+      stream << "  __builtin_memcpy(base + offset, source[" << index
+             << "], sizeof(" << spellings[index] << "));\n"
+             << "  slots[" << index << "] = base + offset;\n"
+             << "  offset += (sizeof(" << spellings[index]
+             << ") + 7u) & ~7u;\n";
+    }
+    stream << "}\n";
+    stream << "static const " << thunkName << "_bridge " << thunkName
+           << " = { &" << launcher << ", &" << snapshot << ", ";
+    if (spellings.empty()) {
+      stream << "0u";
+    } else {
+      bool plus = false;
+      for (const auto &spelling : spellings) {
+        if (plus) stream << " + ";
+        plus = true;
+        stream << "((sizeof(" << spelling << ") + 7u) & ~7u)";
+      }
+    }
+    stream << ", " << spellings.size() << "u };\n"
+           << "}  // namespace\n";
     stream.flush();
     graphGlueText += glue;
     needsGraphTextureTypesHeader = true;
@@ -16529,16 +16570,23 @@ void AscifyAction::EndSourceFileAction() {
     }
     includes += declarations +
         "namespace ascify { namespace cdp {\n"
+        "namespace {\n"
         "inline void replayKernel(const TaskHeader &t) {\n"
         "  switch (t.id) {\n" +
         cases +
         "  default: break;\n"
         "  }\n"
         "}\n"
-        "namespace {\n"
         "struct CdpReplayInstaller {\n"
         "  CdpReplayInstaller() {\n"
-        "    ::ascify::cdp::replayFn() = &replayKernel;\n"
+        "    // Chain this TU's dispatch in front of whatever an earlier TU\n"
+        "    // of the merged build installed (multi-TU CDP kernels each own\n"
+        "    // disjoint id ranges).\n"
+        "    const ReplayFn previous = replayFn();\n"
+        "    replayFn() = +[](const TaskHeader &task) {\n"
+        "      if (previous != nullptr) previous(task);\n"
+        "      replayKernel(task);\n"
+        "    };\n"
         "    ::ascify::detail::cdpDrainHook = &drainOnce;\n"
         "  }\n"
         "};\n"

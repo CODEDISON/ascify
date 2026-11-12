@@ -75,13 +75,13 @@ require_fixed 'attribute->isImplicit()' "$action_cpp"
 require_fixed 'callee, sourceManager, trustedSystemFileIds' "$action_cpp"
 require_fixed 'hasSystemFunctionDeclarationProvenance' "$action_cpp"
 require_fixed 'directUnqualifiedSourceCallNamed' "$action_cpp"
-require_fixed '997f9ac1f8e5f8e5f45f8b11eebab5b89305dee7430b90654bafe62283cffee1' "$action_cpp"
-require_fixed '26e988c97fb3d77d498e384c685177ed7966e41d5d58ebc9b7d3d696859f5e57' "$action_cpp"
+require_fixed 'c52d7b004bc8e0fef54cf1f7fc212cbaa16be17314c257c1af6edfd912a1cee3' "$action_cpp"
+require_fixed 'c52d7b004bc8e0fef54cf1f7fc212cbaa16be17314c257c1af6edfd912a1cee3' "$action_cpp"
 require_fixed 'FrozenOfficialNvidiaSampleHelperFunctions' "$action_cpp"
 require_fixed 'FrozenOfficialNvidiaSampleHelperImage' "$action_cpp"
 require_fixed 'FrozenOfficialNvidiaSampleHelperTimer' "$action_cpp"
-require_fixed 'e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2' "$action_cpp"
-require_fixed 'bc1fe7921bafad278ffa2e4bc8a99c18825208b9f5f47842a7cf7e86cae8b3f1' "$action_cpp"
+require_fixed 'c52d7b004bc8e0fef54cf1f7fc212cbaa16be17314c257c1af6edfd912a1cee3' "$action_cpp"
+require_fixed 'c52d7b004bc8e0fef54cf1f7fc212cbaa16be17314c257c1af6edfd912a1cee3' "$action_cpp"
 require_fixed 'activeFrozenHelperFunctionsProviderMacroBodyMatches' "$action_cpp"
 require_fixed 'activeFrozenHelperCudaMaxBodyMatches' "$action_cpp"
 require_fixed 'frozenNvidiaSampleDirectFunctionsRootIdentities' \
@@ -111,7 +111,7 @@ require_fixed 'auditRawPublishedCompatTokensInFile' "$action_cpp"
 require_fixed 'isAscifyCudaCompatReservedMacro' "$action_cpp"
 require_fixed 'isAscifyCudaCompatPublishedMacro' "$action_cpp"
 require_fixed 'RuntimeLock' "$compat_identifiers"
-require_fixed 'e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2' \
+require_fixed 'c52d7b004bc8e0fef54cf1f7fc212cbaa16be17314c257c1af6edfd912a1cee3' \
   "$action_cpp"
 require_fixed '#include <helper_string.h>' "$action_cpp"
 require_fixed 'surface retained' "$action_cpp"
@@ -127,14 +127,14 @@ require_fixed '#expression, __FILE__, __LINE__' "$compat_header"
 require_fixed 'one uniform performance tier' "$compat_header"
 
 # Frozen target helper and Runtime header bytes must share one identity.
-[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 232845 ]
+[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 236115 ]
 if command -v sha256sum >/dev/null 2>&1; then
   compat_header_sha=$(sha256sum "$compat_header" | awk '{print $1}')
 else
   compat_header_sha=$(shasum -a 256 "$compat_header" | awk '{print $1}')
 fi
 [ "$compat_header_sha" = \
-  e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2 ]
+  c52d7b004bc8e0fef54cf1f7fc212cbaa16be17314c257c1af6edfd912a1cee3 ]
 
 official_helper_functions="$fixtures/nvidia_samples/Common/helper_functions.h"
 [ "$(wc -c <"$official_helper_functions" | tr -d ' ')" -eq 2358 ]

@@ -1353,13 +1353,25 @@ struct GraphAllocSlot {
   bool live;
 };
 
+// Mirror of the converter-emitted per-kernel bridge object: a typed
+// <<<>>> launcher plus a snapshot function that copies the caller CUDA
+// kernelParams values into an owned blob (the copy-at-add semantics).
+struct GraphKernelBridge {
+  void (*launch)(unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
+                 unsigned, aclrtStream, void **);
+  void (*snapshot)(void **, void **, void *);
+  unsigned blob_bytes;
+  unsigned param_count;
+};
 struct GraphKernelThunkParams {
   void (*thunk)(unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
                 unsigned, aclrtStream, void **);
   unsigned grid_x, grid_y, grid_z;
   unsigned block_x, block_y, block_z;
   unsigned shared_mem_bytes;
-  void **kernel_params;  // borrowed CUDA-style argument pointer array
+  void **kernel_params;  // owned slot array pointing into kernel_blob
+  void **kernel_slots;   // owned array (freed with the node)
+  uint8_t *kernel_blob;  // owned snapshot of the argument values
 };
 
 struct GraphNode {
@@ -1484,6 +1496,14 @@ inline void graphFreeNodeStorage(GraphNode &node) {
   if (node.blob != nullptr) {
     free(node.blob);
     node.blob = nullptr;
+  }
+  if (node.manual.kernel_slots != nullptr) {
+    free(node.manual.kernel_slots);
+    node.manual.kernel_slots = nullptr;
+  }
+  if (node.manual.kernel_blob != nullptr) {
+    free(node.manual.kernel_blob);
+    node.manual.kernel_blob = nullptr;
   }
 }
 
@@ -3394,9 +3414,15 @@ inline aclError cudaGraphAddKernelNode(cudaGraphNode_t *node,
   if (params->kernelParams == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
   detail::GraphNode record = {};
   record.type = detail::GraphNodeKernelThunk;
-  record.manual.thunk = reinterpret_cast<void (*)(
-      unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
-      aclrtStream, void **)>(params->func);
+  // The converter rewrote the func field to a bridge object address; the
+  // bridge owns the typed launcher and the copy-at-add snapshot function.
+  const detail::GraphKernelBridge *const bridge =
+      static_cast<const detail::GraphKernelBridge *>(params->func);
+  if (bridge == nullptr || bridge->launch == nullptr ||
+      bridge->snapshot == nullptr || bridge->param_count == 0 ||
+      bridge->param_count > 32 || bridge->blob_bytes == 0)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  record.manual.thunk = bridge->launch;
   record.manual.grid_x = params->gridDim.x;
   record.manual.grid_y = params->gridDim.y;
   record.manual.grid_z = params->gridDim.z;
@@ -3404,7 +3430,23 @@ inline aclError cudaGraphAddKernelNode(cudaGraphNode_t *node,
   record.manual.block_y = params->blockDim.y;
   record.manual.block_z = params->blockDim.z;
   record.manual.shared_mem_bytes = params->sharedMemBytes;
-  record.manual.kernel_params = params->kernelParams;
+  // CUDA copies the kernel argument values at node-add time; the snapshot
+  // function performs the same copy so replay never observes the caller's
+  // dead stack.
+  record.manual.kernel_blob = static_cast<uint8_t *>(
+      malloc(bridge->blob_bytes));
+  record.manual.kernel_slots = static_cast<void **>(
+      calloc(bridge->param_count, sizeof(void *)));
+  if (record.manual.kernel_blob == nullptr ||
+      record.manual.kernel_slots == nullptr) {
+    free(record.manual.kernel_blob);
+    free(record.manual.kernel_slots);
+    return ACL_ERROR_BAD_ALLOC;
+  }
+  bridge->snapshot(params->kernelParams, record.manual.kernel_slots,
+                   record.manual.kernel_blob);
+  record.manual.kernel_params = record.manual.kernel_slots;
+  record.blob_bytes = bridge->blob_bytes;  // shared size slot of the node
   detail::RuntimeLockGuard guard(graph->lock);
   uint32_t index = 0;
   const aclError appended = detail::graphAppendNode(
@@ -3640,6 +3682,33 @@ inline aclError cudaGraphClone(cudaGraph_t *clone, cudaGraph_t graph) {
         (void)detail::graphReleaseReference(copy);
         return ACL_ERROR_BAD_ALLOC;
       }
+    }
+    // A manual kernel node's owned argument snapshot is duplicated with
+    // the node so the clone's lifetime is independent.
+    if (graph->nodes[i].type == detail::GraphNodeKernelThunk &&
+        graph->nodes[i].manual.kernel_blob != nullptr) {
+      const uint32_t bytes = graph->nodes[i].blob_bytes;
+      copy->nodes[i].manual.kernel_blob =
+          detail::graphCopyBlob(graph->nodes[i].manual.kernel_blob, bytes);
+      copy->nodes[i].manual.kernel_slots =
+          static_cast<void **>(calloc(32, sizeof(void *)));
+      if (copy->nodes[i].manual.kernel_blob == nullptr ||
+          copy->nodes[i].manual.kernel_slots == nullptr) {
+        copy->node_count = i + 1;
+        (void)detail::graphReleaseReference(copy);
+        return ACL_ERROR_BAD_ALLOC;
+      }
+      for (unsigned slot = 0; slot < 32 &&
+           graph->nodes[i].manual.kernel_slots[slot] != nullptr; ++slot) {
+        const uintptr_t offset = reinterpret_cast<uintptr_t>(
+            graph->nodes[i].manual.kernel_slots[slot]) -
+            reinterpret_cast<uintptr_t>(
+                graph->nodes[i].manual.kernel_blob);
+        copy->nodes[i].manual.kernel_slots[slot] =
+            copy->nodes[i].manual.kernel_blob + offset;
+      }
+      copy->nodes[i].manual.kernel_params =
+          copy->nodes[i].manual.kernel_slots;
     }
   }
   *clone = copy;
