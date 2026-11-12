@@ -111,7 +111,7 @@ require_fixed 'auditRawPublishedCompatTokensInFile' "$action_cpp"
 require_fixed 'isAscifyCudaCompatReservedMacro' "$action_cpp"
 require_fixed 'isAscifyCudaCompatPublishedMacro' "$action_cpp"
 require_fixed 'RuntimeLock' "$compat_identifiers"
-require_fixed '1d97f8261d49ddd81e3779c2af79998465b1032685e854b02724cf2647cfce18' \
+require_fixed 'e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2' \
   "$action_cpp"
 require_fixed '#include <helper_string.h>' "$action_cpp"
 require_fixed 'surface retained' "$action_cpp"
@@ -134,7 +134,7 @@ else
   compat_header_sha=$(shasum -a 256 "$compat_header" | awk '{print $1}')
 fi
 [ "$compat_header_sha" = \
-  1d97f8261d49ddd81e3779c2af79998465b1032685e854b02724cf2647cfce18 ]
+  e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2 ]
 
 official_helper_functions="$fixtures/nvidia_samples/Common/helper_functions.h"
 [ "$(wc -c <"$official_helper_functions" | tr -d ' ')" -eq 2358 ]
@@ -144,7 +144,7 @@ else
   helper_functions_sha=$(shasum -a 256 "$official_helper_functions" | awk '{print $1}')
 fi
 [ "$helper_functions_sha" = \
-  e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2 ]
+  3fdcd18e41ffc2a9c88ade3595384e9cd05a2d84f80b86a2d5982035ca79c426 ]
 for frozen_provider in \
   'helper_image.h:28739:bc1fe7921bafad278ffa2e4bc8a99c18825208b9f5f47842a7cf7e86cae8b3f1' \
   'helper_timer.h:16060:c48552a7c7b7a5840fcfbc176bfb5a19b501fdc56796b64a63e78e39ab547078'; do

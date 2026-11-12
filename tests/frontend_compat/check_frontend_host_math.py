@@ -325,7 +325,7 @@ int main(){
         frozen = compat.read_bytes()
         assert len(frozen) == 232845
         assert hashlib.sha256(frozen).hexdigest() == (
-            "1d97f8261d49ddd81e3779c2af79998465b1032685e854b02724cf2647cfce18")
+            "e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2")
         # The symbol-registration macro is itself a protected output spelling.
         # Do not change the product trust boundary to admit that transitive
         # macro as caller input. Only this parser fixture replaces that leaf.

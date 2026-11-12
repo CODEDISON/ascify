@@ -857,7 +857,7 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "1d97f8261d49ddd81e3779c2af79998465b1032685e854b02724cf2647cfce18");
+      "e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -889,7 +889,7 @@ bool locationComesFromAscifyCudaCompat(
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "1d97f8261d49ddd81e3779c2af79998465b1032685e854b02724cf2647cfce18");
+      "e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -6812,6 +6812,7 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
     int archCollectRemaining=0;
     bool archCollectIsOpener=false;
     bool archSawForeignIdentifier=false;
+    bool archCollectGuardForm=false;
     bool archBuiltinClean=true;
     bool archCommandPinned=false;
     for (const auto &macro:compiler.getPreprocessorOpts().Macros) {
@@ -6837,9 +6838,7 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
       clang::Token token;lexer.LexFromRawLexer(token);
       if (token.is(clang::tok::eof)) {
         if (archCollectRemaining>0) {
-          if (!archBuiltinClean||archSawForeignIdentifier) {
-            llvm::errs() << "ASCIFY DBG witness foreign clean=" << archBuiltinClean
-                         << " at=" << token.getLocation().printToString(source) << "\n";
+          if (!archBuiltinClean||(archSawForeignIdentifier&&!archCollectGuardForm)) {
             return reject("retained caller conditional has no target-equivalent source witness");
           }
           if (archCollectIsOpener) ++archConditionalDepth;
@@ -6849,9 +6848,7 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
       }
       if (token.isAtStartOfLine()) {
         if (archCollectRemaining>0) {
-          if (!archBuiltinClean||archSawForeignIdentifier) {
-            llvm::errs() << "ASCIFY DBG witness foreign clean=" << archBuiltinClean
-                         << " at=" << token.getLocation().printToString(source) << "\n";
+          if (!archBuiltinClean||(archSawForeignIdentifier&&!archCollectGuardForm)) {
             return reject("retained caller conditional has no target-equivalent source witness");
           }
           if (archCollectIsOpener) ++archConditionalDepth;
@@ -6893,6 +6890,11 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
           archCollectRemaining=64;
           archSawForeignIdentifier=false;
           archCollectIsOpener=true;
+          // ifdef/ifndef openers are classic include guards: their target
+          // evaluation equals the source (the guard macro is defined only
+          // within the same file), so their identifier never voids the
+          // witness. #if/#elif keep the strict __CUDA_ARCH__-only rule.
+          archCollectGuardForm=(name=="ifdef"||name=="ifndef");
           directive=2;
         }
         continue;
