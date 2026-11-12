@@ -34,13 +34,20 @@ class barrier;
 // Move-only phase token (cuda::barrier_arrival_token spelling).
 class barrier_arrival_token {
   unsigned int phase_;
-  explicit barrier_arrival_token(unsigned int phase) : phase_(phase) {}
-  template <thread_scope> friend class barrier;
 
  public:
-  barrier_arrival_token() : phase_(0u) {}
-  barrier_arrival_token(barrier_arrival_token&& other) : phase_(other.phase_) {}
-  barrier_arrival_token& operator=(barrier_arrival_token&& other) {
+  // The phase ctor stays public: the arrive() factory and the admitted
+  // device code both construct tokens; move-only still enforces the
+  // single-use token contract of the CUDA barrier surface.
+  __SIMT_DEVICE_FUNCTIONS_DECL__ explicit barrier_arrival_token(
+      unsigned int phase) : phase_(phase) {}
+  __SIMT_DEVICE_FUNCTIONS_DECL__ barrier_arrival_token() : phase_(0u) {}
+  template <thread_scope> friend class barrier;
+
+  __SIMT_DEVICE_FUNCTIONS_DECL__ barrier_arrival_token(
+      barrier_arrival_token&& other) : phase_(other.phase_) {}
+  __SIMT_DEVICE_FUNCTIONS_DECL__ barrier_arrival_token& operator=(
+      barrier_arrival_token&& other) {
     phase_ = other.phase_;
     return *this;
   }

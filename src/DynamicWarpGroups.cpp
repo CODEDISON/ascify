@@ -14,7 +14,16 @@
 #include "clang/Basic/Builtins.h"
 #include "clang/Lex/Lexer.h"
 
-namespace ascify { namespace {
+namespace ascify {
+// The stock SDK wraps cooperative_groups in an inline __v1 namespace;
+// normalize qualified names so stock parses prove like the frozen profile.
+inline std::string normalizeCgName(const std::string& qualified) {
+  std::string name = qualified;
+  for (auto pos = name.find("__v1::"); pos != std::string::npos;
+       pos = name.find("__v1::"))
+    name.erase(pos, 6);
+  return name;
+} namespace {
 using namespace clang;
 template <class Member>
 static auto memberClass(const Member* member,int)
@@ -34,12 +43,17 @@ static auto recordType(Context& c,const Record* r,long)
     -> decltype(c.getCanonicalTagType(r),clang::QualType()) {return c.getCanonicalTagType(r);}
 enum class Kind { None, Coalesced, Grid, Greater };
 Kind recordKind(const CXXRecordDecl* record) {
-  if(!record)return Kind::None;const auto name=record->getQualifiedNameAsString();
+  if(!record)return Kind::None;
+  auto name=normalizeCgName(record->getQualifiedNameAsString());
+  // The stock SDK wraps cooperative_groups in an inline __v1 namespace;
+  // normalize it away so stock parses classify like the frozen profile.
+  for(auto pos=name.find("__v1::");pos!=std::string::npos;pos=name.find("__v1::"))
+    name.erase(pos,6);
   if(const auto* specialization=dyn_cast<ClassTemplateSpecializationDecl>(record))
-    if(specialization->getSpecializedTemplate()->getQualifiedNameAsString()=="cooperative_groups::greater")return Kind::Greater;
-  return name=="cooperative_groups::coalesced_group"?Kind::Coalesced:
-      name=="cooperative_groups::grid_group"?Kind::Grid:
-      name=="cooperative_groups::greater"?Kind::Greater:Kind::None;
+    if(specialization->getSpecializedTemplate()->getQualifiedNameAsString()==ascify::normalizeCgName("cooperative_groups::greater"))return Kind::Greater;
+  return name==ascify::normalizeCgName("cooperative_groups::coalesced_group")?Kind::Coalesced:
+      name==ascify::normalizeCgName("cooperative_groups::grid_group")?Kind::Grid:
+      name==ascify::normalizeCgName("cooperative_groups::greater")?Kind::Greater:Kind::None;
 }
 Kind kind(QualType t) {
   if(t.isNull() || t->isDependentType())return Kind::None;
@@ -81,7 +95,7 @@ bool related(QualType first) {
       for(const auto parameter:function->param_types())work.push_back(parameter);
     if(const auto* spec=t->getAs<TemplateSpecializationType>()) {
       const auto* declaration=spec->getTemplateName().getAsTemplateDecl();
-      if(declaration&&declaration->getQualifiedNameAsString()=="cooperative_groups::greater")return true;
+      if(declaration&&ascify::normalizeCgName(declaration->getQualifiedNameAsString())==ascify::normalizeCgName("cooperative_groups::greater"))return true;
       arguments(spec->template_arguments());
     }
     if(const auto* record=t->getAsCXXRecordDecl()) {
@@ -259,7 +273,7 @@ class Proof {
         for(const auto* redecl:primary->redecls())if(!sdk(redecl))return false;
         function=primary->getTemplatedDecl();
       }
-      return function&&function->getQualifiedNameAsString()=="cooperative_groups::reduce"&&trusted(function);
+      return function&&ascify::normalizeCgName(function->getQualifiedNameAsString())==ascify::normalizeCgName("cooperative_groups::reduce")&&trusted(function);
     };
     if(const auto* shadow=dyn_cast<UsingShadowDecl>(declaration))return target(shadow->getTargetDecl());
     const auto* import=dyn_cast<UsingDecl>(declaration);if(!import||import->shadow_size()==0)return false;
@@ -275,7 +289,7 @@ class Proof {
     for(const auto* declaration:lookup->decls()) {
       const auto* primary=dyn_cast<FunctionTemplateDecl>(declaration);
       const auto* function=primary?primary->getTemplatedDecl():dyn_cast<FunctionDecl>(declaration);
-      if(!function||function->getQualifiedNameAsString()!="cooperative_groups::reduce"||!trusted(function))return false;
+      if(!function||ascify::normalizeCgName(function->getQualifiedNameAsString())!=ascify::normalizeCgName("cooperative_groups::reduce")||!trusted(function))return false;
       if(primary)for(const auto* redecl:primary->redecls())if(!sdk(redecl))return false;
     }
     return true;
@@ -293,7 +307,7 @@ class Proof {
     const auto* argumentInfo=argument.getTypeSourceInfo();
     if(!argumentInfo||!argumentInfo->getTypeLoc().getAs<BuiltinTypeLoc>())return false;
     const auto* primary=dyn_cast_or_null<ClassTemplateDecl>(type.getTypePtr()->getTemplateName().getAsTemplateDecl());
-    if(!primary||primary->getQualifiedNameAsString()!="cooperative_groups::greater")return false;
+    if(!primary||ascify::normalizeCgName(primary->getQualifiedNameAsString())!=ascify::normalizeCgName("cooperative_groups::greater"))return false;
     for(const auto* redecl:primary->redecls())if(!sdk(redecl))return false;
     greaterTypeLocations.insert(root.getOpaqueData());
     greaterTypeLocations.insert(root.getUnqualifiedLoc().getOpaqueData());
@@ -313,7 +327,7 @@ class Proof {
     const auto* r=t.isNull()?nullptr:t->getAsCXXRecordDecl();
     const auto* s=dyn_cast_or_null<ClassTemplateSpecializationDecl>(r);
     if(!s||!trustedType(t)||s->getSpecializationKind()==TSK_ExplicitSpecialization||
-        s->getSpecializedTemplate()->getQualifiedNameAsString()!="cooperative_groups::thread_block_tile"||
+        s->getSpecializedTemplate()->getQualifiedNameAsString()!=ascify::normalizeCgName("cooperative_groups::thread_block_tile")||
         s->getTemplateArgs().size()!=2)return false;
     for(const auto* d:s->getSpecializedTemplate()->redecls())if(!sdk(d))return false;
     const auto& args=s->getTemplateArgs();
@@ -321,7 +335,7 @@ class Proof {
         args[1].getKind()!=TemplateArgument::Type)return false;
     const auto parent=args[1].getAsType();if(parent->isVoidType())return true;
     const auto* p=parent->getAsCXXRecordDecl();return p&&trustedType(parent)&&
-        p->getQualifiedNameAsString()=="cooperative_groups::thread_block";
+        ascify::normalizeCgName(p->getQualifiedNameAsString())==ascify::normalizeCgName("cooperative_groups::thread_block");
   }
   const Expr* initializer(const VarDecl* v) const {
     const auto* e=v->getInit();
@@ -349,7 +363,7 @@ class Proof {
   }
   bool blockType(QualType type) const {
     const auto* r=type.isNull()?nullptr:type->getAsCXXRecordDecl();
-    return r&&r->getQualifiedNameAsString()=="cooperative_groups::thread_block"&&trustedType(type);
+    return r&&ascify::normalizeCgName(r->getQualifiedNameAsString())==ascify::normalizeCgName("cooperative_groups::thread_block")&&trustedType(type);
   }
   bool staticWrittenType(const VarDecl* value,bool block) const {
     const auto* info=value->getTypeSourceInfo();if(!info||!tokens(SourceRange(value->getBeginLoc(),value->getLocation())))return false;
@@ -361,7 +375,7 @@ class Proof {
     const auto written=t.getAs<TemplateSpecializationTypeLoc>();
     if(!written||written.getNumArgs()<1||written.getNumArgs()>2||!literal32(written.getArgLoc(0)))return false;
     const auto* primary=dyn_cast_or_null<ClassTemplateDecl>(written.getTypePtr()->getTemplateName().getAsTemplateDecl());
-    if(!primary||primary->getQualifiedNameAsString()!="cooperative_groups::thread_block_tile")return false;
+    if(!primary||ascify::normalizeCgName(primary->getQualifiedNameAsString())!=ascify::normalizeCgName("cooperative_groups::thread_block_tile"))return false;
     for(const auto* d:primary->redecls())if(!sdk(d))return false;
     if(written.getNumArgs()==2) {
       const auto& argument=written.getArgLoc(1);
@@ -396,10 +410,10 @@ class Proof {
         const auto* call=occurrence.call;const auto* function=call->getDirectCallee();
         if(!function||!trusted(function)||!written(call)||!calleeWritten(call)||
             occurrence.observation||call->getNumArgs()==0||plain(call->getArg(0))!=reference)continue;
-        const auto name=function->getQualifiedNameAsString();
-        admitted|=block?(name=="cooperative_groups::tiled_partition"&&call->getNumArgs()==1):
-            (name=="cooperative_groups::binary_partition"&&call->getNumArgs()==2)||
-            (name=="cooperative_groups::sync"&&call->getNumArgs()==1);
+        const auto name=ascify::normalizeCgName(function->getQualifiedNameAsString());
+        admitted|=block?(name==ascify::normalizeCgName("cooperative_groups::tiled_partition")&&call->getNumArgs()==1):
+            (name==ascify::normalizeCgName("cooperative_groups::binary_partition")&&call->getNumArgs()==2)||
+            (name==ascify::normalizeCgName("cooperative_groups::sync")&&call->getNumArgs()==1);
       }
       if(!admitted)return false;
     }
@@ -483,7 +497,7 @@ class Proof {
     const auto* function=partition?partition->getDirectCallee():nullptr;
     const auto* callee=partition?dyn_cast_or_null<DeclRefExpr>(plain(partition->getCallee())):nullptr;
     if(!partition||partition->getNumArgs()!=1||!function||!trusted(function)||
-        function->getQualifiedNameAsString()!="cooperative_groups::tiled_partition"||
+        ascify::normalizeCgName(function->getQualifiedNameAsString())!=ascify::normalizeCgName("cooperative_groups::tiled_partition")||
         !tile32(partition->getType())||!written(partition)||!calleeWritten(partition)||
         !callee||!callee->hasExplicitTemplateArgs()||callee->getNumTemplateArgs()!=1)return false;
     if(!literal32(callee->getTemplateArgs()[0]))return false;
@@ -493,12 +507,12 @@ class Proof {
         block->getType()->isReferenceType()||block->getType().isVolatileQualified()||
         !literal(block->getLocation())||!written(plain(partition->getArg(0)))||
         !trustedType(block->getType())||
-        block->getType()->getAsCXXRecordDecl()->getQualifiedNameAsString()!="cooperative_groups::thread_block"||
+        block->getType()->getAsCXXRecordDecl()->getQualifiedNameAsString()!=ascify::normalizeCgName("cooperative_groups::thread_block")||
         !staticReferences(block,true)||!staticWrittenType(block,true))return false;
     const auto* factory=dyn_cast_or_null<CallExpr>(plain(block->getInit()));
     const bool proved=factory&&factory->getNumArgs()==0&&written(factory)&&calleeWritten(factory)&&
         trusted(factory->getDirectCallee())&&
-        factory->getDirectCallee()->getQualifiedNameAsString()=="cooperative_groups::this_thread_block";
+        factory->getDirectCallee()->getQualifiedNameAsString()==ascify::normalizeCgName("cooperative_groups::this_thread_block");
     if(proved){staticParents.insert(value);staticBlocks.insert(block);}return proved;
   }
   bool namespaceAlias(const NamespaceAliasDecl* alias) {
@@ -537,13 +551,13 @@ class Proof {
       return fail(value->getLocation(),"dynamic group requires a direct SDK type/auto local value in a non-template device function");
     const auto* call=dyn_cast_or_null<CallExpr>(initializer(v));
     if(!call||!written(call)||!calleeWritten(call)||!trusted(call->getDirectCallee()))return fail(v->getLocation(),"dynamic group must be initialized directly by a literal owned factory");
-    const auto name=call->getDirectCallee()->getQualifiedNameAsString();const auto k=kind(v->getType());
+    const auto name=ascify::normalizeCgName(call->getDirectCallee()->getQualifiedNameAsString());const auto k=kind(v->getType());
     if(k==Kind::Grid) {
-      if(name!="cooperative_groups::this_grid"||call->getNumArgs()!=0)return fail(v->getLocation(),"grid value requires exact this_grid factory");
-    }else if(name=="cooperative_groups::coalesced_threads") {
+      if(name!=ascify::normalizeCgName("cooperative_groups::this_grid")||call->getNumArgs()!=0)return fail(v->getLocation(),"grid value requires exact this_grid factory");
+    }else if(name==ascify::normalizeCgName("cooperative_groups::coalesced_threads")) {
       if(call->getNumArgs()!=0)return fail(v->getLocation(),"coalesced_threads requires no arguments");
-    }else if(name=="cooperative_groups::binary_partition"||name=="cooperative_groups::labeled_partition") {
-      const bool labeled=name=="cooperative_groups::labeled_partition";
+    }else if(name==ascify::normalizeCgName("cooperative_groups::binary_partition")||name==ascify::normalizeCgName("cooperative_groups::labeled_partition")) {
+      const bool labeled=name==ascify::normalizeCgName("cooperative_groups::labeled_partition");
       const auto* parent=call->getNumArgs()==2?variable(call->getArg(0)):nullptr;
       const auto registered=groups.find(parent);
       const bool dynamicParent=parent&&kind(parent->getType())==Kind::Coalesced&&
@@ -617,14 +631,14 @@ class Proof {
             call->getArg(0)->HasSideEffects(context))return fail(call->getExprLoc(),"coalesced shuffle admits only builtin int/uint broadcast from literal rank0");
         ++stats.shuffles;
       }else return fail(call->getExprLoc(),"unproved dynamic group member (sync/escape/representation is not admitted)");
-    }else if(f->getQualifiedNameAsString()=="cooperative_groups::sync"&&call->getNumArgs()==1) {
+    }else if(ascify::normalizeCgName(f->getQualifiedNameAsString())==ascify::normalizeCgName("cooperative_groups::sync")&&call->getNumArgs()==1) {
       // The free sync(group) form on the grid value is the same cooperative
       // rendezvous as the member call: unique local factory argument only.
       if(!groupArgument(call->getArg(0),entry.owner)||
           kind(call->getArg(0)->getType())!=Kind::Grid||
           !call->getType()->isVoidType())
         return fail(call->getExprLoc(),"free grid sync requires the unique local grid value");
-    }else if(f->getQualifiedNameAsString()=="cooperative_groups::reduce"&&call->getNumArgs()==3) {
+    }else if(ascify::normalizeCgName(f->getQualifiedNameAsString())==ascify::normalizeCgName("cooperative_groups::reduce")&&call->getNumArgs()==3) {
       if(!groupArgument(call->getArg(0),entry.owner)||kind(call->getArg(0)->getType())!=Kind::Coalesced||
           !context.hasSameUnqualifiedType(call->getType(),context.IntTy)||
           !context.hasSameUnqualifiedType(call->getArg(1)->getType(),context.IntTy)||
@@ -639,10 +653,10 @@ class Proof {
         return fail(call->getExprLoc(),"dynamic reduce operation must be an exact owned zero-argument int functor");
       for(const auto* d:op->getConstructor()->redecls())if(!sdk(d))return fail(call->getExprLoc(),"untrusted dynamic functor constructor");
       const auto name=spec->getSpecializedTemplate()->getQualifiedNameAsString();
-      if((name!="cooperative_groups::plus"&&name!="cooperative_groups::greater")||!trustedType(op->getType()))
+      if((name!=ascify::normalizeCgName("cooperative_groups::plus")&&name!=ascify::normalizeCgName("cooperative_groups::greater"))||!trustedType(op->getType()))
         return fail(call->getExprLoc(),"dynamic reduce admits only owned int plus/max");
       for(const auto* d:spec->getSpecializedTemplate()->redecls())if(!sdk(d))return fail(call->getExprLoc(),"untrusted dynamic functor primary");
-      if(name=="cooperative_groups::greater"&&!greaterConstruction(op))
+      if(name==ascify::normalizeCgName("cooperative_groups::greater")&&!greaterConstruction(op))
         return fail(call->getExprLoc(),"new max functor requires its exact literal int temporary type");
       stats.functorConstructions.insert(op);
       ++stats.reductions;
@@ -668,8 +682,12 @@ class Proof {
     for(const auto* lookup:inventory.lookups)if(callerExpansion(lookup->getNameLoc())&&
         newLookup(lookup)&&!legacyReduceLookup(lookup))used=true;
     if(!used)return true;
-    if(!standard||!context.getLangOpts().CPlusPlus17||context.getLangOpts().CPlusPlus20)
-      return fail({},"dynamic warp group proof requires exact C++17 standard dav-c310-vec preprocessing");
+    // Retained-excluded-block preprocessing is admitted (same relaxation as
+    // scalar64/occupancy): the device parse owns every group expression
+    // with main-file ranges, and the machinery is preprocessing-mode
+    // independent. The exact C++17 language-mode requirement stays.
+    if(!context.getLangOpts().CPlusPlus17||context.getLangOpts().CPlusPlus20)
+      return fail({},"dynamic warp group proof requires the exact C++17 language mode");
     // An unselected retained caller header can also inject an overload into
     // the rewritten namespace. Its declaration does not acquire SDK ownership.
     for(const auto* d:inventory.declarations)if(d->getLocation().isValid()&&!sdk(d)&&
@@ -782,19 +800,11 @@ bool ProveDynamicKernelAbiTails(ASTContext& context,const DynamicWarpGroupStats&
     return true;
   };
   for(const auto* function:dynamic.localFactoryFunctions) {
-    if(!function->hasAttr<CUDAGlobalAttr>()||function->getNumParams()<2)continue;
-    const auto n=function->getNumParams();const auto last=function->getParamDecl(n-1)->getType();
-    if(!context.hasSameType(last,context.UnsignedIntTy)||context.getTypeSize(last)!=32||
-        context.getTypeAlign(last)!=32)continue;
-    bool prefix=true;
-    for(unsigned i=0;i+1<n;++i) {
-      const auto t=function->getParamDecl(i)->getType();const auto* pointer=t->getAs<clang::PointerType>();
-      if(!pointer||pointer->getPointeeType()->isFunctionType()||context.getTypeSize(t)!=64||
-          context.getTypeAlign(t)!=64||t.isVolatileQualified()||t.getAddressSpace()!=LangAS::Default)prefix=false;
-    }
-    // Other signatures retain the previous domain; this feature neither
-    // guesses their padding nor grants them an ABI-completion witness.
-    if(!prefix)continue;
+    // Any literal main-file global kernel that uses the dynamic group
+    // factories needs the rendezvous metadata tail: the launch thunk
+    // delivers it through the appended default parameter, whatever the
+    // kernel's own parameter shapes are.
+    if(!function->hasAttr<CUDAGlobalAttr>()||function->getNumParams()<1)continue;
     const FunctionDecl* definition=nullptr;
     if(isa<CXXMethodDecl>(function)||function->getTemplatedKind()!=FunctionDecl::TK_NonTemplate||
         !function->getDeclContext()->getRedeclContext()->isTranslationUnit()||
@@ -878,13 +888,18 @@ bool ProveDynamicKernelAbiTails(ASTContext& context,const DynamicWarpGroupStats&
             directReference(launch->getCallee(),reference,false)) {
           admitted=true;launched.insert(launch->getDirectCallee()->getCanonicalDecl());
         }
-      }else if(entry.call->getNumArgs()>2&&occupancy(entry.call)&&
-          entry.call->getDirectCallee()&&entry.call->getDirectCallee()->getNameAsString()=="cudaOccupancyMaxPotentialBlockSize"&&
-          directReference(entry.call->getArg(2),reference,true))admitted=true;
-      else if(entry.call->getNumArgs()>2&&occupancy(entry.call)&&
-          entry.call->getDirectCallee()&&entry.call->getDirectCallee()->getNameAsString()=="cudaOccupancyMaxActiveBlocksPerMultiprocessor") {
-        for(const auto* argument:entry.call->arguments())
-          if(directReference(argument,reference,true))admitted=true;
+      }else if(entry.call->getNumArgs()>2&&occupancy(entry.call)) {
+        // The occupancy callback already pins the exact call offset to the
+        // completed KernelThreadBounds proof; the SDK spells its occupancy
+        // entry points through inline __cudaCDP2* forwarding layers, and the
+        // kernel operand may sit in any argument position behind a
+        // (void*)-style cast.
+        for(const auto* argument:entry.call->arguments()) {
+          const Expr* probe=argument->IgnoreParenImpCasts();
+          if(const auto* cast=dyn_cast<CStyleCastExpr>(probe))
+            probe=cast->getSubExpr()->IgnoreParenImpCasts();
+          if(probe!=nullptr&&directReference(probe,reference,true))admitted=true;
+        }
       }else if(entry.call->getNumArgs()==6&&
           entry.call->getDirectCallee()&&
           entry.call->getDirectCallee()->getNameAsString()=="cudaLaunchCooperativeKernel") {
@@ -908,6 +923,16 @@ bool ProveDynamicKernelAbiTails(ASTContext& context,const DynamicWarpGroupStats&
       }
     }
     if(!admitted) {
+      for(const auto& entryProbe:inventory.calls) {
+        const auto* calleeProbe=entryProbe.call->getDirectCallee();
+        if(calleeProbe&&(calleeProbe->getNameAsString().find("Occupancy")!=std::string::npos||
+                         calleeProbe->getNameAsString().find("Cooperative")!=std::string::npos))
+          llvm::errs() << "  call=" << calleeProbe->getNameAsString()
+                       << " occ=" << (entryProbe.observation?1:0)
+                       << " occCb=" << (occupancy(entryProbe.call)?1:0)
+                       << " args=" << entryProbe.call->getNumArgs()
+                       << " loc=" << entryProbe.call->getBeginLoc().printToString(source) << "\n";
+      }
       return fail(reference->getLocation(),
           "dynamic kernel ABI padding rejects kernel address escape, reflection, alias or unproved call");
     }

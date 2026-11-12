@@ -528,6 +528,9 @@ public:
   std::set<unsigned> rewrittenCudaFloatFrexpOffsets;
   bool rewriteProvenGenericAtomicExchCall(const clang::ast_matchers::MatchFinder::MatchResult &Result);
   bool rewriteProvenGenericAtomicMaxCall(const clang::ast_matchers::MatchFinder::MatchResult &Result);
+  bool rewriteDeviceMixedFloatDoubleDivision(
+      const mat::MatchFinder::MatchResult &Result);
+  bool rewriteDeviceStdMove(const mat::MatchFinder::MatchResult &Result);
   bool rewriteCudaLaunchCooperativeKernel(const clang::ast_matchers::MatchFinder::MatchResult &Result);
   bool rewriteDeviceWideningFloatCast(const clang::ast_matchers::MatchFinder::MatchResult &Result);
   bool rewriteProvenGenericAtomicAddCall(

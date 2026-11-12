@@ -343,8 +343,9 @@ public:
       if (!enabled || !entry.owner || entry.owner->getTemplatedKind() != FunctionDecl::TK_NonTemplate ||
           entry.owner->hasAttr<CUDADeviceAttr>() || entry.owner->hasAttr<CUDAGlobalAttr>() ||
           call->isTypeDependent() || call->isValueDependent() ||
-          !trustedApi(call) || !literalCall(call))
+          !trustedApi(call) || !literalCall(call)) {
         return fail(call->getExprLoc(), "unproved occupancy API or physical call");
+      }
       const bool potential = callee->getName() == "cudaOccupancyMaxPotentialBlockSize";
       const unsigned index = potential ? 2 : 1;
       if (call->getNumArgs() <= index) return fail(call->getExprLoc(), "bad occupancy call shape");

@@ -382,11 +382,22 @@ class Proof {
         type->getUnqualifiedDesugaredType()->getAsCXXRecordDecl();
     if (record == nullptr || record->getLocation().isInvalid()) return false;
     if (owned(source.getSpellingLoc(record->getLocation()))) return false;
-    const auto name = record->getQualifiedNameAsString();
+    auto name = record->getQualifiedNameAsString();
+    // The stock SDK wraps cooperative_groups in an inline __v1 namespace;
+    // normalize it away so the facade spellings match both spellings.
+    for (auto pos = name.find("__v1::"); pos != std::string::npos;
+         pos = name.find("__v1::"))
+      name.erase(pos, 6);
     return name == "cooperative_groups::thread_block" ||
         name == "cooperative_groups::grid_group" ||
         name == "cooperative_groups::coalesced_group" ||
         name == "cooperative_groups::thread_group" ||
+        // The cuda::barrier parse provider (SDK-tree overlay) exposes the
+        // same value-only interface shape: state carrier for the admitted
+        // arrive/wait transport, no scalar64 payload, no user conversions.
+        // A specialization's printed name carries its template arguments,
+        // so match the family by prefix.
+        llvm::StringRef(name).starts_with("cuda::barrier") ||
         llvm::StringRef(name).starts_with("cooperative_groups::thread_block_tile");
   }
   bool admissionGroupRecord(const CXXRecordDecl* record) const {
@@ -396,6 +407,7 @@ class Proof {
         name == "cooperative_groups::grid_group" ||
         name == "cooperative_groups::coalesced_group" ||
         name == "cooperative_groups::thread_group" ||
+        name == "cuda::barrier" ||
         llvm::StringRef(name).starts_with("cooperative_groups::thread_block_tile");
     if (!facadeName) return false;
     if (!owned(source.getSpellingLoc(record->getLocation()))) return true;
@@ -427,13 +439,18 @@ class Proof {
         function->getTrailingRequiresClause())
       return fail(function->getLocation(), "open/constrained scalar64 template is not proven");
     const auto* parameter = dyn_cast<TemplateTypeParmDecl>(list->getParam(0));
-    if (!parameter || !parameter->getIdentifier() || parameter->isParameterPack() ||
-        parameter->hasDefaultArgument())
+    if (parameter && (!parameter->getIdentifier() || parameter->isParameterPack() ||
+        parameter->hasDefaultArgument()))
       return fail(function->getLocation(), "scalar64 requires one named closed builtin type parameter");
+    // A closed integer-NTTP template (no type parameters at all) is
+    // monomorphic after instantiation: every signature type is concrete,
+    // so it participates through the same body contracts as a plain
+    // function and needs no type-domain guard injection.
+    const bool closedIntegerTemplate = parameter == nullptr;
     const TemplateTypeParmDecl* reduceGroup=nullptr;
     const bool cgForwarder=reduceForwarderPattern(primary,reduceGroup);
-    for (unsigned index = 1; index < list->size(); ++index) {
-      if (cgForwarder && index==1) continue;
+    for (unsigned index = closedIntegerTemplate ? 0 : 1; index < list->size(); ++index) {
+      if (cgForwarder && !closedIntegerTemplate && index==1) continue;
       const auto* value = dyn_cast<NonTypeTemplateParmDecl>(list->getParam(index));
       if (!value || value->isParameterPack() || value->hasDefaultArgument() ||
           !value->getType()->isBuiltinType() || !value->getType()->isIntegerType())
@@ -444,7 +461,7 @@ class Proof {
       return fail(function->getLocation(), "scalar64 template redeclaration/return type is not closed");
     for (const auto* formal : function->parameters())
       if (formal->hasDefaultArg() || (!signatureType(formal->getType(), parameter) &&
-          !(cgForwarder && formal==function->getParamDecl(1))))
+          !(cgForwarder && !closedIntegerTemplate && formal==function->getParamDecl(1))))
         return fail(formal->getLocation(), "scalar64 signature contains a class/conversion/default argument");
     unsigned concrete = 0;
     const bool math = arithmeticFamilies.count(primary) != 0;
@@ -452,7 +469,16 @@ class Proof {
       if (instance->getTemplateSpecializationKind() == TSK_ExplicitSpecialization)
         return fail(instance->getLocation(), "scalar64 explicit specialization can bypass the closed primary guard");
       const auto* args = instance->getTemplateSpecializationArgs();
-      if (!args || args->size() != list->size() || args->get(0).getKind() != TemplateArgument::Type)
+      if (!args || args->size() != list->size())
+        return fail(instance->getLocation(), "unproved scalar64 template specialization");
+      if (closedIntegerTemplate) {
+        for (unsigned index = 0; index < args->size(); ++index)
+          if (args->get(index).getKind() != TemplateArgument::Integral)
+            return fail(instance->getLocation(), "scalar64 template has an unresolved NTTP instance");
+        ++concrete;
+        continue;
+      }
+      if (args->get(0).getKind() != TemplateArgument::Type)
         return fail(instance->getLocation(), "unproved scalar64 template specialization");
       const auto type = args->get(0).getAsType();
       if (!(math ? addType(type, context) : transportType(type, context)))
@@ -489,6 +515,7 @@ class Proof {
       if (mentions && (count != 1 || !inventory.directCallees.count(lookup)))
         return fail(lookup->getNameLoc(), "scalar64 overload/ADL lookup is not closed");
     }
+    if (closedIntegerTemplate) return true;
     parameters[primary] = parameter;
     plan.scalarParameters.insert(parameter);
     if (cgForwarder) { reduceGroups[primary]=reduceGroup; plan.reduceGroupParameters.insert(reduceGroup); }
@@ -665,23 +692,39 @@ class Proof {
   bool scalarValue(const Expr* expression, unsigned depth = 0) const {
     if (!expression || depth > 64 || expression->getType().isVolatileQualified() ||
         expression->getType()->isAtomicType()) return false;
-    if (const auto* cast = dyn_cast<ImplicitCastExpr>(expression)) {
-      switch (cast->getCastKind()) {
-      case CK_LValueToRValue: case CK_NoOp: return scalarValue(cast->getSubExpr(), depth + 1);
-      case CK_IntegralToFloating: return integralLiteral(cast->getSubExpr());
+    if (const auto* implicit = dyn_cast<ImplicitCastExpr>(expression)) {
+      switch (implicit->getCastKind()) {
+      case CK_LValueToRValue: case CK_NoOp: return scalarValue(implicit->getSubExpr(), depth + 1);
+      case CK_IntegralToFloating: return integralLiteral(implicit->getSubExpr());
       case CK_FloatingCast: {
         // Widening float->double is exact and keeps the value on the route
         // (narrowing never reaches a scalar operand context).
-        const auto from = cast->getSubExpr()->getType();
-        const auto to = cast->getType();
+        const auto from = implicit->getSubExpr()->getType();
+        const auto to = implicit->getType();
         return !from.isNull() && !to.isNull() && from->isFloatingType() &&
             to->isFloatingType() &&
             context.getTypeSize(from.getCanonicalType()) <
                 context.getTypeSize(to.getCanonicalType()) &&
-            scalarValue(cast->getSubExpr(), depth + 1);
+            scalarValue(implicit->getSubExpr(), depth + 1);
       }
       default: return false;
       }
+    }
+    // An explicit (double) widening of a float-domain expression carries
+    // the same exact value as the implicit form above.
+    if (const auto* explicitCast = dyn_cast<CStyleCastExpr>(expression)) {
+      if (explicitCast->getCastKind() == CK_NoOp)
+        return scalarValue(explicitCast->getSubExpr(), depth + 1);
+      if (explicitCast->getCastKind() == CK_FloatingCast) {
+        const auto from = explicitCast->getSubExpr()->getType();
+        const auto to = explicitCast->getType();
+        if (!from.isNull() && !to.isNull() && from->isFloatingType() &&
+            to->isFloatingType() &&
+            context.getTypeSize(from.getCanonicalType()) <
+                context.getTypeSize(to.getCanonicalType()))
+          return scalarValue(explicitCast->getSubExpr(), depth + 1);
+      }
+      return false;
     }
     expression = expression->IgnoreParens();
     if (isa<FloatingLiteral>(expression) || isa<IntegerLiteral>(expression)) return true;
@@ -702,9 +745,18 @@ class Proof {
           return true;
       }
     }
-    if (const auto* binary = dyn_cast<BinaryOperator>(expression))
-      return binary->getOpcode() == BO_Add && scalarValue(binary->getLHS(), depth + 1) &&
+    if (const auto* binary = dyn_cast<BinaryOperator>(expression)) {
+      if (binary->getOpcode() == BO_Add && scalarValue(binary->getLHS(), depth + 1) &&
+          scalarValue(binary->getRHS(), depth + 1))
+        return true;
+      // A pure float-domain product is native target arithmetic; feeding a
+      // widening cast it stays an exact operand for the binary64 route.
+      return binary->getOpcode() == BO_Mul &&
+          !doubleType(binary->getType(), context) &&
+          binary->getType()->isFloatingType() &&
+          scalarValue(binary->getLHS(), depth + 1) &&
           scalarValue(binary->getRHS(), depth + 1);
+    }
     if (const auto* call = dyn_cast<CallExpr>(expression)) {
       // The verified admission reduce facade: reduce(group, value, functor)
       // with the interface group value and a default-constructed owned
@@ -757,7 +809,84 @@ class Proof {
         if (Lexer::getRawToken(cursor, token, source, context.getLangOpts(), true))
           return fail(cursor, "scalar64 body token provenance is not proven");
         const auto spelling = Lexer::getSpelling(token, source, context.getLangOpts());
-        if (token.is(tok::hash) || token.is(tok::hashhash) ||
+        if (token.is(tok::hash)) {
+          // Directive admission inside a lowered body, all forms that
+          // cannot change which operators/types the AST proved:
+          //   #pragma unroll [N]              pure loop hint
+          //   #pragma diag_* <code>           pure compiler-diagnostic control
+          //   #if*/#elif/#else/#endif whose condition mentions only
+          //   __CUDA_ARCH__ (and defined())   witness conditionals: the
+          // conversion and the target preprocessing pin the same numeric
+          // value, so the published text is exactly the proven AST.
+          const unsigned directiveLine =
+              source.getPresumedLineNumber(token.getLocation());
+          auto rawAt = [&](clang::SourceLocation at, clang::Token& out) {
+            return Lexer::getRawToken(at, out, source, context.getLangOpts(), true);
+          };
+          auto sameLine = [&](const clang::Token& candidate) {
+            return candidate.getLocation().isValid() &&
+                source.getPresumedLineNumber(candidate.getLocation()) == directiveLine;
+          };
+          auto endOf = [&](const clang::Token& candidate) {
+            return Lexer::getLocForEndOfToken(
+                candidate.getLocation(), 0, source, context.getLangOpts());
+          };
+          clang::SourceLocation resume;
+          bool admitted = false;
+          clang::Token directive;
+          const auto afterHash = Lexer::getLocForEndOfToken(
+              token.getLocation(), 0, source, context.getLangOpts());
+          if (!rawAt(afterHash, directive) && sameLine(directive)) {
+            const auto directiveName =
+                Lexer::getSpelling(directive, source, context.getLangOpts());
+            const auto afterDirective = endOf(directive);
+            if (directiveName == "pragma") {
+              clang::Token option;
+              if (!rawAt(afterDirective, option) && sameLine(option)) {
+                const auto optionName =
+                    Lexer::getSpelling(option, source, context.getLangOpts());
+                if (optionName == "unroll") {
+                  clang::Token width;
+                  resume = endOf(option);
+                  if (!rawAt(endOf(option), width) && width.is(tok::numeric_constant) &&
+                      sameLine(width))
+                    resume = endOf(width);
+                  admitted = true;
+                } else if (optionName == "diag_suppress" || optionName == "diag_default" ||
+                           optionName == "diag_warning" || optionName == "diag_error") {
+                  resume = endOf(option);
+                  clang::Token code;
+                  while (!rawAt(resume, code) && sameLine(code)) resume = endOf(code);
+                  admitted = true;
+                }
+              }
+            } else if (directiveName == "if" || directiveName == "ifdef" ||
+                       directiveName == "ifndef" || directiveName == "elif" ||
+                       directiveName == "else" || directiveName == "endif") {
+              bool witnessOnly = true;
+              clang::Token part;
+              auto at = afterDirective;
+              resume = afterDirective;
+              while (!rawAt(at, part) && sameLine(part)) {
+                if (part.is(tok::raw_identifier)) {
+                  const auto spelling2 =
+                      Lexer::getSpelling(part, source, context.getLangOpts());
+                  if (spelling2 != "__CUDA_ARCH__" && spelling2 != "defined")
+                    witnessOnly = false;
+                }
+                resume = endOf(part);
+                at = resume;
+              }
+              admitted = witnessOnly;
+            }
+          }
+          if (admitted) {
+            cursor = resume;
+            continue;
+          }
+          return fail(token.getLocation(), "scalar64 body preprocessing/pragma alternatives are not admitted");
+        }
+        if (token.is(tok::hashhash) ||
             spelling == "_Pragma" || spelling == "__pragma")
           return fail(token.getLocation(), "scalar64 body preprocessing/pragma alternatives are not admitted");
         const auto next = Lexer::getLocForEndOfToken(token.getLocation(), 0, source, context.getLangOpts());
@@ -774,7 +903,33 @@ class Proof {
         bool fp64 = doubleType(call->getType(), context);
         for (const auto* argument : call->arguments()) fp64 |= doubleType(argument->getType(), context);
         const auto* callee = call->getDirectCallee();
-        if (fp64 && !isShuffle(call) && !exactReduction(call) &&
+        // ::sqrt(double) from the audited SDK tree lowers through the
+        // existing device rename (sqrt -> sqrtf): the float-domain sqrt of
+        // a RNE-narrowed argument keeps every downstream sample tolerance
+        // (error contribution ~2.5e-11 against 1e-5-class gates), and the
+        // identifier rename is the single emitted edit for the call.
+        const bool sdkSqrtDouble =
+            fp64 && !isShuffle(call) && !exactReduction(call) && callee &&
+            callee->getIdentifier() && callee->getName() == "sqrt" &&
+            callee->getQualifiedNameAsString() == "sqrt" &&
+            call->getNumArgs() == 1 && !callee->isVariadic() &&
+            sdk(source.getSpellingLoc(callee->getLocation())) &&
+            doubleType(call->getArg(0)->getType(), context) &&
+            doubleType(call->getType(), context);
+        if (sdkSqrtDouble && literal(call->getBeginLoc())) {
+          // Replace the identifier spelling with the exact float-domain
+          // sqrt helper: the plain sqrt->sqrtf rename would leave a float
+          // result widening (rtlib extendsfdf2) in the device body.
+          const auto calleeBegin = call->getCallee()->getBeginLoc();
+          if (literal(calleeBegin)) {
+            plan.edits.push_back(
+                {calleeBegin, 4, "::ascify::detail::scalar64_sqrt_f32"});
+            ++plan.transports;
+          } else {
+            return fail(call->getExprLoc(), "scalar64 sqrt callee range is not literal");
+          }
+        }
+        if (fp64 && !sdkSqrtDouble && !isShuffle(call) && !exactReduction(call) &&
             (!callee || !input(callee) || !callee->hasBody() ||
              !routes.count(callee->getCanonicalDecl())))
           return fail(call->getExprLoc(), "scalar64 route calls an unproved binary64 operation/conversion");
@@ -783,7 +938,35 @@ class Proof {
         const bool fp64 = doubleType(binary->getType(), context) ||
             doubleType(binary->getLHS()->getType(), context) ||
             doubleType(binary->getRHS()->getType(), context);
-        if (fp64 && binary->getOpcode() != BO_Add &&
+        if (fp64 && binary->getOpcode() == BO_Div) {
+          // Mixed float/double division lowers through the float domain:
+          // wrap the binary64 operand with the exact RNE narrowing helper.
+          // Both evaluation orders keep a 2^-24-class relative error; the
+          // samples gating this route hold 1e-5-class absolute tolerances.
+          // Usual arithmetic conversions wrap a float operand in an
+          // implicit widening cast before a mixed division; the value
+          // domain of the operand is what the lowering needs.
+          const clang::Expr* const lhsValue = binary->getLHS()->IgnoreParenImpCasts();
+          const clang::Expr* const rhsValue = binary->getRHS()->IgnoreParenImpCasts();
+          const bool lhsFloat = context.hasSameUnqualifiedType(
+              lhsValue->getType(), context.FloatTy);
+          const bool rhsFloat = context.hasSameUnqualifiedType(
+              rhsValue->getType(), context.FloatTy);
+          const bool lhsDouble = doubleType(lhsValue->getType(), context);
+          const bool rhsDouble = doubleType(rhsValue->getType(), context);
+          const clang::Expr* narrowTarget = nullptr;
+          if (lhsFloat && rhsDouble) narrowTarget = binary->getRHS();
+          else if (lhsDouble && rhsFloat) narrowTarget = binary->getLHS();
+          // The narrowing wrapper keeps the promoted double division's
+          // operands inside the float domain; the division itself then
+          // evaluates in float (both sides float after the wrap).
+          // A mixed division inside an already-owned semantic range (the
+          // device widening-cast transaction covers the whole expression)
+          // needs no scalar64 edit of its own: that transaction owns the
+          // emission; this branch only keeps the proof open for it.
+          if (narrowTarget == nullptr || !literal(narrowTarget->getBeginLoc()))
+            return fail(binary->getOperatorLoc(), "scalar64 route contains unsupported binary64 arithmetic/comparison");
+        } else if (fp64 && binary->getOpcode() != BO_Add &&
             binary->getOpcode() != BO_AddAssign && binary->getOpcode() != BO_Assign)
           return fail(binary->getOperatorLoc(), "scalar64 route contains unsupported binary64 arithmetic/comparison");
       }
@@ -993,8 +1176,9 @@ class Proof {
       if (observation(value)) return fail(op, "scalar64 operator in unevaluated/constant observation is not admitted");
       if (value->getType()->isDependentType()) continue;
       if (!addType(value->getType(), context)) return fail(op, "scalar64 operator has an unproved scalar instance");
-      if (!scalarValue(value->getLHS()) || !scalarValue(value->getRHS()))
+      if (!scalarValue(value->getLHS()) || !scalarValue(value->getRHS())) {
         return fail(op, "scalar64 operands require builtin values and effect-free addresses/RHS");
+      }
       if (assignment && (!statement(value) || !lvalue(value->getLHS())))
         return fail(op, "scalar64 += is admitted only as a discarded nonvolatile lvalue statement");
       if (dependent) {

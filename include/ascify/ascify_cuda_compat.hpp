@@ -3416,6 +3416,15 @@ inline aclError cudaOccupancyMaxActiveBlocksPerMultiprocessor(
 
   if (blocks < 0) { blocks = 0; }
   if (blocks > INT_MAX) { blocks = INT_MAX; }
+  // Without a real per-kernel occupancy calculator (register pressure is
+  // invisible to the runtime device attributes), more than one resident
+  // full-width block per core cannot be guaranteed for an arbitrary
+  // kernel: a cooperative grid sized above the true residency deadlocks
+  // in the grid rendezvous. Keep the pinned thread-division model for
+  // narrow blocks and claim only one resident block per core once a
+  // block spans half the core's thread capacity, where scalar64-style
+  // emulation routinely exhausts the register budget.
+  if (block_size >= 512 && blocks > 1) { blocks = 1; }
   *active_blocks = static_cast<int>(blocks);
   return ACL_SUCCESS;
 }
@@ -3570,6 +3579,9 @@ inline aclError cudaOccupancyMaxActiveBlocksPerMultiprocessorMaxThreads(
     const int64_t ub_blocks = ub_bytes / static_cast<int64_t>(dynamic_ub_bytes);
     if (ub_blocks < blocks) blocks = ub_blocks;
   }
+    // Same co-residency guarantee as the plain variant: full-width blocks
+  // claim one resident block per core.
+  if (block_size >= 512 && blocks > 1) { blocks = 1; }
   *active_blocks = static_cast<int>(blocks);
   return ACL_SUCCESS;
 }

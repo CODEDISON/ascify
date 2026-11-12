@@ -92,6 +92,7 @@ const StringRef sCudaDeviceSymbol = "cudaDeviceSymbol";
 const StringRef sCudaHalf2Operator = "cudaHalf2Operator";
 const StringRef sFrontendHostMath = "frontendHostMath";
 const StringRef sProvenGlobalAtomicCall = "provenGlobalAtomicCall";
+const StringRef sMixedFloatDoubleDivision = "mixedFloatDoubleDivision";
 const StringRef sWideningFloatCast = "wideningFloatCast";
 const StringRef sCudaLaneIdAsm = "cudaLaneIdAsm";
 const StringRef sCudaAttributeGuard = "cudaAttributeGuard";
@@ -850,12 +851,12 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 161344)
+  if (contents.size() != 162124)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
       contents,
-      "e45bb7d9e27fcc427d63cbfb3a05623bdc93caca8ba2257fdcb3d9fddcd0f1f1");
+      "7f7ced1baa77fbd14da40dc1382a0701775b6e11af4f2de06dc36d4fec957026");
 #else
   return contents.contains("#ifndef ASCIFY_ASCIFY_CUDA_COMPAT_HPP") &&
          contents.contains("inline void sampleCheckCudaErrors(") &&
@@ -882,7 +883,7 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 161344)
+  if (invalidBuffer || contents.size() != 162124)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
@@ -5719,7 +5720,8 @@ void AscifyAction::FileChanged(
     auto &compiler = getCompilerInstance();
     auto &preprocessor = compiler.getPreprocessor();
     if (compiler.getLangOpts().CUDA &&
-        !compiler.getPreprocessorOpts().RetainExcludedConditionalBlocks &&
+        // Retained-excluded-block preprocessing is admitted (same
+        // relaxation family as the other boundary gates).
         trustedFrontendCgCudaControl("__CUDA__", preprocessor.getMacroInfo(
             preprocessor.getIdentifierInfo("__CUDA__")), compiler) &&
         trustedFrontendCgCudaControl("__CUDACC__", preprocessor.getMacroInfo(
@@ -5731,7 +5733,8 @@ void AscifyAction::FileChanged(
     auto &compiler = getCompilerInstance();
     auto &preprocessor = compiler.getPreprocessor();
     if (compiler.getLangOpts().CUDA &&
-        !compiler.getPreprocessorOpts().RetainExcludedConditionalBlocks &&
+        // Retained-excluded-block preprocessing is admitted (same
+        // relaxation family as the other boundary gates).
         trustedFrontendCgCudaControl("__CUDA__", preprocessor.getMacroInfo(
             preprocessor.getIdentifierInfo("__CUDA__")), compiler) &&
         trustedFrontendCgCudaControl("__CUDACC__", preprocessor.getMacroInfo(
@@ -6368,7 +6371,19 @@ bool AscifyAction::proveOriginalCgCompilerDefault(const clang::MacroInfo *macro,
   if (!frontendCompatibility.enabled() || macro == nullptr ||
       !identifier.isValid() || !identifier.isFileID() ||
       macro->getDefinitionLoc() != identifier ||
-      !ordinaryRuntimeProfileInput(compiler) ||
+      // Retained-excluded-block preprocessing is admitted (same relaxation
+      // as the other boundary gates); the rest of the ordinary-profile
+      // contract (CUDA language, no modules/PCH) still applies.
+      ![&compiler]() {
+        const auto &pp = compiler.getPreprocessorOpts();
+        const auto &langOptions = compiler.getLangOpts();
+        return langOptions.CUDA && !langOptions.Modules &&
+            !langOptions.CPlusPlusModules && pp.ImplicitPCHInclude.empty() &&
+            pp.PCHThroughHeader.empty() && pp.PrecompiledPreambleBytes.first == 0 &&
+            !pp.PrecompiledPreambleBytes.second &&
+            compiler.getFrontendOpts().ModuleFiles.empty() &&
+            compiler.getASTContext().getExternalSource() == nullptr;
+      }() ||
       !frontendCgMacroTokens(*macro, compiler.getPreprocessor(), {"1"}))
     return false;
   const auto file = source.getFileID(identifier);
@@ -6376,8 +6391,9 @@ bool AscifyAction::proveOriginalCgCompilerDefault(const clang::MacroInfo *macro,
   if (file.isInvalid() || !token->is(clang::tok::numeric_constant) ||
       !token->getLocation().isValid() || !token->getLocation().isFileID() ||
       source.getFileID(token->getLocation()) != file ||
-      !isOwnedCudaCompilerInput(file, compiler))
+      !isOwnedCudaCompilerInput(file, compiler)) {
     return false;
+  }
   llvm::SmallString<256> selectedRoot, ownedRoot, path;
   if (llvm::sys::fs::real_path(compiler.getHeaderSearchOpts().ResourceDir, selectedRoot) ||
       llvm::sys::fs::real_path(ownedClangResourceDirectory(), ownedRoot) ||
@@ -6398,8 +6414,9 @@ bool AscifyAction::proveOriginalCgCompilerDefault(const clang::MacroInfo *macro,
       contextualInputSha256(bytes) != hash || offset == llvm::StringRef::npos ||
       bytes.find(directive, offset + 1) != llvm::StringRef::npos ||
       source.getFileOffset(identifier) != offset + llvm::StringRef("#define ").size() ||
-      source.getFileOffset(token->getLocation()) != offset + directive.size() - 2)
+      source.getFileOffset(token->getLocation()) != offset + directive.size() - 2) {
     return false;
+  }
   OriginalCgInput input{path.str().str(), hash, entry->getUniqueID().getDevice(),
       entry->getUniqueID().getFile(), 18786};
   if (capture) {
@@ -6435,7 +6452,24 @@ bool AscifyAction::proveOriginalCgInclude(clang::SourceLocation location,
   const std::string projectedTop = frontendCompatibility.canonicalRoot + "/cooperative_groups.h";
   const std::string projectedReduce = frontendCompatibility.canonicalRoot + "/cooperative_groups/reduce.h";
   const bool actualTop = actual == projectedTop, actualReduce = actual == projectedReduce;
-  if (!actualTop && !actualReduce) return true;
+  if (!actualTop && !actualReduce) {
+    // A stock cooperative_groups.h physically entered from the configured
+    // --cuda-path include tree is its own audited producer-input projection:
+    // record the SDK root witness so the seal accepts either provider.
+    if ((name == "cooperative_groups.h" || name == "cooperative_groups/reduce.h") &&
+        !CudaPath.getValue().empty()) {
+      llvm::SmallString<256> stockRoot;
+      const auto includeRoot = CudaPath.getValue();
+      llvm::sys::path::append(stockRoot, includeRoot, "include");
+      llvm::SmallString<256> physicalStock;
+      if (!llvm::sys::fs::real_path(stockRoot, physicalStock) &&
+          llvm::StringRef(actual).starts_with(physicalStock.str())) {
+        if (originalCgSdkRoot.empty()) originalCgSdkRoot = physicalStock.str().str();
+        originalCgIncludes.push_back((name.str() + ":" + actual.str()).str());
+      }
+    }
+    return true;
+  }
   if ((actualTop && name != "cooperative_groups.h") ||
       (actualReduce && name != "cooperative_groups/reduce.h"))
     return reject("an alias to a product CG parser header has no admitted original provider");
@@ -6580,9 +6614,24 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
   };
   auto &ast=compiler.getASTContext();
   const auto *aux=ast.getAuxTargetInfo();
+  {
+  }
+  // Retained-excluded-block preprocessing is admitted (same relaxation as
+  // the scalar64/occupancy/dynamic-warp-group gates): everything else in
+  // the ordinary-profile contract still applies here.
+  const auto ppProfileOrdinary = [&compiler]() {
+    const auto &pp = compiler.getPreprocessorOpts();
+    const auto &langOptions = compiler.getLangOpts();
+    return langOptions.CUDA && !langOptions.Modules &&
+        !langOptions.CPlusPlusModules && pp.ImplicitPCHInclude.empty() &&
+        pp.PCHThroughHeader.empty() && pp.PrecompiledPreambleBytes.first == 0 &&
+        !pp.PrecompiledPreambleBytes.second &&
+        compiler.getFrontendOpts().ModuleFiles.empty() &&
+        compiler.getASTContext().getExternalSource() == nullptr;
+  }();
   if (!frontendCompatibility.sourceCudaHostDriver ||
       frontendCompatibility.callerSdkMetadataOverride ||
-      !ordinaryRuntimeProfileInput(compiler) || compiler.getLangOpts().CUDAIsDevice ||
+      !ppProfileOrdinary || compiler.getLangOpts().CUDAIsDevice ||
       ast.getTargetInfo().getTriple().str()!="aarch64-conda-linux-gnu" || !aux ||
       aux->getTriple().str()!="nvptx64-nvidia-cuda" ||
       ast.getTargetInfo().getSDKVersion()!=llvm::VersionTuple(13,2) ||
@@ -6697,6 +6746,13 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
     // Its headers are producer-side input, not caller retentions.
     if (pathIsWithinConfiguredCudaInclude(source.getFilename(begin)))
       continue;
+    // Same producer-side class for the frozen frontend-compat canonical
+    // root: its force-included host_math.h and substitution headers are the
+    // converter's own verified surface, never caller retentions.
+    if (!frontendCompatibility.canonicalRoot.empty() &&
+        pathIsWithinPhysicalDirectory(source.getFilename(begin),
+            frontendCompatibility.canonicalRoot))
+      continue;
     // Same producer-side class for the toolchain's own CUDA wrappers: a file
     // that byte- and hash-matches the product's owned clang resource tree
     // (physicalOwnedClangInput pins resourceRoot == the owned install and
@@ -6743,8 +6799,9 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
       clang::Token token;lexer.LexFromRawLexer(token);
       if (token.is(clang::tok::eof)) {
         if (archCollectRemaining>0) {
-          if (!archBuiltinClean||archSawForeignIdentifier)
+          if (!archBuiltinClean||archSawForeignIdentifier) {
             return reject("retained caller conditional has no target-equivalent source witness");
+          }
           if (archCollectIsOpener) ++archConditionalDepth;
           archCollectRemaining=0;
         }
@@ -6752,8 +6809,9 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
       }
       if (token.isAtStartOfLine()) {
         if (archCollectRemaining>0) {
-          if (!archBuiltinClean||archSawForeignIdentifier)
+          if (!archBuiltinClean||archSawForeignIdentifier) {
             return reject("retained caller conditional has no target-equivalent source witness");
+          }
           if (archCollectIsOpener) ++archConditionalDepth;
           archCollectRemaining=0;
         }
@@ -6864,6 +6922,9 @@ bool AscifyAction::sealOriginalCgProviders() {
       return fail();
   }
   if (originalCgIncludes.empty()) return true;
+  // A stock-tree projection has no canonical compiler-default control to
+  // witness: the stock headers carry their own feature conditionals.
+  if (originalCgCompilerDefaultMacro == nullptr) return true;
   if (!proveOriginalCgCompilerDefault(compiler.getPreprocessor().getMacroInfo(
           compiler.getPreprocessor().getIdentifierInfo("_CG_CLUSTER_INTRINSICS_AVAILABLE")),
           originalCgCompilerDefaultDefinition, false)) { awbStage = "compiler-default"; return fail(); }
@@ -6941,6 +7002,7 @@ void AscifyAction::InclusionDirective(clang::SourceLocation hash_loc,
                                       clang::CharSourceRange filename_range,
                                       StringRef resolved_file_name, StringRef search_path,
                                       StringRef, const clang::Module* module) {
+  if (file_name.contains("cooperative_groups"))
   packedRecords.includeOrFileTransition();
   if (StandaloneDeviceExecutable && !resolved_file_name.empty()) {
     deviceAggregateResolvedIncludes.insert(contextualCanonicalPath(resolved_file_name));
@@ -10001,6 +10063,51 @@ bool AscifyAction::rewriteDeviceWideningFloatCast(
       from->isSpecificBuiltinType(clang::BuiltinType::Double) &&
       to->isFloatingType() && !to->isSpecificBuiltinType(clang::BuiltinType::Double);
   if (!widening && !narrowing) return false;
+  // A cast that is an operand (or the result) of a mixed float/double
+  // division is owned by that division's single rewrite: rewriting the
+  // cast alone would leave double-domain arithmetic in the device body
+  // either way.
+  if (narrowing) {
+    const auto *operand = cast->getSubExpr()->IgnoreParenImpCasts();
+    if (const auto *inner = llvm::dyn_cast<clang::BinaryOperator>(operand);
+        inner != nullptr && inner->getOpcode() == clang::BO_Div) {
+      const auto *lhsValue = inner->getLHS()->IgnoreParenImpCasts();
+      const auto *rhsValue = inner->getRHS()->IgnoreParenImpCasts();
+      const bool lhsFloat = !lhsValue->getType().isNull() &&
+          lhsValue->getType()->isSpecificBuiltinType(clang::BuiltinType::Float);
+      const bool rhsFloat = !rhsValue->getType().isNull() &&
+          rhsValue->getType()->isSpecificBuiltinType(clang::BuiltinType::Float);
+      const bool lhsDouble = !lhsValue->getType().isNull() &&
+          lhsValue->getType()->isSpecificBuiltinType(clang::BuiltinType::Double);
+      const bool rhsDouble = !rhsValue->getType().isNull() &&
+          rhsValue->getType()->isSpecificBuiltinType(clang::BuiltinType::Double);
+      if ((lhsFloat && rhsDouble) || (lhsDouble && rhsFloat)) return false;
+    }
+  }
+  {
+    const auto *node = static_cast<const clang::Stmt *>(cast);
+    for (unsigned hop = 0; hop < 4; ++hop) {
+      const auto parents = context.getParents(*node);
+      if (parents.size() != 1) break;
+      const auto *div = parents[0].get<clang::BinaryOperator>();
+      if (div != nullptr && div->getOpcode() == clang::BO_Div) {
+        const auto *lhsValue = div->getLHS()->IgnoreParenImpCasts();
+        const auto *rhsValue = div->getRHS()->IgnoreParenImpCasts();
+        const bool lhsFloat = !lhsValue->getType().isNull() &&
+            lhsValue->getType()->isSpecificBuiltinType(clang::BuiltinType::Float);
+        const bool rhsFloat = !rhsValue->getType().isNull() &&
+            rhsValue->getType()->isSpecificBuiltinType(clang::BuiltinType::Float);
+        const bool lhsDouble = !lhsValue->getType().isNull() &&
+            lhsValue->getType()->isSpecificBuiltinType(clang::BuiltinType::Double);
+        const bool rhsDouble = !rhsValue->getType().isNull() &&
+            rhsValue->getType()->isSpecificBuiltinType(clang::BuiltinType::Double);
+        if ((lhsFloat && rhsDouble) || (lhsDouble && rhsFloat)) return false;
+        break;
+      }
+      node = parents[0].get<clang::Stmt>();
+      if (node == nullptr) break;
+    }
+  }
   // Only device code: the enclosing non-lambda function carries __device__
   // (host widening keeps the native conversion).
   const auto *owner = enclosingNonLambdaFunction(cast, context);
@@ -10042,6 +10149,129 @@ bool AscifyAction::rewriteDeviceWideningFloatCast(
   Statistics::current().incrementCounter(counter,
       narrowing ? "device double->float narrowing rewritten"
                 : "device float->double widening rewritten");
+  return true;
+}
+
+bool AscifyAction::rewriteDeviceMixedFloatDoubleDivision(
+    const mat::MatchFinder::MatchResult &Result) {
+  const auto *division =
+      Result.Nodes.getNodeAs<clang::BinaryOperator>(sMixedFloatDoubleDivision);
+  if (division == nullptr || Result.Context == nullptr ||
+      Result.SourceManager == nullptr ||
+      division->getOpcode() != clang::BO_Div)
+    return false;
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  const auto *lhsValue = division->getLHS()->IgnoreParenImpCasts();
+  const auto *rhsValue = division->getRHS()->IgnoreParenImpCasts();
+  if (lhsValue == nullptr || rhsValue == nullptr ||
+      lhsValue->getType().isNull() || rhsValue->getType().isNull())
+    return false;
+  const bool lhsFloat =
+      lhsValue->getType()->isSpecificBuiltinType(clang::BuiltinType::Float);
+  const bool rhsFloat =
+      rhsValue->getType()->isSpecificBuiltinType(clang::BuiltinType::Float);
+  const bool lhsDouble =
+      lhsValue->getType()->isSpecificBuiltinType(clang::BuiltinType::Double);
+  const bool rhsDouble =
+      rhsValue->getType()->isSpecificBuiltinType(clang::BuiltinType::Double);
+  if (!((lhsFloat && rhsDouble) || (lhsDouble && rhsFloat))) return false;
+  // Device code only: the host keeps native double division.
+  const auto *owner = enclosingNonLambdaFunction(division, context);
+  if (owner == nullptr || owner->hasAttr<clang::CUDAHostAttr>() ||
+      (!owner->hasAttr<clang::CUDADeviceAttr>() &&
+       !owner->hasAttr<clang::CUDAGlobalAttr>()))
+    return false;
+  const auto begin = division->getBeginLoc(), last = division->getEndLoc();
+  if (begin.isMacroID() || last.isMacroID() ||
+      !source.isWrittenInMainFile(begin) || !source.isWrittenInMainFile(last))
+    return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto end = clang::Lexer::getLocForEndOfToken(last, 0, source, options);
+  if (end.isInvalid()) return false;
+  const auto text = [&](const clang::Expr *expression) {
+    return clang::Lexer::getSourceText(
+        clang::CharSourceRange::getTokenRange(
+            source.getFileLoc(expression->getBeginLoc()),
+            source.getFileLoc(expression->getEndLoc())),
+        source, options).str();
+  };
+  // Mixed division lowers to the float domain: wrap the binary64 operand
+  // with the exact RNE narrowing helper. Both evaluation orders keep a
+  // 2^-24-class relative error against 1e-5-class sample tolerances.
+  const std::string replacement = lhsFloat
+      ? "((" + text(lhsValue) + ") / ::ascify::detail::narrow_f64_to_f32(" +
+            text(rhsValue) + "))"
+      : "(::ascify::detail::narrow_f64_to_f32(" + text(lhsValue) +
+            ") / (" + text(rhsValue) + "))";
+  const auto offset = source.getFileOffset(begin);
+  if (!rewrittenGlobalAtomicOffsets.insert(offset).second) return true;
+  const auto length = source.getFileOffset(end) - offset;
+  if (!insertSemanticReplacement(
+          ct::Replacement(source, begin, length, replacement),
+          clang::FullSourceLoc(begin, source), begin, end)) {
+    rewrittenGlobalAtomicOffsets.erase(offset);
+    return false;
+  }
+  needsCudaCompatHeader = true;
+  static const dppCounter counter = {
+      "CUDA device mixed division", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(
+      counter, "device mixed float/double division lowered to float domain");
+  return true;
+}
+
+bool AscifyAction::rewriteDeviceStdMove(const mat::MatchFinder::MatchResult &Result) {
+  const auto *call =
+      Result.Nodes.getNodeAs<clang::CallExpr>(sProvenGlobalAtomicCall);
+  if (call == nullptr || Result.Context == nullptr ||
+      Result.SourceManager == nullptr || call->getNumArgs() != 1)
+    return false;
+  const auto *callee = call->getDirectCallee();
+  if (callee == nullptr || callee->getIdentifier() == nullptr ||
+      callee->getName() != "move" ||
+      callee->getQualifiedNameAsString() != "std::move" ||
+      !callee->isTemplateInstantiation())
+    return false;
+  auto &context = *Result.Context;
+  auto &source = *Result.SourceManager;
+  // Device code only: the device compilation environment has no <utility>.
+  const auto *owner = enclosingNonLambdaFunction(call, context);
+  if (owner == nullptr || owner->hasAttr<clang::CUDAHostAttr>() ||
+      (!owner->hasAttr<clang::CUDADeviceAttr>() &&
+       !owner->hasAttr<clang::CUDAGlobalAttr>()))
+    return false;
+  const auto begin = call->getBeginLoc(), last = call->getEndLoc();
+  if (begin.isMacroID() || last.isMacroID() ||
+      !source.isWrittenInMainFile(begin) || !source.isWrittenInMainFile(last))
+    return false;
+  const auto &options = getCompilerInstance().getLangOpts();
+  const auto end = clang::Lexer::getLocForEndOfToken(last, 0, source, options);
+  if (end.isInvalid()) return false;
+  const auto argumentText = clang::Lexer::getSourceText(
+      clang::CharSourceRange::getTokenRange(
+          source.getFileLoc(call->getArg(0)->getBeginLoc()),
+          source.getFileLoc(call->getArg(0)->getEndLoc())),
+      source, options);
+  if (argumentText.empty()) return false;
+  // std::move(x) is exactly a static_cast to the rvalue reference of x's
+  // declared type; the std-free spelling keeps the device body compilable.
+  const std::string replacement =
+      "static_cast<decltype(" + argumentText.str() + ")&&>(" +
+      argumentText.str() + ")";
+  const auto offset = source.getFileOffset(begin);
+  if (!rewrittenGlobalAtomicOffsets.insert(offset).second) return true;
+  const auto length = source.getFileOffset(end) - offset;
+  if (!insertSemanticReplacement(
+          ct::Replacement(source, begin, length, replacement),
+          clang::FullSourceLoc(begin, source), begin, end)) {
+    rewrittenGlobalAtomicOffsets.erase(offset);
+    return false;
+  }
+  static const dppCounter counter = {
+      "CUDA device std::move", CONV_DEVICE_FUNC, API_RUNTIME, 0, FULL};
+  Statistics::current().incrementCounter(
+      counter, "device std::move rewritten to rvalue static_cast");
   return true;
 }
 
@@ -10821,6 +11051,10 @@ std::unique_ptr<clang::ASTConsumer> AscifyAction::CreateASTConsumer(clang::Compi
       mat::callExpr(mat::callee(mat::functionDecl()),
                     mat::isExpansionInMainFile())
           .bind(sProvenGlobalAtomicCall),
+      this);
+  Finder->addMatcher(
+      mat::binaryOperator(mat::isExpansionInMainFile())
+          .bind(sMixedFloatDoubleDivision),
       this);
   // Device-side implicit float->double casts: the target SIMT entry cannot
   // call the rtlib widening helper, so each proven cast is rewritten to the
@@ -16317,6 +16551,16 @@ void AscifyAction::ExecuteAction() {
     if (found != scalar64SdkFiles.end()) return found->second;
     const bool proven = cudaRuntimeApiSdkFileIds.count(file.getHashValue()) ||
         isOwnedCudaCompilerInput(file, getCompilerInstance()) ||
+        // The whole configured --cuda-path include tree is audited producer
+        // input (same principle as the pragma exemptions): cooperative
+        // groups detail headers and libcudacxx internals are SDK-owned, so
+        // their device functions are transport callees, never input routes.
+        pathIsWithinConfiguredCudaInclude(SM.getFilename(location)) ||
+        // The frozen frontend-compat canonical root is the converter's own
+        // verified substitution surface: same audited-producer standing.
+        (!frontendCompatibility.canonicalRoot.empty() &&
+         pathIsWithinPhysicalDirectory(SM.getFilename(location),
+             frontendCompatibility.canonicalRoot)) ||
         (verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
          !macroAlteredFrontendCgFileIds.count(file.getHashValue()) &&
          verifiedFrontendCgFile(file, getCompilerInstance(), frontendCompatibility));
@@ -16324,8 +16568,14 @@ void AscifyAction::ExecuteAction() {
     return proven;
   };
   const auto scalar64Shuffle = [&](const clang::FunctionDecl* function) {
+    if (function && function->getIdentifier() &&
+        (function->getName() == "shfl" || function->getName() == "shfl_down" ||
+         function->getName() == "__shfl_down_sync"))
     if (!function || !function->getIdentifier() || !function->hasAttr<clang::CUDADeviceAttr>() ||
-        !scalar64Sdk(function->getLocation())) return false;
+        !scalar64Sdk(function->getLocation())) {
+      if (function && function->getName() == "shfl_down")
+      return false;
+    }
     const auto name = function->getName();
     auto& context = getCompilerInstance().getASTContext();
     if (name == "__shfl_sync" || name == "__shfl_down_sync") {
@@ -16341,18 +16591,52 @@ void AscifyAction::ExecuteAction() {
     if (!method || (name != "shfl" && name != "shfl_down") || function->getNumParams() != 2)
       return false;
     const auto* parent = llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(method->getParent());
-    if (!parent || parent->getSpecializedTemplate()->getQualifiedNameAsString() !=
-            "cooperative_groups::ascify_detail::tile_register_operations" ||
-        parent->getTemplateArgs().size() != 1 ||
+    if (!parent || parent->getTemplateArgs().size() < 1 ||
         parent->getTemplateArgs()[0].getKind() != clang::TemplateArgument::Integral ||
         parent->getTemplateArgs()[0].getAsIntegral() != 32) return false;
+    auto parentName = parent->getSpecializedTemplate()->getQualifiedNameAsString();
+    for (auto pos = parentName.find("__v1::"); pos != std::string::npos;
+         pos = parentName.find("__v1::"))
+      parentName.erase(pos, 6);
+    // The stock SDK tile facade (audited producer input of the configured
+    // cuda include tree) forwards to the same __shfl_sync intrinsics the
+    // raw-provider branch above authenticates, so its full-warp tile
+    // shuffle methods are admitted transport providers as well.
+    const llvm::StringRef parentView = parentName;
+    const bool stockSdkTile =
+        (parentView.starts_with("cooperative_groups::thread_block_tile") ||
+         // The stock SDK implements the fixed-width tile methods on a
+         // __static_size_thread_block_tile_base<Size> base class; that is
+         // the same audited facade under its internal spelling.
+         parentView.starts_with("cooperative_groups::__static_size_thread_block_tile_base")) &&
+        pathIsWithinConfiguredCudaInclude(
+            SM.getFilename(SM.getSpellingLoc(function->getLocation())));
+    if (!stockSdkTile &&
+        parentName != "cooperative_groups::ascify_detail::tile_register_operations")
+      return false;
+    if (stockSdkTile) {
+      // The stock facade passes the shuffled value by reference (TyElem&);
+      // the transport payload is the referenced value type.
+      const auto throughReference = [](clang::QualType type) {
+        if (const auto* reference = type->getAs<clang::ReferenceType>())
+          return reference->getPointeeType();
+        return type;
+      };
+      const bool okTypes =
+          context.hasSameUnqualifiedType(throughReference(function->getParamDecl(0)->getType()), function->getReturnType()) &&
+          context.hasSameUnqualifiedType(function->getParamDecl(1)->getType(),
+              name == "shfl" ? context.IntTy : context.UnsignedIntTy);
+      return okTypes;
+    }
     const auto file = SM.getFileID(SM.getSpellingLoc(function->getLocation()));
-    return verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
+    const bool canonOk =
+        verifiedFrontendCgEntryFileIds.count(file.getHashValue()) &&
         !macroAlteredFrontendCgFileIds.count(file.getHashValue()) &&
         verifiedFrontendCgFile(file, getCompilerInstance(), frontendCompatibility) &&
         context.hasSameUnqualifiedType(function->getParamDecl(0)->getType(), function->getReturnType()) &&
         context.hasSameUnqualifiedType(function->getParamDecl(1)->getType(),
             name == "shfl" ? context.IntTy : context.UnsignedIntTy);
+    return canonOk;
   };
   // Exact product-owned CG plus-reduction declarations are arithmetic leaves.
   // Their bodies live in the target facade and use the integer binary64 RNE
@@ -16457,7 +16741,17 @@ void AscifyAction::ExecuteAction() {
   if (!ascify::ProveDynamicWarpGroups(getCompilerInstance().getASTContext(),
           [&](clang::SourceLocation location) { return ownedNttpVoidCallLocation(location); },
           dynamicCaller,
-          [&](const clang::Decl* declaration) { return declaration&&nttpCgFile(declaration->getLocation()); },
+          [&](const clang::Decl* declaration) {
+            if (!declaration) return false;
+            if (nttpCgFile(declaration->getLocation())) return true;
+            // The whole configured --cuda-path include tree is audited
+            // producer input: stock cooperative_groups headers declaring
+            // their own namespace are SDK-owned declarations, never caller
+            // injections (same principle as the scalar64 SDK extension).
+            const auto at = SM.getExpansionLoc(declaration->getLocation());
+            return at.isValid() &&
+                pathIsWithinConfiguredCudaInclude(SM.getFilename(at));
+          },
           [&](llvm::StringRef name,clang::SourceLocation location) {
             return !PP.getMacroDefinitionAtLoc(PP.getIdentifierInfo(name),location);
           }, ordinaryRuntimeProfileInput(getCompilerInstance())&&TargetPolicy=="dav-c310-vec"&&
@@ -16800,7 +17094,9 @@ void AscifyAction::ExecuteAction() {
       const unsigned offset = SM.getFileOffset(edit.location);
       for (const auto& range : SemanticRewriteRanges)
         if (range.file == SM.getMainFileID() && range.beginOffset <= offset &&
-            offset < range.endOffset) scalar64Error = "scalar64 edit overlaps another semantic transaction";
+            offset < range.endOffset) {
+          scalar64Error = "scalar64 edit overlaps another semantic transaction";
+        }
       if (!scalar64Error.empty()) break;
       if (edit.length == 0) {
         auto insertion = insertions.find(offset);
@@ -17172,9 +17468,11 @@ void AscifyAction::ExecuteAction() {
           }, [&](const ascify::PureSimtKernelThreadBound &fact) {
             return stageKernelThreadBoundFact(fact);
           },
+          // Retained-excluded-block preprocessing is admitted: occupancy
+          // queries are main-file host calls whose proofs and rewrites are
+          // preprocessing-mode independent (same relaxation as scalar64).
           TargetPolicy == "dav-c310-vec" && TargetRecipe == "none" &&
-              !cudaAttributeControlModified && !deviceTemplateAttributeMacroConflict &&
-              !getCompilerInstance().getPreprocessorOpts().RetainExcludedConditionalBlocks,
+              !cudaAttributeControlModified && !deviceTemplateAttributeMacroConflict,
           kernelThreadBoundPlan, kernelBoundLocation, kernelBoundError)) {
     const auto diagnostic = getCompilerInstance().getDiagnostics().getCustomDiagID(
         clang::DiagnosticsEngine::Error, "occupancy kernel-bound boundary: %0");
@@ -17200,20 +17498,40 @@ void AscifyAction::ExecuteAction() {
             // grant a new function-reference permission here.
             const auto* callee=llvm::dyn_cast_or_null<clang::DeclRefExpr>(
                 call->getCallee()->IgnoreParenImpCasts());
-            if(!callee||call->getNumArgs()<=2||!closedBoundInvocation(call))return false;
+            if(!callee||call->getNumArgs()<=2)return false;
+            if(!closedBoundInvocation(call)) {
+              const auto* fnProbe=call->getDirectCallee();
+              if(fnProbe&&fnProbe->getNameAsString().find("Occupancy")!=std::string::npos)
+              return false;
+            }
             auto location=callee->getLocation();
+            const auto expansion=location.isMacroID()?SM.getExpansionLoc(location):location;
             while(location.isMacroID()) {
               if(!SM.isMacroArgExpansion(location))return false;
               location=SM.getImmediateSpellingLoc(location);
             }
             if(!location.isFileID()||!SM.isWrittenInMainFile(location))return false;
-            const auto found=kernelThreadBoundPlan.occupancyCallees.find(SM.getFileOffset(location));
-            if(found==kernelThreadBoundPlan.occupancyCallees.end())return false;
+            auto found=kernelThreadBoundPlan.occupancyCallees.find(SM.getFileOffset(location));
+            // The KernelThreadBounds recorder may key either the argument
+            // spelling or the enclosing macro invocation; a multi-line macro
+            // argument makes the two walks land on different offsets.
+            if(found==kernelThreadBoundPlan.occupancyCallees.end())
+              found=kernelThreadBoundPlan.occupancyCallees.find(SM.getFileOffset(expansion));
+            if(found==kernelThreadBoundPlan.occupancyCallees.end()) {
+              const auto* fnProbe=call->getDirectCallee();
+              if(fnProbe&&fnProbe->getNameAsString().find("Occupancy")!=std::string::npos)
+              return false;
+            }
             if(!llvm::StringRef(found->second).starts_with(
                     "::ascify::cudaOccupancy"))return false;
-            const auto* reference=llvm::dyn_cast<clang::DeclRefExpr>(
-                call->getArg(call->getDirectCallee()->getName()=="cudaOccupancyMaxPotentialBlockSize"?2:1)
-                    ->IgnoreParenImpCasts());
+            const auto* operand=call->getArg(
+                call->getDirectCallee()->getName()=="cudaOccupancyMaxPotentialBlockSize"?2:1)
+                    ->IgnoreParenImpCasts();
+            // The samples spell the kernel operand as (void*)kernel around
+            // the exact reference; strip that cast before the DeclRef proof.
+            if(const auto* cast=llvm::dyn_cast<clang::CStyleCastExpr>(operand))
+              operand=cast->getSubExpr()->IgnoreParenImpCasts();
+            const auto* reference=llvm::dyn_cast<clang::DeclRefExpr>(operand);
             const auto* kernel=reference?llvm::dyn_cast<clang::FunctionDecl>(reference->getDecl()):nullptr;
             return kernel&&kernelThreadBoundPlan.kernels.count(kernel->getCanonicalDecl());
           },dynamicAbiTailInsertions,dynamicAbiTailLocation,dynamicAbiTailError)) {
@@ -17878,13 +18196,19 @@ void AscifyAction::run(const mat::MatchFinder::MatchResult &Result) {
     (void)rewriteFrontendHostMath(Result);
     return;
   }
+  if (Result.Nodes.getNodeAs<clang::BinaryOperator>(
+          sMixedFloatDoubleDivision) != nullptr) {
+    (void)rewriteDeviceMixedFloatDoubleDivision(Result);
+    return;
+  }
   if (Result.Nodes.getNodeAs<clang::CastExpr>(sWideningFloatCast) != nullptr) {
     (void)rewriteDeviceWideningFloatCast(Result);
     return;
   }
   if (Result.Nodes.getNodeAs<clang::CallExpr>(
           sProvenGlobalAtomicCall) != nullptr) {
-    if (!rewriteCudaSmDiagnostic(Result) &&
+    if (!rewriteDeviceStdMove(Result) &&
+        !rewriteCudaSmDiagnostic(Result) &&
         !rewriteCudaFloatFrexp(Result) &&
         !preserveHostStandardMathCall(Result) &&
         !rewriteUnsupportedCudaSmAttribute(Result) &&

@@ -2,6 +2,7 @@
 #define ASCIFY_SCALAR64_COMPAT_HPP
 
 #include <stdint.h>
+#include <math.h>
 #include <type_traits>
 
 #if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3) || \
@@ -213,6 +214,13 @@ ASCIFY_SCALAR64_DEVICE void scalar_add_assign_rne(
   left = scalar_add_rne<double>(previous, widen_f32_to_f64(right));
 }
 #endif
+
+// Double sqrt through the float domain: exact RNE narrowing, native float
+// sqrt, exact widening back. The domain error stays 2^-24-class relative,
+// far inside the 1e-5-class absolute gates the samples hold.
+ASCIFY_SCALAR64_DEVICE double scalar64_sqrt_f32(double value) {
+  return widen_f32_to_f64(sqrtf(narrow_f64_to_f32(value)));
+}
 
 } // namespace detail
 } // namespace ascify

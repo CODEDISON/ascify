@@ -49,8 +49,13 @@ int main() {
   assert(active == -3 && requested == 2048 && ascify_test_get_device_info_calls == queries);
   assert(ascify::cudaOccupancyMaxActiveBlocksPerMultiprocessorMaxThreads<1024>(
       &active, token, 32, 0) == ACL_SUCCESS && active == 64);
+  // Full-width blocks claim one resident block per core: without a real
+  // per-kernel occupancy calculator, multi-block residency of a 1024-thread
+  // block cannot be guaranteed (register pressure of scalar64-style
+  // emulation), and a cooperative grid sized above true residency
+  // deadlocks in the grid rendezvous (proven on simpleAWBarrier).
   assert(ascify::cudaOccupancyMaxActiveBlocksPerMultiprocessorMaxThreads<1024>(
-      &active, token, 1024, 0) == ACL_SUCCESS && active == 2);
+      &active, token, 1024, 0) == ACL_SUCCESS && active == 1);
   ascify_test_block_limit = 512; active = -3;
   assert(ascify::cudaOccupancyMaxActiveBlocksPerMultiprocessorMaxThreads<1024>(
       &active, token, 1024, 0) == ACL_ERROR_FEATURE_UNSUPPORTED && active == -3);
