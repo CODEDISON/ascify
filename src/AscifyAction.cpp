@@ -225,7 +225,7 @@ bool isFrozenOfficialNvidiaSampleHelperFunctionsPath(llvm::StringRef path) {
   return contents.size() == 2358 &&
          sha256Equals(
              contents,
-             "3fdcd18e41ffc2a9c88ade3595384e9cd05a2d84f80b86a2d5982035ca79c426");
+             "e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2");
 }
 
 unsigned frozenNvidiaSampleHelperFileRole(
@@ -302,7 +302,7 @@ unsigned frozenNvidiaSampleHelperFileRole(
     if (contents.size() == 2358 &&
         sha256Equals(
             contents,
-            "3fdcd18e41ffc2a9c88ade3595384e9cd05a2d84f80b86a2d5982035ca79c426"))
+            "e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2"))
       return FrozenOfficialNvidiaSampleHelperFunctions;
   } else if (filename == "helper_image.h") {
     if (contents.size() == 28739 &&
@@ -852,7 +852,7 @@ bool isExactAscifyCudaCompatPath(llvm::StringRef path) {
   if (!bufferOrError)
     return false;
   const llvm::StringRef contents = (*bufferOrError)->getBuffer();
-  if (contents.size() != 232558)
+  if (contents.size() != 232845)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
@@ -884,7 +884,7 @@ bool locationComesFromAscifyCudaCompat(
   bool invalidBuffer = false;
   const llvm::StringRef contents =
       sourceManager.getBufferData(file, &invalidBuffer);
-  if (invalidBuffer || contents.size() != 232558)
+  if (invalidBuffer || contents.size() != 232845)
     return false;
 #if LLVM_VERSION_MAJOR >= 13
   return sha256Equals(
@@ -6707,7 +6707,7 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
       return reject("dynamic SDK provider changed");
   std::string backend,error;
   if (!ascify::ResolveDynamicWarpGroupsBackend(frontendCompatibility,backend,error)||
-      !remember(backend,9782,"2f6f98ac63aa1b6bc17cb9444af192daaacd71d525183d07146371f1c6d6f043"))
+      !remember(backend,10057,"73651a014dcb7006f528963e4892b0768a7eff8902f70691baa6e4fb49397ec0"))
     return reject("owned dynamic backend has no complete physical identity");
   const auto native=[&](clang::SourceLocation location) {
     if (!location.isFileID()) return false;
@@ -6838,6 +6838,8 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
       if (token.is(clang::tok::eof)) {
         if (archCollectRemaining>0) {
           if (!archBuiltinClean||archSawForeignIdentifier) {
+            llvm::errs() << "ASCIFY DBG witness foreign clean=" << archBuiltinClean
+                         << " at=" << token.getLocation().printToString(source) << "\n";
             return reject("retained caller conditional has no target-equivalent source witness");
           }
           if (archCollectIsOpener) ++archConditionalDepth;
@@ -6848,6 +6850,8 @@ bool AscifyAction::sealDynamicWarpGroupInputs() {
       if (token.isAtStartOfLine()) {
         if (archCollectRemaining>0) {
           if (!archBuiltinClean||archSawForeignIdentifier) {
+            llvm::errs() << "ASCIFY DBG witness foreign clean=" << archBuiltinClean
+                         << " at=" << token.getLocation().printToString(source) << "\n";
             return reject("retained caller conditional has no target-equivalent source witness");
           }
           if (archCollectIsOpener) ++archConditionalDepth;

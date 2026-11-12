@@ -170,6 +170,7 @@ class coalesced_group {
   ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned meta_group_size() const;
   ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync() const;
   template<class T> ASCIFY_FRONTEND_COMPAT_DEVICE_ T shfl(T,int) const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned ballot(unsigned int predicate) const;
 };
 ASCIFY_FRONTEND_COMPAT_DEVICE_ coalesced_group coalesced_threads();
 template<unsigned Size,class Parent> ASCIFY_FRONTEND_COMPAT_DEVICE_

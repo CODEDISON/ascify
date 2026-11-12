@@ -3245,24 +3245,28 @@ inline aclError graphAppendNode(AscifyGraphObj *graph, GraphNode &node,
 
 inline aclError graphTopologicalOrder(AscifyGraphObj *graph,
                                       AscifyGraphExecObj *exec) {
-  size_t indegree[64] = {};
-  bool consumed[64] = {};
-  for (size_t i = 0; i < graph->node_count; ++i) {
-    const GraphNode &node = graph->nodes[i];
-    for (size_t d = 0; d < node.dep_count; ++d) {
-      if (node.deps[d] >= graph->node_count)
-        return ACL_ERROR_RT_PARAM_INVALID;
-      ++indegree[node.deps[d]];
-    }
-  }
-  // Kahn's algorithm preferring lower node indices: deterministic and, for
-  // graphs built in submission order, identical to the recorded order.
+  bool ordered[64] = {};
+  // Repeated selection of the lowest-index node whose dependencies are all
+  // ordered: deterministic, and for graphs built in submission order
+  // identical to the recorded order. A full pass without progress is a
+  // dependency cycle.
   size_t produced = 0;
   while (produced < graph->node_count) {
     bool progressed = false;
     for (size_t i = 0; i < graph->node_count; ++i) {
-      if (consumed[i] || indegree[i] != 0) continue;
-      consumed[i] = true;
+      if (ordered[i]) continue;
+      bool ready = true;
+      for (size_t d = 0; d < graph->nodes[i].dep_count; ++d) {
+        const uint32_t dependency = graph->nodes[i].deps[d];
+        if (dependency >= graph->node_count)
+          return ACL_ERROR_RT_PARAM_INVALID;
+        if (!ordered[dependency]) {
+          ready = false;
+          break;
+        }
+      }
+      if (!ready) continue;
+      ordered[i] = true;
       exec->order[produced++] = static_cast<uint32_t>(i);
       progressed = true;
     }
@@ -3329,9 +3333,11 @@ inline aclError graphReplayNode(AscifyGraphObj *graph, const GraphNode &node,
       const aclrtMemcpyKind kind =
           graphClassifyMemcpyKind(node.dst, node.src, node.kind);
       // A blocking copy preserves the sequential dependency contract of
-      // the replay (the documented concurrency degradation).
+      // the replay (the documented concurrency degradation). The barrier
+      // is the replay stream itself: graph kernels were launched there,
+      // and CANN 9.1 named streams do not order against the null stream.
       if (kind != ACL_MEMCPY_HOST_TO_HOST) {
-        const aclError drained = aclrtSynchronizeStream(nullptr);
+        const aclError drained = aclrtSynchronizeStream(stream);
         if (drained != ACL_SUCCESS) return drained;
       }
       return aclrtMemcpy(node.dst, node.bytes, node.src, node.bytes, kind);

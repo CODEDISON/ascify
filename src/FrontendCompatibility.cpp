@@ -188,6 +188,7 @@ class coalesced_group {
   ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned meta_group_size() const;
   ASCIFY_FRONTEND_COMPAT_DEVICE_ void sync() const;
   template<class T> ASCIFY_FRONTEND_COMPAT_DEVICE_ T shfl(T,int) const;
+  ASCIFY_FRONTEND_COMPAT_DEVICE_ unsigned ballot(unsigned int predicate) const;
 };
 ASCIFY_FRONTEND_COMPAT_DEVICE_ coalesced_group coalesced_threads();
 template<unsigned Size,class Parent> ASCIFY_FRONTEND_COMPAT_DEVICE_
@@ -316,11 +317,11 @@ inline int max(A a, B b) {
 constexpr char kProfileManifest[] =
     "schema=ascify.frontend-compat-profile.v1\n"
     "profile=ascify-admitted-v1\n"
-    "file=cooperative_groups.h;bytes=8986;sha256=834978bc2c27f76f47080b52e19422035687372a8e99e90aa62e8bf4ebdcfa2a\n"
+    "file=cooperative_groups.h;bytes=9066;sha256=fa9ecf30d67e5906e4c095464f69f1be57d6d6940b095f56d4a94c43cd6656a7\n"
     "file=cooperative_groups/reduce.h;bytes=2167;sha256=5229c9dc3f909da824339a588eaab8f38f8804eb39ac35025766df06e0c38165\n"
     "file=host_math.h;bytes=2594;sha256=3b87b69a619cff6333d8fb2728d6af31a90a28fd2073077084b81ba602d70e2f\n";
 
-static_assert(sizeof(kAdmissionHeader) - 1 == 8986,
+static_assert(sizeof(kAdmissionHeader) - 1 == 9066,
               "admission header identity drifted");
 static_assert(sizeof(kReductionHeader) - 1 == 2167,
               "reduction header identity drifted");
@@ -337,7 +338,7 @@ struct RequiredProfileFile {
 
 constexpr RequiredProfileFile kRequiredProfileFiles[] = {
     {"profile.manifest", 393, kProfileManifest},
-    {"cooperative_groups.h", 8986, kAdmissionHeader},
+    {"cooperative_groups.h", 9066, kAdmissionHeader},
     {"cooperative_groups/reduce.h", 2167, kReductionHeader},
     {"host_math.h", 2594, kHostMathHeader},
 };

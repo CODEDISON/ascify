@@ -623,6 +623,15 @@ class Proof {
         ++stats.coordinateQueries;stats.scalarExpressions.insert(call);
       }else if((name=="thread_rank"||name=="size"||name=="num_threads"||name=="meta_group_rank"||name=="meta_group_size")&&call->getNumArgs()==0) {
         if(!context.hasSameUnqualifiedType(call->getType(),context.UnsignedIntTy))return fail(call->getExprLoc(),"coalesced query must preserve CUDA unsigned-int type");
+      }else if(name=="ballot"&&call->getNumArgs()==1) {
+        // Coalesced-group ballot: a pure masked warp vote over an
+        // effect-free builtin predicate; the result is the group's mask.
+        if(!context.hasSameUnqualifiedType(call->getType(),context.UnsignedIntTy)||
+            !plain(call->getArg(0))->getType()->isBuiltinType()||
+            !plain(call->getArg(0))->getType()->isArithmeticType()||
+            call->getArg(0)->HasSideEffects(context))
+          return fail(call->getExprLoc(),"coalesced ballot admits only an effect-free builtin predicate with unsigned mask result");
+        ++stats.coordinateQueries;stats.scalarExpressions.insert(call);
       }else if(name=="shfl"&&call->getNumArgs()==2) {
         const auto* rank=dyn_cast<IntegerLiteral>(plain(call->getArg(1)));
         if(!rank||rank->getValue()!=0||!written(rank)||!builtin32(call->getType())||

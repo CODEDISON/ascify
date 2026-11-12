@@ -80,7 +80,7 @@ require_fixed '26e988c97fb3d77d498e384c685177ed7966e41d5d58ebc9b7d3d696859f5e57'
 require_fixed 'FrozenOfficialNvidiaSampleHelperFunctions' "$action_cpp"
 require_fixed 'FrozenOfficialNvidiaSampleHelperImage' "$action_cpp"
 require_fixed 'FrozenOfficialNvidiaSampleHelperTimer' "$action_cpp"
-require_fixed '3fdcd18e41ffc2a9c88ade3595384e9cd05a2d84f80b86a2d5982035ca79c426' "$action_cpp"
+require_fixed 'e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2' "$action_cpp"
 require_fixed 'bc1fe7921bafad278ffa2e4bc8a99c18825208b9f5f47842a7cf7e86cae8b3f1' "$action_cpp"
 require_fixed 'activeFrozenHelperFunctionsProviderMacroBodyMatches' "$action_cpp"
 require_fixed 'activeFrozenHelperCudaMaxBodyMatches' "$action_cpp"
@@ -127,7 +127,7 @@ require_fixed '#expression, __FILE__, __LINE__' "$compat_header"
 require_fixed 'one uniform performance tier' "$compat_header"
 
 # Frozen target helper and Runtime header bytes must share one identity.
-[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 232558 ]
+[ "$(wc -c <"$compat_header" | tr -d ' ')" -eq 232845 ]
 if command -v sha256sum >/dev/null 2>&1; then
   compat_header_sha=$(sha256sum "$compat_header" | awk '{print $1}')
 else
@@ -144,7 +144,7 @@ else
   helper_functions_sha=$(shasum -a 256 "$official_helper_functions" | awk '{print $1}')
 fi
 [ "$helper_functions_sha" = \
-  3fdcd18e41ffc2a9c88ade3595384e9cd05a2d84f80b86a2d5982035ca79c426 ]
+  e7f285cd6e01c69e680250285ce5aed1642b6b5175ebef30f2747b3760345ee2 ]
 for frozen_provider in \
   'helper_image.h:28739:bc1fe7921bafad278ffa2e4bc8a99c18825208b9f5f47842a7cf7e86cae8b3f1' \
   'helper_timer.h:16060:c48552a7c7b7a5840fcfbc176bfb5a19b501fdc56796b64a63e78e39ab547078'; do
