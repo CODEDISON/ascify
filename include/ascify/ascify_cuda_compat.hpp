@@ -949,7 +949,7 @@ inline aclError cudaSetDevice(int device) {
 
 inline aclError cudaGetDevice(int* device) {
   if (device == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
 
   int32_t current = -1;
@@ -1001,7 +1001,7 @@ inline aclError cudaDeviceCanAccessPeer(int* can_access_peer, int device,
 inline aclError cudaDeviceEnablePeerAccess(int peer_device,
                                           unsigned int flags = 0) {
   if (peer_device < 0 || flags != 0) { return ACL_ERROR_RT_PARAM_INVALID; }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   return detail::rememberLifecycleError(aclrtDeviceEnablePeerAccess(
       static_cast<int32_t>(peer_device), 0U));
@@ -1009,7 +1009,7 @@ inline aclError cudaDeviceEnablePeerAccess(int peer_device,
 
 inline aclError cudaDeviceDisablePeerAccess(int peer_device) {
   if (peer_device < 0) { return ACL_ERROR_RT_PARAM_INVALID; }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   return detail::rememberLifecycleError(
       aclrtDeviceDisablePeerAccess(static_cast<int32_t>(peer_device)));
@@ -2075,7 +2075,7 @@ inline int (*cdpDrainHook)() = nullptr;
 
 
 inline aclError cudaDeviceSynchronize() {
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   // CDP emulation: device-side <<<>>> launches queued on the device are
   // replayed by the host before the device is considered synchronized
@@ -2093,7 +2093,7 @@ inline aclError cudaDeviceSynchronize() {
 }
 
 inline aclError cudaDeviceReset() {
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
 
   int32_t current = -1;
@@ -2124,7 +2124,7 @@ inline aclError cudaDeviceReset() {
 inline aclError cudaMalloc(void** device_pointer, size_t bytes) {
   if (device_pointer == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
   *device_pointer = nullptr;
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   detail::RuntimeLockGuard allocationGuard(detail::runtimeAllocationRegistry().lock);
   const aclError status = aclrtMalloc(device_pointer, bytes, ACL_MEM_MALLOC_HUGE_FIRST);
@@ -2155,7 +2155,7 @@ inline aclError cudaFree(void* device_pointer) {
   // CUDA specifies cudaFree(0) as a successful no-op. Do not delegate that
   // case to runtimes that reject null pointers.
   if (device_pointer == nullptr) { return ACL_SUCCESS; }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   if (detail::managedFree(device_pointer)) { return ACL_SUCCESS; }
   if (detail::graphMarkOwnedPointerDead(device_pointer)) { return ACL_SUCCESS; }
@@ -2184,7 +2184,7 @@ inline aclError cudaFree(void* device_pointer) {
 inline aclError cudaMallocHost(void** host_pointer, size_t bytes) {
   if (host_pointer == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
   *host_pointer = nullptr;
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   return aclrtMallocHost(host_pointer, bytes);
 }
@@ -2297,7 +2297,7 @@ inline aclError cudaHostAlloc(void** host_pointer, size_t bytes,
   const unsigned int supported =
       cudaHostAllocDefault | cudaHostAllocPortable | cudaHostAllocMapped;
   if ((flags & ~supported) != 0U) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   void* raw_pointer = nullptr;
   const aclError status = aclrtMallocHost(&raw_pointer, bytes);
@@ -2346,7 +2346,7 @@ inline aclError cudaHostRegister(void* host_pointer, size_t bytes,
                                   cudaHostRegisterPortable |
                                   cudaHostRegisterMapped;
   if ((flags & ~supported) != 0U) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   void* device_pointer = nullptr;
   const aclError status = aclrtHostRegister(
@@ -2361,7 +2361,7 @@ inline aclError cudaHostRegister(void* host_pointer, size_t bytes,
 }
 
 inline aclError cudaHostUnregister(void* host_pointer) {
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   detail::mappedHostForget(host_pointer);
   return aclrtHostUnregister(host_pointer);
@@ -2377,13 +2377,13 @@ inline aclError cudaHostGetDevicePointer(void** device_pointer,
   }
   *device_pointer = nullptr;
   if (flags != 0U) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   return aclrtHostGetDevicePointer(host_pointer, device_pointer, 0U);
 }
 
 inline aclError cudaFreeHost(void* host_pointer) {
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   if (detail::mappedHostForget(host_pointer)) {
     const aclError unregistered = aclrtHostUnregister(host_pointer);
@@ -2435,7 +2435,7 @@ inline aclError cudaMemcpy(void* destination, const void* source, size_t bytes,
       !detail::nonnullMemoryRange(source, bytes)) {
     return ACL_ERROR_RT_PARAM_INVALID;
   }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   // ACL's immediate copy does not order itself after default-stream work.
   // Wait for that work before copying device memory, without synchronizing
@@ -2465,7 +2465,7 @@ inline aclError cudaMemcpyAsync(void* destination, const void* source,
       !detail::nonnullMemoryRange(source, bytes)) {
     return ACL_ERROR_RT_PARAM_INVALID;
   }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   if (detail::graphCaptureActive()) {
     const aclError captured = detail::graphCaptureDivertMemcpy(
@@ -2486,13 +2486,36 @@ __aicore__ ASCIFY_FORCEINLINE long long device_clock() {
   return 0;
 }
 
+namespace detail {
+// Allocation -> locality-domain ordinal ledger (host-side, single-threaded
+// sample flow; entries are forgotten when the allocation is freed).
+inline std::map<const void *, int> &allocationLocalityLedger() {
+  static std::map<const void *, int> ledger;
+  return ledger;
+}
+inline void rememberAllocationLocality(const void *ptr, int ordinal) {
+  allocationLocalityLedger()[ptr] = ordinal;
+}
+inline int queryAllocationLocality(const void *ptr) {
+  const auto &ledger = allocationLocalityLedger();
+  const auto found = ledger.find(ptr);
+  return found != ledger.end() ? found->second : -1;
+}
+inline void forgetAllocationLocality(const void *ptr) {
+  allocationLocalityLedger().erase(ptr);
+}
+}  // namespace detail
+
 // ---- Stream-ordered allocation (cudaMallocAsync/cudaFreeAsync line) -----
 // The target has no hardware stream-ordered allocator; these perform the
 // identical allocation/free synchronously, which preserves the caller's
 // data-flow correctness (each stream operation still observes its own
 // allocation) without inventing an async pool that does not exist.
 
-using cudaMemPool_t = void *;
+struct cudaMemPoolOpaque {
+  unsigned int localityDomainOrdinal;
+};
+using cudaMemPool_t = cudaMemPoolOpaque *;
 
 enum cudaMemPoolAttr { cudaMemPoolAttrReleaseThreshold = 0x1 };
 
@@ -2508,7 +2531,7 @@ inline aclError cudaMallocAsync(T **ptr, size_t size, aclrtStream stream) {
   // pool pointers at launch time.
   (void)stream;
   if (ptr == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   if (detail::graphCaptureActive()) {
     // Stream capture turns the stream-ordered allocation into a graph
@@ -2533,6 +2556,7 @@ inline aclError cudaMallocAsync(T **ptr, size_t size, aclrtStream stream) {
 }
 
 inline aclError cudaFreeAsync(void *ptr, aclrtStream stream) {
+  detail::forgetAllocationLocality(ptr);
   // Synchronous free (same data-flow argument as the allocation above). A
   // pool pointer may be owned by a device other than the calling thread's
   // current one -- CUDA frees it through the allocating context -- so a
@@ -2540,7 +2564,7 @@ inline aclError cudaFreeAsync(void *ptr, aclrtStream stream) {
   // the peer-staging mirrors keyed by it die with it.
   (void)stream;
   if (ptr == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   if (detail::managedFree(ptr)) { return ACL_SUCCESS; }
   // A graph-owned allocation keeps its physical block (address-stable
@@ -2579,6 +2603,8 @@ inline aclError cudaFreeAsync(void *ptr, aclrtStream stream) {
   return status;
 }
 
+inline aclError cudaStreamCreateCompatForward(aclrtStream *stream);
+
 static char ascifyDefaultMemPoolStorage[1];
 
 inline aclError cudaDeviceGetDefaultMemPool(cudaMemPool_t *pool, int device) {
@@ -2586,7 +2612,7 @@ inline aclError cudaDeviceGetDefaultMemPool(cudaMemPool_t *pool, int device) {
   // pool surface; the handle only carries the cudaMemPoolSetAccess contract
   // below, so any non-negative device id is a valid pool owner.
   if (pool == nullptr || device < 0) return ACL_ERROR_RT_PARAM_INVALID;
-  *pool = &ascifyDefaultMemPoolStorage[0];
+  *pool = reinterpret_cast<cudaMemPool_t>(&ascifyDefaultMemPoolStorage[0]);
   return ACL_SUCCESS;
 }
 
@@ -2597,12 +2623,22 @@ inline aclError cudaMemPoolSetAttribute(cudaMemPool_t pool,
   return ACL_SUCCESS;
 }
 
-enum cudaMemLocationType { cudaMemLocationTypeDevice = 1 };
+enum cudaMemLocationType {
+  cudaMemLocationTypeInvalid = 0,
+  cudaMemLocationTypeDevice = 1,
+  // CUDA 13.4 locality domains: a localized device location carries the
+  // domain ordinal beside the device id.
+  cudaMemLocationTypeDeviceLocalityDomain = 2,
+};
 enum cudaMemAccessFlags { cudaMemAccessFlagsProtReadWrite = 1 };
 
 struct cudaMemLocation {
   cudaMemLocationType type;
   int id;
+  struct {
+    unsigned char deviceId;
+    unsigned char localityDomainId;
+  } localized;
 };
 struct cudaMemAccessDesc {
   cudaMemLocation location;
@@ -2626,7 +2662,7 @@ inline aclError cudaMemset(void* destination, int value, size_t bytes) {
   if (!detail::nonnullMemoryRange(destination, bytes)) {
     return ACL_ERROR_RT_PARAM_INVALID;
   }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   return aclrtMemset(destination, bytes, value, bytes);
 }
@@ -2637,7 +2673,7 @@ inline aclError cudaMemsetAsync(void* destination, int value, size_t bytes,
   if (!detail::nonnullMemoryRange(destination, bytes)) {
     return ACL_ERROR_RT_PARAM_INVALID;
   }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   if (detail::graphCaptureActive()) {
     const aclError captured = detail::graphCaptureDivertMemset(
@@ -2712,13 +2748,17 @@ inline void forgetStreamDevice(aclrtStream stream) {
 inline aclError cudaStreamCreate(aclrtStream* stream) {
   if (stream == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
   *stream = nullptr;
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   const aclError status = aclrtCreateStream(stream);
   if (status == ACL_SUCCESS && stream != nullptr) {
     detail::rememberStreamDevice(*stream, detail::selectedDeviceForThread());
   }
   return status;
+}
+
+inline aclError cudaStreamCreateCompatForward(aclrtStream *stream) {
+  return cudaStreamCreate(stream);
 }
 
 inline aclError cudaStreamCreateWithFlags(
@@ -2753,7 +2793,7 @@ inline aclError cudaDeviceGetStreamPriorityRange(int* least_priority,
     defined(ACL_MAJOR_VERSION) && defined(ACL_MINOR_VERSION) && \
     defined(ACL_PATCH_VERSION) && ACL_MAJOR_VERSION == 1 && \
     ACL_MINOR_VERSION == 17 && ACL_PATCH_VERSION == 0
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   int32_t least = -1;
   int32_t greatest = -1;
@@ -2809,7 +2849,7 @@ inline aclError cudaStreamCreateWithPriority(aclrtStream* stream,
 }
 
 inline aclError cudaStreamDestroy(aclrtStream stream) {
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   // CUDA's cudaStreamDestroy is context-agnostic; rtStreamDestroy rejects a
   // stream that does not belong to the thread's current context (EE1010).
@@ -2853,7 +2893,7 @@ inline aclError cudaStreamDestroy(aclrtStream stream) {
 }
 
 inline aclError cudaStreamSynchronize(aclrtStream stream) {
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   const aclError status = aclrtSynchronizeStream(stream);
   if (status != ACL_SUCCESS) return status;
@@ -2873,7 +2913,7 @@ inline aclError cudaStreamQuery(aclrtStream stream) {
     defined(ACL_MAJOR_VERSION) && defined(ACL_MINOR_VERSION) && \
     defined(ACL_PATCH_VERSION) && ACL_MAJOR_VERSION == 1 && \
     ACL_MINOR_VERSION == 17 && ACL_PATCH_VERSION == 0
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   aclrtStreamStatus result = ACL_STREAM_STATUS_RESERVED;
   const aclError status = aclrtStreamQuery(stream, &result);
@@ -2967,7 +3007,7 @@ inline aclError cudaStreamWaitEvent(aclrtStream stream, aclrtEvent event,
     defined(ACL_MAJOR_VERSION) && defined(ACL_MINOR_VERSION) && \
     defined(ACL_PATCH_VERSION) && ACL_MAJOR_VERSION == 1 && \
     ACL_MINOR_VERSION == 17 && ACL_PATCH_VERSION == 0
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   // cudaEventCreate uses Ex + SYNC events on this admitted SDK. Their wait
   // captures the latest record and is unaffected by subsequent rerecords.
@@ -3006,7 +3046,7 @@ inline aclError cudaLaunchHostFunc(aclrtStream stream, cudaHostFn_t function,
     defined(ACL_MAJOR_VERSION) && defined(ACL_MINOR_VERSION) && \
     defined(ACL_PATCH_VERSION) && ACL_MAJOR_VERSION == 1 && \
     ACL_MINOR_VERSION == 17 && ACL_PATCH_VERSION == 0
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   // Runtime owns the callback thread. This queues the user's function after
   // prior stream work; subsequent work waits for it to return. As in CUDA,
@@ -3031,7 +3071,7 @@ inline aclError cudaEventCreateWithFlags(aclrtEvent* event, unsigned int flags) 
       cudaEventDefault | cudaEventBlockingSync | cudaEventDisableTiming;
   if ((flags & ~supported) != 0U) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
   *event = nullptr;
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   return aclrtCreateEvent(event);
 }
@@ -3039,7 +3079,7 @@ inline aclError cudaEventCreateWithFlags(aclrtEvent* event, unsigned int flags) 
 inline aclError cudaEventCreate(aclrtEvent* event) {
   if (event == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
   *event = nullptr;
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
 #if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3) && \
     defined(ACL_MAJOR_VERSION) && defined(ACL_MINOR_VERSION) && \
@@ -3055,7 +3095,7 @@ inline aclError cudaEventCreate(aclrtEvent* event) {
 }
 
 inline aclError cudaEventDestroy(aclrtEvent event) {
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   const aclError status = aclrtDestroyEvent(event);
   if (status == ACL_SUCCESS) { detail::forgetEventRecordDevice(event); }
@@ -3064,7 +3104,7 @@ inline aclError cudaEventDestroy(aclrtEvent event) {
 
 inline aclError cudaEventRecord(
     aclrtEvent event, aclrtStream stream = nullptr) {
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   if (detail::graphCaptureActive() && stream != nullptr &&
       detail::graphCaptureRecordEvent(event, stream)) {
@@ -3102,7 +3142,7 @@ inline aclError cudaEventRecord(
 }
 
 inline aclError cudaEventSynchronize(aclrtEvent event) {
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   const aclError status = aclrtSynchronizeEvent(event);
   if (status != ACL_SUCCESS) return status;
@@ -3117,7 +3157,7 @@ inline aclError cudaEventQuery(aclrtEvent event) {
     defined(ACL_MAJOR_VERSION) && defined(ACL_MINOR_VERSION) && \
     defined(ACL_PATCH_VERSION) && ACL_MAJOR_VERSION == 1 && \
     ACL_MINOR_VERSION == 17 && ACL_PATCH_VERSION == 0
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   aclrtEventRecordedStatus recorded = ACL_EVENT_RECORDED_STATUS_NOT_READY;
   const aclError status = aclrtQueryEventStatus(event, &recorded);
@@ -3133,7 +3173,7 @@ inline aclError cudaEventQuery(aclrtEvent event) {
 inline aclError cudaEventElapsedTime(float* milliseconds, aclrtEvent start,
                                      aclrtEvent end) {
   if (milliseconds == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   return aclrtEventElapsedTime(milliseconds, start, end);
 }
@@ -3403,7 +3443,7 @@ inline aclError cudaGraphCreate(cudaGraph_t *graph, unsigned int flags) {
   if (graph == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
   *graph = nullptr;
   if (flags != 0U) return ACL_ERROR_RT_PARAM_INVALID;
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) return ready;
   detail::AscifyGraphObj *object = detail::newGraphObject();
   if (object == nullptr) return ACL_ERROR_BAD_ALLOC;
@@ -3412,7 +3452,7 @@ inline aclError cudaGraphCreate(cudaGraph_t *graph, unsigned int flags) {
 }
 
 inline aclError cudaGraphDestroy(cudaGraph_t graph) {
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) return ready;
   return detail::graphReleaseReference(graph);
 }
@@ -3734,7 +3774,7 @@ inline aclError cudaGraphLaunch(cudaGraphExec_t exec, aclrtStream stream) {
   if (exec == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
   if (detail::graphCaptureActive())
     return ACL_ERROR_FEATURE_UNSUPPORTED;  // nested graph capture
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) return ready;
   detail::AscifyGraphObj *graph = exec->graph;
   for (size_t i = 0; i < exec->order_count; ++i) {
@@ -3754,7 +3794,7 @@ inline aclError cudaStreamBeginCapture(aclrtStream stream,
       mode != cudaStreamCaptureModeThreadLocal &&
       mode != cudaStreamCaptureModeRelaxed)
     return ACL_ERROR_RT_PARAM_INVALID;
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) return ready;
   detail::GraphCaptureState &capture = detail::graphCaptureState();
   if (capture.active) return ACL_ERROR_RT_PARAM_INVALID;
@@ -3810,7 +3850,7 @@ inline aclError cudaMallocManaged(void **pointer, size_t bytes,
   if (flags != cudaMemAttachGlobal && flags != cudaMemAttachHost &&
       flags != cudaMemAttachSingle)
     return ACL_ERROR_FEATURE_UNSUPPORTED;
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) return ready;
   void *host = calloc(bytes == 0 ? 1 : bytes, 1);
   unsigned char *shadow = static_cast<unsigned char *>(calloc(bytes == 0 ? 1 : bytes, 1));
@@ -4234,6 +4274,17 @@ inline aclError cudaDeviceGetAttribute(int* value, aclrtDevAttr attribute, int d
   if (attribute == cudaDevAttrComputeCapabilityMajor) { *value = 7; return ACL_SUCCESS; }
   if (attribute == cudaDevAttrComputeCapabilityMinor) { *value = 0; return ACL_SUCCESS; }
   if (attribute == cudaDevAttrMemoryPoolsSupported) { *value = 1; return ACL_SUCCESS; }
+  // CUDA 13.4 locality domains: this target is one locality domain (the
+  // whole vector-core cluster), so the count is 1 and the per-domain SM
+  // count equals the reviewed vector-core occupancy answer.
+  if (attribute == static_cast<aclrtDevAttr>(79000011U)) { *value = 1; return ACL_SUCCESS; }
+  if (attribute == static_cast<aclrtDevAttr>(79000012U)) {
+    int64_t cores = 0;
+    const aclError q = aclrtGetDeviceInfo(0, ACL_DEV_ATTR_VECTOR_CORE_NUM, &cores);
+    if (q != ACL_SUCCESS) return q;
+    *value = static_cast<int>(cores > 0 ? cores : 1);
+    return ACL_SUCCESS;
+  }
   // Cooperative launch is implemented on this target (direct cooperative
   // launch plus the admitted grid rendezvous), so the reviewed capability
   // answers 1; the same contract cudaDeviceProp::cooperativeLaunch reports.
@@ -4680,7 +4731,7 @@ inline aclError cudaStreamAddCallback(aclrtStream stream,
                                       void *userData, unsigned int flags) {
   if (callback == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
   if (flags != 0U) { return ACL_ERROR_FEATURE_UNSUPPORTED; }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   const aclError subscribed = detail::ensureStreamCallbackSubscription(
       stream, detail::selectedDeviceForThread());
@@ -4715,7 +4766,7 @@ inline aclError cuInit(unsigned int) { return cudaRuntimeEnsureReady(); }
 inline aclError cuDeviceGetCount(int *count) {
   if (count == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
   *count = 0;
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   uint32_t devices = 0;
   const aclError status = aclrtGetDeviceCount(&devices);
@@ -4757,7 +4808,7 @@ inline aclError cuDeviceCanAccessPeer(int *can_access_peer, CUdevice device,
   if (can_access_peer == nullptr || device < 0 || peer_device < 0) {
     return ACL_ERROR_RT_PARAM_INVALID;
   }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   int32_t result = 0;
   const aclError status = aclrtDeviceCanAccessPeer(
@@ -4803,7 +4854,7 @@ inline aclError cuDeviceGetAttribute(int *value, CUdevice_attribute attribute,
       return ACL_SUCCESS;
     case CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT:
     case CU_DEVICE_ATTRIBUTE_CLOCK_RATE: {
-      const aclError ready = cudaRuntimeEnsureReady();
+      const aclError ready = ::ascify::cudaRuntimeEnsureReady();
       if (ready != ACL_SUCCESS) { return ready; }
       int64_t raw = 0;
       const aclrtDevAttr what = attribute == CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT
@@ -4841,7 +4892,7 @@ inline aclError cuCtxCreate(CUcontext *context, CUctxCreateParams *,
   const aclError counted = cuDeviceGetCount(&count);
   if (counted != ACL_SUCCESS) { return counted; }
   if (device < 0 || device >= count) { return ACL_ERROR_RT_INVALID_DEVICEID; }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   const aclError status = aclrtSetDevice(device);
   if (status != ACL_SUCCESS) { return status; }
@@ -4856,7 +4907,7 @@ inline aclError cuCtxDestroy(CUcontext) {
 }
 
 inline aclError cuCtxSynchronize(CUcontext) {
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   return aclrtSynchronizeDevice();
 }
@@ -4890,7 +4941,7 @@ inline bool elf64ModuleImageSize(const void *image, size_t &size) {
 inline aclError cuModuleLoadData(CUmodule *module, const void *image) {
   if (module == nullptr || image == nullptr) { return ACL_ERROR_RT_PARAM_INVALID; }
   *module = nullptr;
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   size_t size = 0;
   if (!detail::elf64ModuleImageSize(image, size)) {
@@ -4934,7 +4985,7 @@ inline aclError cuMemFree(CUdeviceptr pointer) { return cudaFree(pointer); }
 // single-stream sequential semantics exactly.
 inline aclError cuMemcpyHtoD(CUdeviceptr destination, const void *source,
                              size_t bytes) {
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   const aclError drained = aclrtSynchronizeDevice();
   if (drained != ACL_SUCCESS) { return drained; }
@@ -4944,7 +4995,7 @@ inline aclError cuMemcpyHtoD(CUdeviceptr destination, const void *source,
 
 inline aclError cuMemcpyDtoH(void *destination, CUdeviceptr source,
                              size_t bytes) {
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   const aclError drained = aclrtSynchronizeDevice();
   if (drained != ACL_SUCCESS) { return drained; }
@@ -5249,7 +5300,7 @@ inline aclError cudaOccupancyMaxActiveBlocksPerMultiprocessor(
     return ACL_ERROR_RT_PARAM_INVALID;
   }
 
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
 
   int32_t device = 0;
@@ -5305,7 +5356,7 @@ inline aclError cudaOccupancyMaxPotentialBlockSizeEstimate(
   if (min_grid_size == nullptr || block_size == nullptr || block_size_limit < 0) {
     return ACL_ERROR_RT_PARAM_INVALID;
   }
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) { return ready; }
   int32_t device = 0;
   aclError status = aclrtGetDevice(&device);
@@ -5411,7 +5462,7 @@ inline aclError cudaOccupancyMaxActiveBlocksPerMultiprocessorMaxThreads(
     return ACL_ERROR_RT_PARAM_INVALID;
   if (static_cast<unsigned>(block_size) > MaxThreads)
     return ACL_ERROR_FEATURE_UNSUPPORTED;
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) return ready;
   int32_t device = -1;
   aclError status = aclrtGetDevice(&device);
@@ -5503,7 +5554,7 @@ inline aclError cudaFuncGetAttributesMaxThreads(
                 "Ascify: a concrete kernel function pointer is required");
   if (attributes == nullptr || kernel == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
 #if defined(ASCIFY_SIMT_HEADER_FAMILY_LEGACY_BETA3)
-  const aclError ready = cudaRuntimeEnsureReady();
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
   if (ready != ACL_SUCCESS) return ready;
   int32_t device = -1;
   aclError status = aclrtGetDevice(&device);
@@ -5728,6 +5779,184 @@ template<typename Unsupported = void>
 __aicore__ ASCIFY_FORCEINLINE void threadfence_system() {
   static_assert(detail::dependentFalse<Unsupported>::value,
                 "Ascify: no admitted CUDA system-scope fence mapping");
+}
+
+}  // namespace ascify
+
+namespace ascify {
+
+// ---- Locality domains (CUDA 13.4) ----
+// The target exposes one locality domain: the whole vector-core cluster.
+// Green contexts and execution-context streams map to the ordinary device
+// context and streams; localized pools record their domain ordinal so the
+// pointer placement query can report it back.
+enum cudaDevResourceType {
+  cudaDevResourceTypeInvalid = 0,
+  cudaDevResourceTypeSm      = 1,
+};
+enum {
+  cudaDevSmResourceGroupLocalityDomainId = 0x1,
+};
+struct cudaDevSmResource {
+  unsigned int flags;
+  unsigned int localityDomainId;
+  unsigned int smCount;
+};
+union cudaDevResource {
+  cudaDevSmResource sm;
+};
+struct cudaDevSmResourceGroupParams {
+  unsigned int flags;
+  unsigned int localityDomainId;
+};
+struct cudaDevResourceDesc;  // opaque descriptor
+using cudaDevResourceDesc_t = cudaDevResourceDesc *;
+using cudaExecutionContext_t = void *;
+
+// CUDA 13.4 locality-domain selectors: Ascify-private aclrtDevAttr tags
+// (same convention as the capability-epoch pair), answered in-process by
+// cudaDeviceGetAttribute instead of being forwarded to aclrt.
+inline constexpr aclrtDevAttr cudaDevAttrLocalityDomainCount =
+    static_cast<aclrtDevAttr>(79000011U);
+inline constexpr aclrtDevAttr cudaDevAttrLocalityDomainMultiprocessorCount =
+    static_cast<aclrtDevAttr>(79000012U);
+
+
+inline aclError cudaDeviceGetDevResource(int device, cudaDevResource *resource,
+                                         cudaDevResourceType type) {
+  if (resource == nullptr || device < 0) return ACL_ERROR_RT_PARAM_INVALID;
+  if (type != cudaDevResourceTypeSm) return ACL_ERROR_FEATURE_UNSUPPORTED;
+  const aclError ready = ::ascify::cudaRuntimeEnsureReady();
+  if (ready != ACL_SUCCESS) { return ready; }
+  const aclError set = ::ascify::cudaSetDevice(device);
+  if (set != ACL_SUCCESS) { return set; }
+  int64_t cores = 0;
+  const aclError status = aclrtGetDeviceInfo(static_cast<uint32_t>(device),
+      ACL_DEV_ATTR_VECTOR_CORE_NUM, &cores);
+  if (status != ACL_SUCCESS) return status;
+  resource->sm.flags = cudaDevSmResourceGroupLocalityDomainId;
+  resource->sm.localityDomainId = 0;
+  resource->sm.smCount = static_cast<unsigned int>(cores > 0 ? cores : 1);
+  return ACL_SUCCESS;
+}
+inline aclError cudaDevSmResourceSplit(cudaDevResource *results,
+                                       size_t count,
+                                       const cudaDevResource *whole,
+                                       cudaDevResource *remainder,
+                                       size_t paramsCount,
+                                       const cudaDevSmResourceGroupParams *params) {
+  if (results == nullptr || whole == nullptr || remainder == nullptr ||
+      count != paramsCount)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  unsigned int assigned = 0;
+  for (size_t i = 0; i < count && i < 1; ++i) {
+    results[i].sm.flags = cudaDevSmResourceGroupLocalityDomainId;
+    results[i].sm.localityDomainId = params[i].localityDomainId;
+    results[i].sm.smCount = whole->sm.smCount;
+    assigned += whole->sm.smCount;
+  }
+  // With a single locality domain every partition takes the whole cluster;
+  // the remainder stays empty.
+  remainder->sm.flags = 0;
+  remainder->sm.localityDomainId = 0;
+  remainder->sm.smCount = whole->sm.smCount > assigned
+      ? whole->sm.smCount - assigned : 0;
+  return ACL_SUCCESS;
+}
+inline aclError cudaDevResourceGenerateDesc(cudaDevResourceDesc_t *desc,
+                                             const cudaDevResource *resources,
+                                             size_t count) {
+  if (desc == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  *desc = reinterpret_cast<cudaDevResourceDesc_t>(const_cast<cudaDevResource*>(resources));
+  return ACL_SUCCESS;
+}
+inline aclError cudaGreenCtxCreate(cudaExecutionContext_t *context,
+                                    cudaDevResourceDesc_t desc, int device,
+                                    unsigned int flags) {
+  if (context == nullptr || desc == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  (void)flags;
+  // Green contexts map to the ordinary device context on this target.
+  *context = desc;
+  return ::ascify::cudaSetDevice(device);
+}
+inline aclError cudaExecutionCtxStreamCreate(aclrtStream *stream,
+                                             cudaExecutionContext_t context,
+                                             unsigned int flags,
+                                             int priority) {
+  (void)context; (void)flags; (void)priority;
+  // Non-blocking flags and priorities are advisory on this layer; the
+  // ordinary stream carries the execution-context contract.
+  return ::ascify::cudaStreamCreateCompatForward(stream);
+}
+inline aclError cudaExecutionCtxDestroy(cudaExecutionContext_t context) {
+  (void)context;
+  return ACL_SUCCESS;
+}
+inline aclError cudaStreamGetDevResource(aclrtStream stream,
+                                         cudaDevResource *resource,
+                                         cudaDevResourceType type) {
+  (void)stream;
+  if (resource == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  if (type != cudaDevResourceTypeSm) return ACL_ERROR_FEATURE_UNSUPPORTED;
+  // Every stream reports the single whole-cluster domain.
+  resource->sm.flags = cudaDevSmResourceGroupLocalityDomainId;
+  resource->sm.localityDomainId = 0;
+  int64_t cores = 0;
+  int device = 0;
+  const aclError got = aclrtGetDevice(&device);
+  if (got != ACL_SUCCESS) return got;
+  const aclError status = aclrtGetDeviceInfo(static_cast<uint32_t>(device),
+      ACL_DEV_ATTR_VECTOR_CORE_NUM, &cores);
+  if (status != ACL_SUCCESS) return status;
+  resource->sm.smCount = static_cast<unsigned int>(cores > 0 ? cores : 1);
+  return ACL_SUCCESS;
+}
+inline aclError cudaMemPoolCreate(cudaMemPool_t *pool,
+                                  const cudaMemPoolProps *properties) {
+  if (pool == nullptr || properties == nullptr)
+    return ACL_ERROR_RT_PARAM_INVALID;
+  // Pools are direct allocation wrappers on this layer; record the ordinal
+  // so the placement query can echo it.
+  unsigned int ordinal = properties->location.type ==
+      cudaMemLocationTypeDeviceLocalityDomain
+      ? properties->location.localized.localityDomainId : 0xFFFFFFFFu;
+  cudaMemPool_t record = new (std::nothrow) cudaMemPoolOpaque();
+  if (record == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  record->localityDomainOrdinal = ordinal;
+  *pool = record;
+  return ACL_SUCCESS;
+}
+inline aclError cudaMemPoolDestroy(cudaMemPool_t pool) {
+  delete pool;
+  return ACL_SUCCESS;
+}
+inline aclError cudaMallocFromPoolAsync(void **ptr, size_t size,
+                                        cudaMemPool_t pool,
+                                        aclrtStream stream) {
+  const aclError status = ::ascify::cudaMallocAsync(reinterpret_cast<void **>(ptr), size, stream);
+  if (status == ACL_SUCCESS && ptr != nullptr && *ptr != nullptr) {
+    // Track the pool's locality ordinal for the placement query.
+    detail::rememberAllocationLocality(*ptr, pool ? pool->localityDomainOrdinal : 0xFFFFFFFFu);
+  }
+  return status;
+}
+struct cudaPointerAttributes {
+  int device;
+  void *devicePointer;
+  void *hostPointer;
+  int type;
+  int localityDomainOrdinal;
+};
+inline aclError cudaPointerGetAttributes(cudaPointerAttributes *attributes,
+                                         const void *ptr) {
+  if (attributes == nullptr || ptr == nullptr) return ACL_ERROR_RT_PARAM_INVALID;
+  __builtin_memset(attributes, 0, sizeof(*attributes));
+  attributes->devicePointer = const_cast<void *>(ptr);
+  int device = 0;
+  if (aclrtGetDevice(&device) == ACL_SUCCESS) attributes->device = device;
+  attributes->localityDomainOrdinal =
+      detail::queryAllocationLocality(ptr);
+  return ACL_SUCCESS;
 }
 
 }  // namespace ascify
