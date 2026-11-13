@@ -289,8 +289,27 @@ class Proof {
     for(const auto* declaration:lookup->decls()) {
       const auto* primary=dyn_cast<FunctionTemplateDecl>(declaration);
       const auto* function=primary?primary->getTemplatedDecl():dyn_cast<FunctionDecl>(declaration);
-      if(!function||ascify::normalizeCgName(function->getQualifiedNameAsString())!=ascify::normalizeCgName("cooperative_groups::reduce")||!trusted(function))return false;
-      if(primary)for(const auto* redecl:primary->redecls())if(!sdk(redecl))return false;
+      if(!function||ascify::normalizeCgName(function->getQualifiedNameAsString())!=ascify::normalizeCgName("cooperative_groups::reduce")||!trusted(function))
+        return false;
+      if(primary)for(const auto* redecl:primary->redecls())if(!sdk(redecl))
+        return false;
+    }
+    return true;
+  }
+
+  // The free cg::sync overloads over the frozen profile's group references
+  // (thread_block/thread_block_tile/grid_group/scratch block) form the same
+  // admitted forwarder pattern as cg::reduce: an unresolved lookup inside a
+  // Group& template resolves only these trusted overloads.
+  bool legacySyncLookup(const UnresolvedLookupExpr* lookup) const {
+    if(lookup->decls_begin()==lookup->decls_end())return false;
+    for(const auto* declaration:lookup->decls()) {
+      const auto* primary=dyn_cast<FunctionTemplateDecl>(declaration);
+      const auto* function=primary?primary->getTemplatedDecl():dyn_cast<FunctionDecl>(declaration);
+      if(!function||ascify::normalizeCgName(function->getQualifiedNameAsString())!=ascify::normalizeCgName("cooperative_groups::sync")||!trusted(function))
+        return false;
+      if(primary)for(const auto* redecl:primary->redecls())if(!sdk(redecl))
+        return false;
     }
     return true;
   }
@@ -744,7 +763,11 @@ class Proof {
       const auto* f=dyn_cast<FunctionDecl>(member->getMemberDecl());
       if(groupFunction(f)&&!admittedCallees.count(member))return fail(member->getMemberLoc(),"dynamic member is not a direct evaluated owned call");
     }
-    for(const auto* lookup:inventory.lookups)if(callerExpansion(lookup->getNameLoc())&&newLookup(lookup))
+    // Same legacy-reduce exemption as the used-marking loop above: the
+    // unresolved cg::reduce lookup inside a Group& template is the admitted
+    // reduce-forwarder pattern, not an unproved new-group reference.
+    for(const auto* lookup:inventory.lookups)if(callerExpansion(lookup->getNameLoc())&&
+        newLookup(lookup)&&!legacyReduceLookup(lookup)&&!legacySyncLookup(lookup))
       return fail(lookup->getNameLoc(),"unresolved new-group lookup has no exact ordinary local-call witness");
     for(const auto& use:inventory.types)if(callerExpansion(use.location.getBeginLoc())&&related(use.location.getType())) {
       bool admitted=greaterTypeLocations.count(use.location.getOpaqueData());

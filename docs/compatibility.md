@@ -587,3 +587,43 @@ unproved maximum-field uses refuse publication.
 Only this field is written after all runtime queries succeed. This is not full
 `cudaFuncAttributes` support and does not supply static shared-memory metadata.
 The legacy shared-size adapter is unchanged.
+
+## Device dynamic parallelism (experimental)
+
+Device-side `<<<...>>>` launches inside `__global__`/`__device__` functions
+are queued for host replay: the call is rewritten to an atomic slot claim in
+a device-global task ring, and `cudaDeviceSynchronize` drains the ring and
+replays every entry through typed per-kernel launch glue emitted beside the
+kernel declarations. Device-side stream creation/destruction, error queries,
+`printf` and device `cudaMemcpyAsync` route to queue-faithful stubs (a memcpy
+task replays as a device-to-device copy). PTX inline asm (`bfind.u32`) is
+rewritten to the equivalent software bit scan. `cdpSimpleQuicksort` is the
+validated reference.
+
+## CUDA graphs (experimental)
+
+The target has no native graph API; the compat layer records kernel, memcpy,
+memset, memalloc, memfree and host-callback nodes and replays them in
+topological order on `cudaGraphLaunch`. Manual kernel nodes snapshot their
+`kernelParams` at add time through a typed `<<<>>>` bridge, preserving CUDA
+copy-at-add semantics. Stream capture diverts the launch shims and records
+the same node kinds. Memalloc nodes assign addresses synchronously and
+reproduce virtual-address reuse across graph relaunches. Concurrency between
+independent branches is not reproduced (sequential replay); `simpleCudaGraphs`
+and `graphMemoryNodes` are the validated references.
+
+## Cross-device access
+
+Peer detection/enable and device-to-device copies run natively. Kernel-arg
+pointers owned by a different device are refreshed into local mirrors at
+launch time (the device cannot dereference peer global memory on this
+target), covering regular and pool allocations. Cross-device stream-event
+waits are host-synchronized because the native edge never advances.
+`simpleP2P` and `streamOrderedAllocationP2P` are the validated references.
+
+## Block-scope barriers and warp votes
+
+`cuda::barrier<cuda::thread_scope_block>` has an admitted parse provider and
+a sense-reversing rendezvous implementation on the admitted pure-SIMT
+atomics; coalesced-group `ballot` is a masked warp vote. `simpleAWBarrier`
+and the CG warp-vote samples are the validated references.

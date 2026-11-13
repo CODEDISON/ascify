@@ -10744,9 +10744,6 @@ bool AscifyAction::rewriteDeviceStructFieldAtomic(
     }
     break;
   }
-  llvm::errs() << "ASCIFY DBG root walk stmt=" << address->getStmtClassName()
-               << " root=" << (root ? root->getNameAsString() : std::string("null"))
-               << " callee=" << calleeName << "\n";
   // The target's generic atomics preserve both GM and UB address spaces,
   // so any device-side lvalue address (struct field, parameter root, or
   // deref chain) routes through the same admitted runtime helper.
@@ -10800,8 +10797,22 @@ bool AscifyAction::rewriteDeviceCdpRuntimeCall(
     return false;
   auto &context = *Result.Context;
   auto &source = *Result.SourceManager;
+  // Device context gate: these APIs exist on the host too, so the owner
+  // chain must actually carry __device__/__global__ (a null owner — e.g.
+  // inside a staged virtual buffer — is NOT device evidence here).
+  const auto *owner = enclosingNonLambdaFunction(call, context);
+  const auto deviceOwner = [owner]() {
+    for (const auto *probe = owner; probe != nullptr;
+         probe = probe->getTemplateInstantiationPattern())
+      if (probe->hasAttr<clang::CUDADeviceAttr>() ||
+          probe->hasAttr<clang::CUDAGlobalAttr>())
+        return true;
+    return false;
+  }();
+  if (!deviceOwner) return false;
   if (isMemcpy && call->getNumArgs() < 4) return false;
-  if (!isMemcpy && call->getNumArgs() != 0 && !isString) return false;
+  if (!isMemcpy && !isPrintf && call->getNumArgs() != 0 && !isString)
+    return false;
   if (isString && call->getNumArgs() != 1) return false;
   const auto begin = source.getFileLoc(call->getBeginLoc());
   const auto last = source.getFileLoc(call->getEndLoc());

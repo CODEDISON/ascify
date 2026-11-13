@@ -6,6 +6,45 @@ for supported domains and experimental paths.
 
 ## Unreleased
 
+- Validate the complete original CUDA Samples v13.0 vector set (38/38) on
+  950DT, closing the collection with five full-chain acceptances:
+  `simpleCallback` (per-device stream-callback workers; the historical
+  "SVM populate" hang was a non-recursive-lock self-deadlock, per-device
+  report-subscription keys and last-error pollution), `streamOrderedAllocationP2P`
+  (cross-device stream-event waits replay through a host-synchronized edge
+  because the native cross-device wait never advances on this target; stream
+  destruction runs under the exact creating context), `cdpSimpleQuicksort`
+  (device-side dynamic launches queue into a device-global ring and the host
+  drains and replays them through typed per-kernel glue at
+  `cudaDeviceSynchronize`; device streams, error queries, `printf` and
+  device-side `cudaMemcpyAsync` route to queue-faithful stubs),
+  `simpleCudaGraphs` and `graphMemoryNodes` (host-side graph recorder and
+  sequential topological replay; kernel-node parameters snapshot at add time
+  through a typed `<<<>>>` bridge; memalloc nodes assign synchronously and
+  reproduce virtual-address reuse; stream capture diverts the launch shims).
+- Add the block-scope `cuda::barrier` admission surface: a parse-provider
+  overlay keeps `__shared__` barriers trivially constructible, the compat
+  implementation is a sense-reversing rendezvous on the admitted pure-SIMT
+  atomics, and `simpleAWBarrier` validates end to end under retained-blocks
+  preprocessing with the exact `__CUDA_ARCH__` witness pin.
+- Admit the retained-excluded-block preprocessing mode across the scalar64,
+  occupancy, dynamic-warp-group, compiler-default, witness and verified-entry
+  boundaries so `__CUDA_ARCH__`-guarded device code converts with in-guard
+  rewrites; the target build pins the same numeric value.
+- Generalize the dynamic kernel ABI tail to every grid-using global kernel,
+  admit caller prototypes as the ordinary multi-TU declaration pattern, and
+  clamp full-width (>=512-thread) occupancy claims to one resident block per
+  core: without a per-kernel occupancy calculator a cooperative grid sized
+  above true residency deadlocks in the grid rendezvous.
+- Add coalesced-group `ballot` (masked warp vote) to the frozen CG profile
+  and the compat facade, scalar64 transports for double-precision warp
+  shuffles, mixed float/double division through the float domain, and the
+  exact float-domain `sqrt` chain.
+- Cover P2P pool allocations in the launch-time peer staging registry,
+  destroy foreign allocations under owner binding, and route the unused
+  `<thrust/...>` include closure of CDP samples to a stub (any actual thrust
+  use fails loudly at the missing symbols).
+
 - Validate the complete original CUDA Samples v13.0 `simpleMPI` target on 950DT,
   preserving both TUs and the original two-rank workload. Check all 5120000
   square-root outputs and the original MPI average using existing production code.
