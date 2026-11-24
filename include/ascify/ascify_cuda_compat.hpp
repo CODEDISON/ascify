@@ -14,6 +14,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <type_traits>
@@ -1303,14 +1304,8 @@ inline void releasePeerMirrorsTouchingDevice(int32_t device) {
   }
 }
 
-// dlsym keeps the shim free of any link-time dependency beyond libc
-// (glibc 2.34+ hosts dlsym there); RTLD_NEXT is spelled directly so no
-// dlfcn include is needed on host-only parse paths.
-extern "C" void *dlsym(void *handle, const char *symbol);
 inline void *nextRuntimeSymbol(const char *name) {
-  void *const after_self =
-      reinterpret_cast<void *>(static_cast<intptr_t>(-1));
-  return dlsym(after_self, name);
+  return ::dlsym(RTLD_NEXT, name);
 }
 
 }  // namespace detail

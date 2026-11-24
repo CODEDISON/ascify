@@ -23,8 +23,37 @@ common_flags=(
 
 "${compiler}" "${common_flags[@]}" \
   "${repo_root}/tests/rewrite/rowwise_simd_dispatch_test.cpp" \
+  -ldl \
   -o "${test_build_dir}/rowwise_simd_dispatch_test"
 "${test_build_dir}/rowwise_simd_dispatch_test"
+
+# Keep the caller fixed while swapping providers with the same library name.
+softmax_stub=libascify_test_softmax_v1.so
+caller_link_flags=("${test_build_dir}/legacy/${softmax_stub}" -ldl)
+if [[ "$(uname -s)" == Darwin ]]; then
+  shared_flags=(-dynamiclib "-Wl,-install_name,@rpath/${softmax_stub}")
+  caller_link_flags+=("-Wl,-rpath,${test_build_dir}/legacy")
+else
+  shared_flags=(-shared "-Wl,-soname,${softmax_stub}")
+fi
+for flavor in legacy extended; do
+  mkdir -p "${test_build_dir}/${flavor}"
+  short_capability=0
+  if [[ "${flavor}" == extended ]]; then short_capability=1; fi
+  "${compiler}" "${common_flags[@]}" -fPIC "${shared_flags[@]}" \
+    "-DASCIFY_TEST_SHORT_SOFTMAX_RUNTIME=${short_capability}" \
+    "${repo_root}/tests/rewrite/rowwise_softmax_runtime_stub.cpp" \
+    -o "${test_build_dir}/${flavor}/${softmax_stub}"
+done
+"${compiler}" "${common_flags[@]}" \
+  "${repo_root}/tests/rewrite/rowwise_softmax_runtime_compat_test.cpp" \
+  "${caller_link_flags[@]}" \
+  -o "${test_build_dir}/rowwise_softmax_runtime_compat_test"
+for flavor in legacy extended; do
+  LD_LIBRARY_PATH="${test_build_dir}/${flavor}:${LD_LIBRARY_PATH:-}" \
+    DYLD_LIBRARY_PATH="${test_build_dir}/${flavor}:${DYLD_LIBRARY_PATH:-}" \
+    "${test_build_dir}/rowwise_softmax_runtime_compat_test" "${flavor}"
+done
 
 "${compiler}" "${common_flags[@]}" \
   "${repo_root}/tests/rewrite/rowwise_hybrid_registry_test.cpp" \
@@ -67,6 +96,7 @@ done
 abi_header="${repo_root}/include/ascify/target/dav_c310/rowwise_simd_abi.h"
 runtime_root="${repo_root}/runtime/dav_3510/rowwise"
 for symbol in \
+  ascify950_softmax_supports_short_v1 \
   ascify950_softmax_reg_recompute_launch_v1 \
   ascify950_rmsnorm_reg_cached_launch_v1 \
   ascify950_rmsnorm_reg_plain_rowbatch_launch_v1 \

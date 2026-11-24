@@ -10,6 +10,9 @@
 #include <cstdint>
 #include <type_traits>
 #include <utility>
+#if defined(__APPLE__) || (defined(__linux__) && !defined(__PIC__))
+#include <dlfcn.h>
+#endif
 
 namespace ascify {
 namespace target {
@@ -38,6 +41,23 @@ inline SimdTryResult TrySoftmaxSimd(
   if (!IsSoftmaxSimdDomain(
           stream, input, output, rows, columns, 0, 0)) {
     return NotHandled();
+  }
+  if (columns < kSoftmaxMinimumColumns) {
+#if defined(__APPLE__) || (defined(__linux__) && !defined(__PIC__))
+    // A non-PIC ELF linker may resolve an absent weak function permanently
+    // to zero when the caller is built against an early v1 library.
+    static const auto supports_short =
+        reinterpret_cast<decltype(&ascify950_softmax_supports_short_v1)>(
+            ::dlsym(RTLD_DEFAULT, "ascify950_softmax_supports_short_v1"));
+#elif defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+    const auto supports_short = &ascify950_softmax_supports_short_v1;
+#else
+    constexpr decltype(&ascify950_softmax_supports_short_v1) supports_short = nullptr;
+#endif
+    if (!supports_short ||
+        !supports_short(stream, input, output, rows, static_cast<int>(columns))) {
+      return NotHandled();
+    }
   }
   return {true, ascify950_softmax_reg_recompute_launch_v1(
                     stream, input, output, rows,

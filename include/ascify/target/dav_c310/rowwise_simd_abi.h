@@ -17,6 +17,17 @@ extern "C" aclError ascify950_softmax_reg_recompute_launch_v1(
     aclrtStream stream, const half* input, half* output, int64_t rows,
     int columns, int block_threads, int grid_cap);
 
+// Early v1 libraries support only the original wide Softmax domain. The
+// optional symbol is a weak reference in PIC ELF callers. Darwin and
+// non-PIC Linux callers resolve it by name.
+extern "C"
+#if defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+__attribute__((weak))
+#endif
+int ascify950_softmax_supports_short_v1(
+    aclrtStream stream, const half* input, half* output, int64_t rows,
+    int columns);
+
 extern "C" aclError ascify950_rmsnorm_reg_cached_launch_v1(
     aclrtStream stream, const half* input, half* output, const half* weight,
     float* inverse_rms, int64_t rows, int64_t columns, double epsilon);

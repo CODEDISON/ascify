@@ -31,7 +31,6 @@ constexpr uint32_t kTileElements = 16384;
 constexpr uint32_t kPipelineDepth = 2;
 constexpr uint32_t kAdapterSimtThreads = 1024;
 constexpr uint32_t kScalarSlotBytes = 32;
-constexpr uint32_t kScalarSlotFloats = kScalarSlotBytes / sizeof(float);
 constexpr uint32_t kTileBytes = kTileElements * sizeof(half);
 constexpr uint32_t kConservativeUbBytes = 196608;
 constexpr uint32_t kUbBytes =
@@ -42,121 +41,12 @@ static_assert(kUbBytes == 163904,
 static_assert(kUbBytes <= kConservativeUbBytes,
               "Softmax exceeds conservative UB budget");
 
+constexpr uint32_t kResidentElements = 32768;
+constexpr uint32_t kResidentUbBytes = kResidentElements * (sizeof(half) + sizeof(float));
+static_assert(kResidentUbBytes <= kConservativeUbBytes,
+              "resident Softmax exceeds the conservative UB budget");
+
 constexpr float kNegativeInfinity = -3.402823466e+38F;
-
-__simd_vf__ inline void SoftmaxTileMaxVF(
-    __ubuf__ half* input, __ubuf__ float* rowMaxSlot,
-    uint32_t count, uint32_t chunkCount, uint32_t firstTile) {
-  static constexpr AscendC::Reg::CastTrait kHalfToFloat = {
-      AscendC::Reg::RegLayout::ZERO,
-      AscendC::Reg::SatMode::UNKNOWN,
-      AscendC::Reg::MaskMergeMode::ZEROING,
-      AscendC::RoundMode::UNKNOWN};
-  constexpr uint32_t kVectorLength =
-      AscendC::VECTOR_REG_WIDTH / sizeof(float);
-
-  AscendC::Reg::RegTensor<half> inputHalf;
-  AscendC::Reg::RegTensor<float> inputFloat;
-  AscendC::Reg::RegTensor<float> tileMax;
-  AscendC::Reg::RegTensor<float> negativeInfinity;
-  AscendC::Reg::RegTensor<float> previousMax;
-  AscendC::Reg::MaskReg fullMask =
-      AscendC::Reg::CreateMask<uint32_t, AscendC::Reg::MaskPattern::ALL>();
-  AscendC::Reg::MaskReg oneMask =
-      AscendC::Reg::CreateMask<uint32_t, AscendC::Reg::MaskPattern::VL1>();
-
-  AscendC::Reg::Duplicate<float>(tileMax, kNegativeInfinity, fullMask);
-  AscendC::Reg::Duplicate<float>(
-      negativeInfinity, kNegativeInfinity, fullMask);
-  uint32_t remaining = count;
-  for (uint32_t chunk = 0; chunk < chunkCount; ++chunk) {
-    const uint32_t offset = chunk * kVectorLength;
-    AscendC::Reg::MaskReg tailMask =
-        AscendC::Reg::UpdateMask<float>(remaining);
-    AscendC::Reg::LoadAlign<
-        half, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(
-        inputHalf, input + offset);
-    AscendC::Reg::Cast<float, half, kHalfToFloat>(
-        inputFloat, inputHalf, tailMask);
-    // A zero tail would corrupt an all-negative row. Select the max-neutral
-    // value, then run Max with a full mask.
-    AscendC::Reg::Select<float>(
-        inputFloat, inputFloat, negativeInfinity, tailMask);
-    AscendC::Reg::Max<float>(
-        tileMax, tileMax, inputFloat, fullMask);
-  }
-  AscendC::Reg::Reduce<AscendC::Reg::ReduceType::MAX>(
-      tileMax, tileMax, fullMask);
-
-  if (firstTile == 0) {
-    AscendC::Reg::LoadAlign<
-        float, AscendC::Reg::LoadDist::DIST_BRC_B32>(
-        previousMax, rowMaxSlot);
-    AscendC::Reg::Max<float>(
-        tileMax, tileMax, previousMax, oneMask);
-  }
-  AscendC::Reg::StoreAlign<
-      float, AscendC::Reg::StoreDist::DIST_FIRST_ELEMENT_B32>(
-      rowMaxSlot, tileMax, oneMask);
-}
-
-__simd_vf__ inline void SoftmaxTileExpSumVF(
-    __ubuf__ half* input, __ubuf__ float* rowMaxSlot,
-    __ubuf__ float* rowSumSlot, uint32_t count, uint32_t chunkCount,
-    uint32_t firstTile) {
-  static constexpr AscendC::Reg::CastTrait kHalfToFloat = {
-      AscendC::Reg::RegLayout::ZERO,
-      AscendC::Reg::SatMode::UNKNOWN,
-      AscendC::Reg::MaskMergeMode::ZEROING,
-      AscendC::RoundMode::UNKNOWN};
-  constexpr uint32_t kVectorLength =
-      AscendC::VECTOR_REG_WIDTH / sizeof(float);
-
-  AscendC::Reg::RegTensor<half> inputHalf;
-  AscendC::Reg::RegTensor<float> inputFloat;
-  AscendC::Reg::RegTensor<float> rowMax;
-  AscendC::Reg::RegTensor<float> centered;
-  AscendC::Reg::RegTensor<float> expFloat;
-  AscendC::Reg::RegTensor<float> tileSum;
-  AscendC::Reg::RegTensor<float> previousSum;
-  AscendC::Reg::MaskReg fullMask =
-      AscendC::Reg::CreateMask<uint32_t, AscendC::Reg::MaskPattern::ALL>();
-  AscendC::Reg::MaskReg oneMask =
-      AscendC::Reg::CreateMask<uint32_t, AscendC::Reg::MaskPattern::VL1>();
-
-  AscendC::Reg::LoadAlign<
-      float, AscendC::Reg::LoadDist::DIST_BRC_B32>(rowMax, rowMaxSlot);
-  AscendC::Reg::Duplicate<float>(tileSum, 0.0F, fullMask);
-  uint32_t remaining = count;
-  for (uint32_t chunk = 0; chunk < chunkCount; ++chunk) {
-    const uint32_t offset = chunk * kVectorLength;
-    AscendC::Reg::MaskReg tailMask =
-        AscendC::Reg::UpdateMask<float>(remaining);
-    AscendC::Reg::LoadAlign<
-        half, AscendC::Reg::LoadDist::DIST_UNPACK_B16>(
-        inputHalf, input + offset);
-    AscendC::Reg::Cast<float, half, kHalfToFloat>(
-        inputFloat, inputHalf, tailMask);
-    AscendC::Reg::Sub<float>(
-        centered, inputFloat, rowMax, tailMask);
-    AscendC::Reg::Exp<float>(expFloat, centered, tailMask);
-    // Exp's zeroing tail makes a full-mask Add safe here.
-    AscendC::Reg::Add<float>(tileSum, tileSum, expFloat, fullMask);
-  }
-  AscendC::Reg::Reduce<AscendC::Reg::ReduceType::SUM>(
-      tileSum, tileSum, fullMask);
-
-  if (firstTile == 0) {
-    AscendC::Reg::LoadAlign<
-        float, AscendC::Reg::LoadDist::DIST_BRC_B32>(
-        previousSum, rowSumSlot);
-    AscendC::Reg::Add<float>(
-        tileSum, tileSum, previousSum, oneMask);
-  }
-  AscendC::Reg::StoreAlign<
-      float, AscendC::Reg::StoreDist::DIST_FIRST_ELEMENT_B32>(
-      rowSumSlot, tileSum, oneMask);
-}
 
 __simd_vf__ inline void SoftmaxNormalizeVF(
     __ubuf__ half* output, __ubuf__ half* input,
@@ -180,6 +70,7 @@ __simd_vf__ inline void SoftmaxNormalizeVF(
   AscendC::Reg::RegTensor<float> inputFloat;
   AscendC::Reg::RegTensor<float> rowMax;
   AscendC::Reg::RegTensor<float> rowSum;
+  AscendC::Reg::RegTensor<float> inverseSum;
   AscendC::Reg::RegTensor<float> centered;
   AscendC::Reg::RegTensor<float> expFloat;
   AscendC::Reg::RegTensor<float> normalized;
@@ -188,6 +79,10 @@ __simd_vf__ inline void SoftmaxNormalizeVF(
       float, AscendC::Reg::LoadDist::DIST_BRC_B32>(rowMax, rowMaxSlot);
   AscendC::Reg::LoadAlign<
       float, AscendC::Reg::LoadDist::DIST_BRC_B32>(rowSum, rowSumSlot);
+  auto fullMask =
+      AscendC::Reg::CreateMask<uint32_t, AscendC::Reg::MaskPattern::ALL>();
+  AscendC::Reg::Duplicate<float>(inverseSum, 1.0F, fullMask);
+  AscendC::Reg::Div<float>(inverseSum, inverseSum, rowSum, fullMask);
   uint32_t remaining = count;
   for (uint32_t chunk = 0; chunk < chunkCount; ++chunk) {
     const uint32_t offset = chunk * kVectorLength;
@@ -201,13 +96,70 @@ __simd_vf__ inline void SoftmaxNormalizeVF(
     AscendC::Reg::Sub<float>(
         centered, inputFloat, rowMax, tailMask);
     AscendC::Reg::Exp<float>(expFloat, centered, tailMask);
-    AscendC::Reg::Div<float>(
-        normalized, expFloat, rowSum, tailMask);
+    AscendC::Reg::Mul<float>(
+        normalized, expFloat, inverseSum, tailMask);
     AscendC::Reg::Cast<half, float, kFloatToHalf>(
         outputHalf, normalized, tailMask);
     AscendC::Reg::StoreAlign<
         half, AscendC::Reg::StoreDist::DIST_PACK_B32>(
         output + offset, outputHalf, tailMask);
+  }
+}
+
+// The input and output queue slots change roles only after their last read.
+// One slot holds the input FP16 and then normalized FP16. The other holds
+// FP32 exponentials until the output adapter overwrites them with FP16.
+__simd_vf__ inline void SoftmaxResidentVF(
+    __ubuf__ half* input, __ubuf__ float* exponential, uint32_t count,
+    uint32_t chunks) {
+  using namespace AscendC::Reg;
+  constexpr uint32_t width = AscendC::VECTOR_REG_WIDTH / sizeof(float);
+  static constexpr CastTrait toFloat = {RegLayout::ZERO, SatMode::UNKNOWN,
+                                 MaskMergeMode::ZEROING, AscendC::RoundMode::UNKNOWN};
+  static constexpr CastTrait toHalf = {RegLayout::ZERO, SatMode::NO_SAT,
+                                MaskMergeMode::ZEROING, AscendC::RoundMode::CAST_RINT};
+  RegTensor<half> h;
+  RegTensor<float> x, maxLanes, maxValue, negativeInfinity;
+  RegTensor<float> sumLanes, sumValue, inverse, ex;
+  auto full = CreateMask<uint32_t, MaskPattern::ALL>();
+  Duplicate<float>(negativeInfinity, kNegativeInfinity, full);
+  Duplicate<float>(maxLanes, kNegativeInfinity, full);
+  uint32_t remaining = count;
+  for (uint32_t chunk = 0; chunk < chunks; ++chunk) {
+    const uint32_t offset = chunk * width;
+    auto m = UpdateMask<float>(remaining);
+    LoadAlign<half, LoadDist::DIST_UNPACK_B16>(h, input + offset);
+    Cast<float, half, toFloat>(x, h, m);
+    Select<float>(x, x, negativeInfinity, m);
+    Max<float>(maxLanes, maxLanes, x, full);
+  }
+  Reduce<ReduceType::MAX>(x, maxLanes, full);
+  Duplicate<float>(maxValue, x, full);
+  Duplicate<float>(sumLanes, 0.0F, full);
+  remaining = count;
+  for (uint32_t chunk = 0; chunk < chunks; ++chunk) {
+    const uint32_t offset = chunk * width;
+    auto m = UpdateMask<float>(remaining);
+    LoadAlign<half, LoadDist::DIST_UNPACK_B16>(h, input + offset);
+    Cast<float, half, toFloat>(x, h, m);
+    Sub<float>(x, x, maxValue, m);
+    Exp<float>(ex, x, m);
+    Add<float>(sumLanes, sumLanes, ex, full);
+    StoreAlign<float, StoreDist::DIST_NORM_B32>(exponential + offset, ex, m);
+  }
+  Reduce<ReduceType::SUM>(x, sumLanes, full);
+  Duplicate<float>(sumValue, x, full);
+  Duplicate<float>(inverse, 1.0F, full);
+  Div<float>(inverse, inverse, sumValue, full);
+  LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
+  remaining = count;
+  for (uint32_t chunk = 0; chunk < chunks; ++chunk) {
+    const uint32_t offset = chunk * width;
+    auto m = UpdateMask<float>(remaining);
+    LoadAlign<float, LoadDist::DIST_NORM>(ex, exponential + offset);
+    Mul<float>(x, ex, inverse, m);
+    Cast<half, float, toHalf>(h, x, m);
+    StoreAlign<half, StoreDist::DIST_PACK_B32>(input + offset, h, m);
   }
 }
 
@@ -226,28 +178,6 @@ __aicore__ inline uint32_t ChunkCount(uint32_t count) {
   constexpr uint32_t kVectorLength =
       AscendC::VECTOR_REG_WIDTH / sizeof(float);
   return (count + kVectorLength - 1) / kVectorLength;
-}
-
-__aicore__ inline void ComputeTileMax(
-    const AscendC::LocalTensor<half>& input,
-    const AscendC::LocalTensor<float>& rowMax,
-    uint32_t count, uint32_t firstTile) {
-  asc_vf_call<SoftmaxTileMaxVF>(
-      (__ubuf__ half*)input.GetPhyAddr(),
-      (__ubuf__ float*)rowMax.GetPhyAddr(), count, ChunkCount(count),
-      firstTile);
-}
-
-__aicore__ inline void ComputeTileExpSum(
-    const AscendC::LocalTensor<half>& input,
-    const AscendC::LocalTensor<float>& rowMax,
-    const AscendC::LocalTensor<float>& rowSum,
-    uint32_t count, uint32_t firstTile) {
-  asc_vf_call<SoftmaxTileExpSumVF>(
-      (__ubuf__ half*)input.GetPhyAddr(),
-      (__ubuf__ float*)rowMax.GetPhyAddr(),
-      (__ubuf__ float*)rowSum.GetPhyAddr(), count, ChunkCount(count),
-      firstTile);
 }
 
 __aicore__ inline void ComputeNormalize(
@@ -272,6 +202,67 @@ __aicore__ inline void ApplyStoreAdapterSimt(
       (__ubuf__ half*)normalized.GetPhyAddr(), count);
 }
 
+// Compute the tile statistics in register space, then merge the two
+// running scalars while the current input remains in UB.
+__simd_vf__ inline void SoftmaxOnlineStatsVF(
+    __ubuf__ half* input, __ubuf__ float* rowMaxSlot,
+    __ubuf__ float* rowSumSlot, uint32_t count, uint32_t chunks, uint32_t first) {
+  using namespace AscendC::Reg;
+  constexpr uint32_t width = AscendC::VECTOR_REG_WIDTH / sizeof(float);
+  static constexpr CastTrait toFloat = {RegLayout::ZERO, SatMode::UNKNOWN,
+                                 MaskMergeMode::ZEROING, AscendC::RoundMode::UNKNOWN};
+  RegTensor<half> h;
+  RegTensor<float> x, maxLanes, maxValue, negativeInfinity;
+  RegTensor<float> sumLanes, sumValue, ex;
+  auto full = CreateMask<uint32_t, MaskPattern::ALL>();
+  Duplicate<float>(negativeInfinity, kNegativeInfinity, full);
+  Duplicate<float>(maxLanes, kNegativeInfinity, full);
+  uint32_t remaining = count;
+  for (uint32_t chunk = 0; chunk < chunks; ++chunk) {
+    const uint32_t offset = chunk * width;
+    auto m = UpdateMask<float>(remaining);
+    LoadAlign<half, LoadDist::DIST_UNPACK_B16>(h, input + offset);
+    Cast<float, half, toFloat>(x, h, m);
+    Select<float>(x, x, negativeInfinity, m);
+    Max<float>(maxLanes, maxLanes, x, full);
+  }
+  Reduce<ReduceType::MAX>(x, maxLanes, full);
+  Duplicate<float>(maxValue, x, full);
+  Duplicate<float>(sumLanes, 0.0F, full);
+  remaining = count;
+  for (uint32_t chunk = 0; chunk < chunks; ++chunk) {
+    const uint32_t offset = chunk * width;
+    auto m = UpdateMask<float>(remaining);
+    LoadAlign<half, LoadDist::DIST_UNPACK_B16>(h, input + offset);
+    Cast<float, half, toFloat>(x, h, m);
+    Sub<float>(x, x, maxValue, m);
+    Exp<float>(ex, x, m);
+    Add<float>(sumLanes, sumLanes, ex, full);
+  }
+  Reduce<ReduceType::SUM>(sumValue, sumLanes, full);
+  auto one = CreateMask<uint32_t, MaskPattern::VL1>();
+  if (first == 0) {
+    RegTensor<float> prevMax, prevSum, newMax, prevFactor, tileFactor;
+    LoadAlign<float, LoadDist::DIST_BRC_B32>(prevMax, rowMaxSlot);
+    LoadAlign<float, LoadDist::DIST_BRC_B32>(prevSum, rowSumSlot);
+    Max<float>(newMax, prevMax, maxValue, one);
+    Sub<float>(prevFactor, prevMax, newMax, one);
+    Sub<float>(tileFactor, maxValue, newMax, one);
+    Exp<float>(prevFactor, prevFactor, one);
+    Exp<float>(tileFactor, tileFactor, one);
+    Mul<float>(prevSum, prevSum, prevFactor, one);
+    Mul<float>(sumValue, sumValue, tileFactor, one);
+    Add<float>(sumValue, sumValue, prevSum, one);
+    StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(rowMaxSlot, newMax, one);
+  } else {
+    StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(rowMaxSlot, maxValue, one);
+  }
+  StoreAlign<float, StoreDist::DIST_FIRST_ELEMENT_B32>(rowSumSlot, sumValue, one);
+}
+
+#include "softmax_short_rowbatch.hpp"
+
+template <bool kCacheRow>
 class SoftmaxRegRecomputeKernel {
  public:
   __aicore__ inline void Init(
@@ -280,20 +271,68 @@ class SoftmaxRegRecomputeKernel {
     outputGm_.SetGlobalBuffer((__gm__ half*)output);
     rows_ = rows;
     columns_ = columns;
-    pipe_.InitBuffer(
-        inputQueue_, kPipelineDepth, kTileBytes);
-    pipe_.InitBuffer(
-        outputQueue_, kPipelineDepth, kTileBytes);
-    pipe_.InitBuffer(normalizedBuffer_, kTileBytes);
-    pipe_.InitBuffer(rowMaxBuffer_, kScalarSlotBytes);
-    pipe_.InitBuffer(rowSumBuffer_, kScalarSlotBytes);
+    if constexpr (kCacheRow) {
+      pipe_.InitBuffer(inputQueue_, 1, kResidentElements * sizeof(half));
+      pipe_.InitBuffer(outputQueue_, 1, kResidentElements * sizeof(float));
+    } else {
+      pipe_.InitBuffer(inputQueue_, kQueueSlots, kTileBytes);
+      pipe_.InitBuffer(outputQueue_, kQueueSlots, kTileBytes);
+      pipe_.InitBuffer(normalizedBuffer_, kTileBytes);
+      pipe_.InitBuffer(rowMaxBuffer_, kScalarSlotBytes);
+      pipe_.InitBuffer(rowSumBuffer_, kScalarSlotBytes);
+    }
   }
 
   __aicore__ inline void Process() {
-    const int64_t firstRow = static_cast<int64_t>(AscendC::GetBlockIdx());
-    const int64_t rowStride = static_cast<int64_t>(AscendC::GetBlockNum());
-    for (int64_t row = firstRow; row < rows_; row += rowStride) {
-      ProcessRow(row);
+    const int64_t block = static_cast<int64_t>(AscendC::GetBlockIdx());
+    const int64_t blocks = static_cast<int64_t>(AscendC::GetBlockNum());
+    // A DataCopyPad tail can share a 32-byte GM block with the next row.
+    // All rows that share that block must be written by the same vector core.
+    constexpr uint32_t gmBlockHalves = 32U / sizeof(half);
+    if (columns_ % gmBlockHalves != 0) {
+      uint32_t groupRows = 1;
+      while ((groupRows * columns_) % gmBlockHalves != 0) {
+        groupRows *= 2;
+      }
+      for (int64_t first = block * groupRows; first < rows_;
+           first += blocks * groupRows) {
+        const int64_t remaining = rows_ - first;
+        const uint32_t live = remaining < groupRows
+            ? static_cast<uint32_t>(remaining) : groupRows;
+        for (uint32_t i = 0; i < live; ++i) {
+          if constexpr (kCacheRow) {
+            ProcessCachedRows(first + i, 1);
+          } else {
+            PassOnlineStats(first + i);
+            PassNormalize(first + i);
+          }
+        }
+      }
+      return;
+    }
+    if constexpr (kCacheRow) {
+      uint32_t batch = 1;
+      if (columns_ % (AscendC::VECTOR_REG_WIDTH / sizeof(float)) == 0) {
+        // A batch occupies one contiguous input transfer and one output
+        // adapter invocation. Keep every vector core supplied with work.
+        const uint32_t capacityRows = kResidentElements / columns_;
+        const int64_t rowsPerCore = rows_ / blocks;
+        if (rowsPerCore > 1) {
+          batch = rowsPerCore < capacityRows ? static_cast<uint32_t>(rowsPerCore)
+                                            : capacityRows;
+        }
+      }
+      for (int64_t row = block * batch; row < rows_; row += blocks * batch) {
+        const int64_t remaining = rows_ - row;
+        const uint32_t count = remaining < batch ? static_cast<uint32_t>(remaining)
+                                                : batch;
+        ProcessCachedRows(row, count);
+      }
+    } else {
+      for (int64_t row = block; row < rows_; row += blocks) {
+        PassOnlineStats(row);
+        PassNormalize(row);
+      }
     }
   }
 
@@ -312,7 +351,7 @@ class SoftmaxRegRecomputeKernel {
   __aicore__ inline void CopyIn(
       int64_t row, uint32_t tileOffset, uint32_t count) {
     AscendC::LocalTensor<half> inputLocal =
-        inputQueue_.AllocTensor<half>();
+        inputQueue_.template AllocTensor<half>();
     AscendC::DataCopyExtParams params{
         1, static_cast<uint32_t>(count * sizeof(half)), 0, 0, 0};
     AscendC::DataCopyPadExtParams<half> pad{false, 0, 0, 0};
@@ -324,7 +363,7 @@ class SoftmaxRegRecomputeKernel {
   __aicore__ inline void CopyOut(
       int64_t row, uint32_t tileOffset, uint32_t count) {
     AscendC::LocalTensor<half> outputLocal =
-        outputQueue_.DeQue<half>();
+        outputQueue_.template DeQue<half>();
     AscendC::DataCopyExtParams params{
         1, static_cast<uint32_t>(count * sizeof(half)), 0, 0, 0};
     AscendC::DataCopyPad(
@@ -332,49 +371,47 @@ class SoftmaxRegRecomputeKernel {
     outputQueue_.FreeTensor(outputLocal);
   }
 
-  __aicore__ inline void PassMax(int64_t row) {
-    AscendC::LocalTensor<float> rowMax = rowMaxBuffer_.Get<float>();
-    uint32_t firstTile = 1;
+  __aicore__ inline void PassOnlineStats(int64_t row) {
+    const auto rowMax = rowMaxBuffer_.Get<float>();
+    const auto rowSum = rowSumBuffer_.Get<float>();
+    CopyIn(row, 0, TileCount(0));
     for (uint32_t offset = 0; offset < columns_; offset += kTileElements) {
       const uint32_t count = TileCount(offset);
-      CopyIn(row, offset, count);
-      AscendC::LocalTensor<half> inputLocal =
-          inputQueue_.DeQue<half>();
-      ComputeTileMax(inputLocal, rowMax, count, firstTile);
-      inputQueue_.FreeTensor(inputLocal);
+      const uint32_t next = offset + kTileElements;
+      if (next < columns_) {
+        // Queue slot 2 lets MTE2 fetch the next independent tile while the
+        // vector pipelines process the current one.
+        CopyIn(row, next, TileCount(next));
+      }
+      auto input = inputQueue_.template DeQue<half>();
+      asc_vf_call<SoftmaxOnlineStatsVF>(
+          (__ubuf__ half*)input.GetPhyAddr(),
+          (__ubuf__ float*)rowMax.GetPhyAddr(),
+          (__ubuf__ float*)rowSum.GetPhyAddr(), count, ChunkCount(count),
+          offset == 0);
+      inputQueue_.FreeTensor(input);
       AscendC::PipeBarrier<PIPE_V>();
-      firstTile = 0;
-    }
-  }
-
-  __aicore__ inline void PassExpSum(int64_t row) {
-    AscendC::LocalTensor<float> rowMax = rowMaxBuffer_.Get<float>();
-    AscendC::LocalTensor<float> rowSum = rowSumBuffer_.Get<float>();
-    uint32_t firstTile = 1;
-    for (uint32_t offset = 0; offset < columns_; offset += kTileElements) {
-      const uint32_t count = TileCount(offset);
-      CopyIn(row, offset, count);
-      AscendC::LocalTensor<half> inputLocal =
-          inputQueue_.DeQue<half>();
-      ComputeTileExpSum(inputLocal, rowMax, rowSum, count, firstTile);
-      inputQueue_.FreeTensor(inputLocal);
-      AscendC::PipeBarrier<PIPE_V>();
-      firstTile = 0;
     }
   }
 
   __aicore__ inline void PassNormalize(int64_t row) {
     AscendC::LocalTensor<float> rowMax = rowMaxBuffer_.Get<float>();
     AscendC::LocalTensor<float> rowSum = rowSumBuffer_.Get<float>();
+    CopyIn(row, 0, TileCount(0));
     for (uint32_t offset = 0; offset < columns_; offset += kTileElements) {
       const uint32_t count = TileCount(offset);
       // CopyIn finishes before the same GM range is overwritten. This is the
-      // exact-in-place safety condition for pass 3.
-      CopyIn(row, offset, count);
+      // exact-in-place safety condition for the normalization pass.
+      const uint32_t next = offset + kTileElements;
+      if (next < columns_) {
+        // Queue slot 2 lets MTE2 fetch the next independent tile while the
+        // vector pipelines process the current one.
+        CopyIn(row, next, TileCount(next));
+      }
       AscendC::LocalTensor<half> inputLocal =
-          inputQueue_.DeQue<half>();
+          inputQueue_.template DeQue<half>();
       AscendC::LocalTensor<half> outputLocal =
-          outputQueue_.AllocTensor<half>();
+          outputQueue_.template AllocTensor<half>();
       AscendC::LocalTensor<half> normalizedLocal =
           normalizedBuffer_.Get<half>();
       ComputeNormalize(normalizedLocal, inputLocal, rowMax, rowSum, count);
@@ -386,20 +423,31 @@ class SoftmaxRegRecomputeKernel {
     }
   }
 
-  __aicore__ inline void ProcessRow(int64_t row) {
-    // Pass 1: GM -> UB -> row max slot.
-    PassMax(row);
-    // Pass 2: GM -> UB -> exp/sum slot.
-    PassExpSum(row);
-    // Pass 3: GM -> UB -> normalize -> GM.
-    PassNormalize(row);
+  __aicore__ inline void ProcessCachedRows(int64_t firstRow, uint32_t numRows) {
+    const uint32_t elements = numRows * columns_;
+    CopyIn(firstRow, 0, elements);
+    auto input = inputQueue_.template DeQue<half>();
+    auto output = outputQueue_.template AllocTensor<half>();
+    auto* normalized = (__ubuf__ half*)input.GetPhyAddr();
+    auto* scratch = (__ubuf__ float*)output.GetPhyAddr();
+    for (uint32_t row = 0; row < numRows; ++row) {
+      const uint32_t offset = row * columns_;
+      asc_vf_call<SoftmaxResidentVF>(
+          normalized + offset, scratch + offset, columns_, ChunkCount(columns_));
+    }
+    AscendC::PipeBarrier<PIPE_V>();
+    ApplyStoreAdapterSimt(output, input, elements);
+    outputQueue_.EnQue(output);
+    CopyOut(firstRow, 0, elements);
+    inputQueue_.FreeTensor(input);
   }
 
+  static constexpr uint32_t kQueueSlots = kCacheRow ? 1 : kPipelineDepth;
   AscendC::TPipe pipe_;
   AscendC::GlobalTensor<half> inputGm_;
   AscendC::GlobalTensor<half> outputGm_;
-  AscendC::TQue<AscendC::TPosition::VECIN, kPipelineDepth> inputQueue_;
-  AscendC::TQue<AscendC::TPosition::VECOUT, kPipelineDepth> outputQueue_;
+  AscendC::TQue<AscendC::TPosition::VECIN, kQueueSlots> inputQueue_;
+  AscendC::TQue<AscendC::TPosition::VECOUT, kQueueSlots> outputQueue_;
   AscendC::TBuf<AscendC::TPosition::VECCALC> normalizedBuffer_;
   AscendC::TBuf<AscendC::TPosition::VECCALC> rowMaxBuffer_;
   AscendC::TBuf<AscendC::TPosition::VECCALC> rowSumBuffer_;
@@ -410,9 +458,20 @@ class SoftmaxRegRecomputeKernel {
 extern "C" __global__ __aicore__ void softmax_reg_recompute_kernel(
     GM_ADDR input, GM_ADDR output, int64_t rows, uint32_t columns) {
   KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-  SoftmaxRegRecomputeKernel kernel;
-  kernel.Init(input, output, rows, columns);
-  kernel.Process();
+  if (columns < ascify::target::dav_c310::rowwise_simd_v1::kSoftmaxMinimumColumns) {
+    SoftmaxShortBatchKernel shortBatch;
+    shortBatch.Run(input, output, rows, columns);
+    return;
+  }
+  if (columns <= kResidentElements) {
+    SoftmaxRegRecomputeKernel<true> kernel;
+    kernel.Init(input, output, rows, columns);
+    kernel.Process();
+  } else {
+    SoftmaxRegRecomputeKernel<false> kernel;
+    kernel.Init(input, output, rows, columns);
+    kernel.Process();
+  }
 }
 
 static inline aclError Launch(
@@ -440,18 +499,39 @@ static inline aclError Launch(
     blocks = std::min<int64_t>(blocks, gridCap);
   }
   blocks = std::max<int64_t>(blocks, 1);
+  // A group with a whole number of GM blocks still has misaligned
+  // boundaries if its output base is misaligned.
+  if ((reinterpret_cast<uintptr_t>(output) % 32U) != 0) {
+    blocks = 1;
+  }
   // In a SIMD+SIMT translation unit the second launch argument is the
   // dynamic-UB allocation shared by MainScalar and both VF modes.  Passing
   // zero here leaves the TPipe tensors outside the configured UB extent and
   // raises a vector-core UB-out-of-bounds exception on the first selected
   // call.
-  softmax_reg_recompute_kernel<<<
-      static_cast<int>(blocks), kUbBytes, stream>>>(
-      (GM_ADDR)input, (GM_ADDR)output, rows, static_cast<uint32_t>(columns));
+  if (columns >= ascify::target::dav_c310::rowwise_simd_v1::kSoftmaxMinimumColumns
+      && columns <= static_cast<int>(kResidentElements)) {
+    softmax_reg_recompute_kernel<<<
+        static_cast<int>(blocks), kResidentUbBytes, stream>>>(
+        (GM_ADDR)input, (GM_ADDR)output, rows, static_cast<uint32_t>(columns));
+  } else {
+    softmax_reg_recompute_kernel<<<
+        static_cast<int>(blocks), kUbBytes, stream>>>(
+        (GM_ADDR)input, (GM_ADDR)output, rows, static_cast<uint32_t>(columns));
+  }
   return aclrtPeekAtLastError(static_cast<aclrtLastErrLevel>(0));
 }
 
 }  // namespace ascify950_reg_softmax
+
+// v1 callers negotiate the extended shape domain before taking ownership.
+extern "C" int ascify950_softmax_supports_short_v1(
+    aclrtStream stream, const half* input, half* output, int64_t rows,
+    int columns) {
+  namespace simd = ascify::target::dav_c310::rowwise_simd_v1;
+  return columns < simd::kSoftmaxMinimumColumns &&
+         simd::IsSoftmaxSimdDomain(stream, input, output, rows, columns);
+}
 
 // Stable host-side link boundary used by the DPP/SIMT translation unit.  The
 // C ABI prevents the two compiler modes from disagreeing about C++ mangling.

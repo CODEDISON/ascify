@@ -230,7 +230,7 @@ both SIMD and SIMT vector functions. The implemented division of work is:
 
 | Operator | SIMD-owned stages | SIMT-owned stages |
 |---|---|---|
-| Softmax | row maximum, exponentiation, sum reduction, normalization division | contiguous normalized-value staging from UB to the output-local tile, including element indexing and tail copy |
+| Softmax | row maximum, exponentiation, sum reduction, row normalization | contiguous normalized-value staging from UB to the output-local tile, including element indexing and tail copy |
 | RMSNorm plain | square accumulation, sum reduction, square root, division, normalization | contiguous normalized-value staging from UB to the output-local tile, including element indexing and tail copy |
 | RMSNorm affine | square accumulation, sum reduction, square root, division, normalization, per-column affine multiply | contiguous normalized-value staging from UB to the output-local tile, including element indexing and tail copy |
 | LayerNorm | mean, centered-square accumulation, variance reduction, reciprocal square root | centered normalization and output-local indexing, including tail-safe staging |
@@ -248,7 +248,7 @@ the following fixed budgets:
 
 | Route | Dynamic UB launch capacity |
 |---|---:|
-| Softmax recompute | 163,904 bytes |
+| Softmax | 196,608 bytes for 4,096–32,768 columns, 163,904 bytes for the short-row and long-row routes |
 | RMSNorm cached | 65,600 bytes through 8192 columns; 131,136 bytes through 16384 columns |
 | RMSNorm plain row-batch | 147,520 bytes |
 | LayerNorm cached | 32,832 bytes |
@@ -268,10 +268,29 @@ applies these additional checks:
 
 | Route | Required runtime domain |
 |---|---|
-| Softmax recompute | Non-null stream/input/output; positive non-overflowing extent; `4096 <= columns <= 256000`; input/output byte spans are disjoint or exactly in-place |
+| Softmax | Non-null stream/input/output, positive non-overflowing extent, disjoint or exactly in-place spans. Accepts 4,096–256,000 columns. The short-row domain is described below. |
 | RMSNorm plain row-batch | No affine weight; positive extent; finite positive epsilon; `columns <= 3072` and divisible by 16; required pointer alignment and auxiliary non-aliasing; input/output disjoint or exactly in-place |
 | RMSNorm cached | Plain or affine; positive extent; finite positive epsilon; `columns <= 16384` and divisible by 8; required pointer alignment and auxiliary non-aliasing; input/output strictly non-overlapping |
 | LayerNorm cached | Positive extent; finite positive epsilon; `columns <= 8192` and divisible by 8; 16-byte input/output alignment; aligned, distinct mean/inverse-variance outputs; input/output disjoint or exactly in-place |
+
+Softmax also admits 64–3,072 columns in multiples of 64 when both pointers
+are 32-byte aligned and the matrix has at most 32,768 rows. For larger
+row counts the admitted widths are multiples of 64 through 1,024, plus
+1,536, 2,048 and 3,072. For widths of 1,000, 1,500 and 4,000 the kernel
+uses a padded row in UB. Input and output in GM remain contiguous, and the
+FP32 reductions exclude padded lanes. These widths also require 32-byte
+aligned pointers. The caller queries the loaded library's optional
+`ascify950_softmax_supports_short_v1` capability before using this route.
+A caller paired with an older v1 library uses the generated SIMT fallback
+for short rows. A launch error on a selected route is returned to the caller.
+
+The short-row kernel copies a batch into UB and reuses its FP32
+exponentials. The 4,096–32,768-column kernel keeps each row in UB through
+normalization and batches aligned rows when space permits. For wider rows
+the first pass combines each tile's maximum and exponential sum using a
+common maximum. A second pass normalizes the original inputs. The latter
+two routes use SIMD for the reductions and SIMT for contiguous output
+staging. Both support exact in-place operation.
 
 The RMSNorm selector checks the plain row-batch route before the cached route.
 Any call outside these domains returns `handled == false` and uses the retained

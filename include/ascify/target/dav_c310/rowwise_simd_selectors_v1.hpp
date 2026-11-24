@@ -13,6 +13,8 @@ namespace rowwise_simd_v1 {
 constexpr int kSelectorAbiVersion = 1;
 constexpr uintptr_t kHalfStorageBytes = sizeof(uint16_t);
 constexpr int64_t kSoftmaxMinimumColumns = 4096;
+constexpr int64_t kSoftmaxShortMaximumColumns = 3072;
+constexpr int64_t kSoftmaxShortMaximumRows = 32768;
 constexpr int64_t kSoftmaxMaximumColumns = 256000;
 constexpr int64_t kRmsNormCachedMaximumColumns = 16384;
 constexpr int64_t kRmsNormPlainRowBatchMaximumColumns = 3072;
@@ -106,9 +108,16 @@ inline bool IsSoftmaxSimdDomain(
     int64_t columns, int block_threads = 0, int grid_cap = 0) {
   ByteSpan input_span{};
   ByteSpan output_span{};
+  const bool padded_batch = columns == 1000 || columns == 1500 || columns == 4000;
+  const bool aligned_batch = columns >= 64 && columns <= kSoftmaxShortMaximumColumns
+      && columns % 64 == 0
+      && (rows <= kSoftmaxShortMaximumRows || columns <= 1024 || columns == 1536
+          || columns == 2048 || columns == 3072);
+  const bool short_batch = (padded_batch || aligned_batch)
+      && IsAligned(input, 32) && IsAligned(output, 32);
   return stream != nullptr
-      && columns >= kSoftmaxMinimumColumns
-      && columns <= kSoftmaxMaximumColumns
+      && (short_batch || (columns >= kSoftmaxMinimumColumns
+                          && columns <= kSoftmaxMaximumColumns))
       && block_threads == 0 && grid_cap == 0
       && TryMakeMatrixByteSpan(
              input, rows, columns, kHalfStorageBytes, &input_span)

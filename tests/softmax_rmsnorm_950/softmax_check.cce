@@ -41,6 +41,12 @@ static aclError LaunchSoftmax(aclrtStream stream, const half* input, half* outpu
 #endif
 }
 
+static float RowBoundaryInput(int64_t row, int64_t col, int64_t cols) {
+  if (col >= 16 && col < cols - 16) { return -32.0F; }
+  const int64_t lane = col < 16 ? col : cols - 1 - col + 5;
+  return -1.0F - 0.25F * static_cast<float>((row % 7 * 3 + lane) % 7);
+}
+
 static uint64_t CountByteMismatches(const void* lhs, const void* rhs,
                                     size_t bytes) {
   const auto* left = static_cast<const uint8_t*>(lhs);
@@ -152,6 +158,9 @@ int main(int argc, char** argv) {
     }
 
     const b950::InputPatternCode pattern = b950::PatternCode(test_case.input_pattern);
+    const bool row_boundary = test_case.input_pattern == "row_boundary";
+    const bool offset_in_place = test_case.scenario == "misaligned_in_place";
+    const bool in_place = test_case.scenario == "in_place" || offset_in_place;
     const uint64_t case_seed = seed ^ static_cast<uint64_t>(test_case.idx + 1);
     std::vector<uint16_t> host_input(elements);
     std::vector<uint16_t> host_input_after(elements);
@@ -161,7 +170,7 @@ int main(int argc, char** argv) {
       const int64_t row = static_cast<int64_t>(linear / static_cast<size_t>(test_case.cols));
       const int64_t col =
           static_cast<int64_t>(linear - static_cast<size_t>(row) * test_case.cols);
-      const float value =
+      const float value = row_boundary ? RowBoundaryInput(row, col, test_case.cols) :
           b950::HostInputValue(pattern, linear, row, col, test_case.cols, case_seed);
       host_input[linear] = b950::FloatToHalfBits(value);
       quantized_input[linear] = b950::HalfBitsToFloat(host_input[linear]);
@@ -170,7 +179,7 @@ int main(int argc, char** argv) {
     b950::DeviceBuffer device_input;
     b950::DeviceBuffer device_output;
     const size_t base_offset =
-        test_case.scenario == "misaligned_base" ? sizeof(half) : 0;
+        (test_case.scenario == "misaligned_base" || offset_in_place) ? sizeof(half) : 0;
     if (base_offset > std::numeric_limits<size_t>::max()
                           - kSoftmaxGuardBytes
         || bytes > std::numeric_limits<size_t>::max()
@@ -237,6 +246,30 @@ int main(int argc, char** argv) {
     if (error == ACL_SUCCESS) {
       error = aclrtMemcpy(host_input_after.data(), bytes, input_data, bytes,
                           ACL_MEMCPY_DEVICE_TO_HOST);
+    }
+    // The separate-buffer result provides a bitwise FP16 reference for the
+    // same inputs. Keep the FP64 oracle independent of both device launches.
+    uint64_t in_place_mismatches = 0;
+    if (error == ACL_SUCCESS && in_place) {
+      error = aclrtMemcpy(input_data, bytes, host_input.data(), bytes,
+                          ACL_MEMCPY_HOST_TO_DEVICE);
+      auto* shared_data = reinterpret_cast<half*>(input_data);
+      if (error == ACL_SUCCESS) {
+        error = LaunchSoftmax(session.Stream(), shared_data, shared_data,
+                              test_case.rows, test_case.cols);
+      }
+      if (error == ACL_SUCCESS) { error = aclrtSynchronizeStream(session.Stream()); }
+      if (error == ACL_SUCCESS) {
+        std::vector<uint16_t> in_place_output(elements);
+        error = aclrtMemcpy(in_place_output.data(), bytes, input_data, bytes,
+                            ACL_MEMCPY_DEVICE_TO_HOST);
+        if (error == ACL_SUCCESS) {
+          for (size_t i = 0; i < elements; ++i) {
+            if (in_place_output[i] != host_output[i]) { ++in_place_mismatches; }
+          }
+          host_output.swap(in_place_output);
+        }
+      }
     }
     uint64_t guard_mismatches = 0;
     if (error == ACL_SUCCESS) {
@@ -311,7 +344,7 @@ int main(int argc, char** argv) {
     if (nonfinite_count == 0 && max_abs_error <= abs_tolerance
         && max_scaled_rel_error <= scaled_rel_tolerance
         && max_row_sum_error <= row_sum_tolerance
-        && guard_mismatches == 0 && canary_mismatches == 0) {
+        && guard_mismatches == 0 && canary_mismatches == 0 && in_place_mismatches == 0) {
       record.status = "pass";
       ++passed;
     } else {
@@ -320,6 +353,9 @@ int main(int argc, char** argv) {
              << " scaled_rel<=" << scaled_rel_tolerance
              << " row_sum<=" << row_sum_tolerance
              << " guard=0 canary=0";
+      if (in_place_mismatches != 0) {
+        reason << " in_place_fp16_mismatches=" << in_place_mismatches;
+      }
       record.status = "fail";
       record.reason = reason.str();
       ++failed;

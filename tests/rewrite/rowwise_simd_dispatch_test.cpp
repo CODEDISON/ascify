@@ -139,7 +139,7 @@ int main() {
   ascify::target::dav_c310::SimdTryResult result =
       simd::TrySoftmaxSimd(stream, input, output, 8, 4096);
   assert(result.handled && result.status == 73 && softmax_calls == 1);
-  result = simd::TrySoftmaxSimd(stream, input, output, 8, 2048);
+  result = simd::TrySoftmaxSimd(stream, input, output, 8, 2049);
   assert(!result.handled && result.status == ACL_SUCCESS);
   assert(softmax_calls == 1);
 

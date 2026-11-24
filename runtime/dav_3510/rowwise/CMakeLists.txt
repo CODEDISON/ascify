@@ -103,7 +103,8 @@ target_link_libraries(ascify950_rowwise_simd_v1 INTERFACE
     softmax_reg_recompute
     rmsnorm_reg_cached
     rmsnorm_reg_plain_rowbatch
-    layernorm_reg_cached)
+    layernorm_reg_cached
+    ${CMAKE_DL_LIBS})
 
 install(TARGETS
     softmax_reg_recompute

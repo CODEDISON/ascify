@@ -30,8 +30,27 @@ int main() {
       stream, input, input, 8, 4096));
   assert(!simd::IsSoftmaxSimdDomain(
       stream, input, Address<void>(0x100002U), 8, 4096));
-  assert(!simd::IsSoftmaxSimdDomain(
-      stream, input, output, 8, 2048));
+  assert(simd::IsSoftmaxSimdDomain(stream, input, output, 8, 2048));
+  assert(simd::IsSoftmaxSimdDomain(stream, input, input, 17, 192));
+  assert(!simd::IsSoftmaxSimdDomain(stream, input, output, 8, 2049));
+  assert(!simd::IsSoftmaxSimdDomain(stream, input, Address<void>(0x100020U), 8, 2048));
+  assert(!simd::IsSoftmaxSimdDomain(stream, input, Address<void>(0x200002U), 8, 2048));
+  assert(simd::IsSoftmaxSimdDomain(stream, input, input, 32769, 768));
+  assert(simd::IsSoftmaxSimdDomain(stream, input, input, 32769, 2048));
+  assert(simd::IsSoftmaxSimdDomain(stream, input, input, 32769, 3072));
+  assert(!simd::IsSoftmaxSimdDomain(stream, input, input, 32769, 1280));
+  assert(!simd::IsSoftmaxSimdDomain(stream, input, input, 32769, 1023));
+  for (int64_t columns : {1000, 1500, 4000}) {
+    assert(simd::IsSoftmaxSimdDomain(stream, input, output, 8, columns));
+    assert(simd::IsSoftmaxSimdDomain(stream, input, input, 32769, columns));
+    assert(!simd::IsSoftmaxSimdDomain(
+        stream, input, Address<void>(0x100020U), 8, columns));
+    assert(!simd::IsSoftmaxSimdDomain(
+        stream, input, Address<void>(0x200002U), 8, columns));
+  }
+  for (int64_t columns : {1001, 1501, 4001, 4095}) {
+    assert(!simd::IsSoftmaxSimdDomain(stream, input, output, 8, columns));
+  }
   assert(!simd::IsSoftmaxSimdDomain(
       stream, input, output, 8, 4096, 256, 0));
 

@@ -308,6 +308,7 @@ if [[ -n "${ROWWISE_SIMD_RUNTIME_DIR}" ]]; then
     -lascify950_rmsnorm_reg_cached_v1
     -lascify950_rmsnorm_reg_plain_rowbatch_v1
     -lascify950_layernorm_reg_cached_v1
+    -ldl
   )
 fi
 
