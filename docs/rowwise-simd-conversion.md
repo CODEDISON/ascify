@@ -6,6 +6,10 @@ translated whole-SIMT launch as the selector-miss fallback. This path is
 disabled by default and has an explicit source, ABI, build, and measurement
 boundary.
 
+The [OneFlow validation record](validation-matrix.md#oneflow-fp16-hybrid-on-950pr)
+identifies the revision that generated the measured programs and the occupancy
+queries that stop the November translator on the same FP16 inputs.
+
 ## Convert a source file
 
 Select all three required options:
