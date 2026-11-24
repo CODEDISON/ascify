@@ -19,9 +19,39 @@ CUDA 源码  →  ascify-clang  →  Ascend 兼容源码  →  CANN 编译与设
 - 提供 SIMT 兼容路径，以及需要显式启用的 Softmax、RMSNorm、LayerNorm SIMD+SIMT 混合路径。
 - 对未支持的模式保留原源码或明确报错，具体行为由对应的转换契约定义。
 
-源码生成只是迁移的一步。目标编译、链接、数值正确性和性能需要分别验证。
-完整 CUDA Samples 应用的覆盖仍在推进；[兼容性参考](docs/compatibility.md)
-列出当前支持的操作及已知限制。
+[兼容性参考](docs/compatibility.md) 列出了支持的 CUDA API 和设备端构造。
+
+## Ascend950DT 上的 CUDA Samples 支持情况
+
+2026 年 11 月 24 日（UTC），同一安装版 Ascify 对 CUDA Samples v13.0 的 38 个原始向量类样例
+（计算 20 项、运行时 18 项）重新转换。**38/38** 生成目标源码，**31/38** 经 CANN 9.1.0
+编译、链接生成可执行文件，**29/38** 连续四次在实机上达到各自判据，其中包含仅验证运行的
+`clock`。这 29 项中，5 项需要调整构建或链接方式，2 项需要项目专用的 Driver 适配。
+
+| v13.0 结果 | CUDA Samples 样例 | 构建条件或实机判据 |
+|---|---|---|
+| 4/4 · 计算 | `binaryPartitionCG`, `fp16ScalarProduct`, `scalarProd`, `simpleTemplates`, `simpleVoteIntrinsics`, `template`, `threadFenceReduction`, `vectorAdd` | 按样例构建。 |
+| 4/4 · 运行时 | `graphMemoryNodes`, `simpleCallback`, `simpleCudaGraphs`, `simpleMultiCopy`, `simpleMultiGPU`, `simpleP2P`, `simpleStreams`, `simpleZeroCopy`, `streamOrderedAllocation` | 按样例构建。Graphs 使用顺序重放。 |
+| 4/4 · 运行时 | `asyncAPI`, `cudaOpenMP`, `simpleMPI` | 依次使用 CANN 采集库和可写的 `ASCIFY_PROFILE_DIR`、OpenMP 单个可见设备、单机两个 MPI 进程。 |
+| 4/4 · 内置独立构建 | `shfl_scan` | 使用 `--standalone-device-executable` 构建，核验扫描与积分图结果。 |
+| 4/4 · 运行演示 | `clock` | 程序运行完成，周期读数为 0。原样例没有数值断言。 |
+| 4/4 · 调整构建 | `scan`, `sortingNetworks` | 将生成的多个源文件合并为一个翻译单元编译。 |
+| 4/4 · 调整链接 | `histogram`, `mergeSort`, `reduction` | 调整主机与设备目标文件的共享库链接方式。 |
+| 4/4 · Driver 适配 | `simpleDrvRuntime`, `vectorAddDrv` | 依赖项目专用的带类型核函数启动代码和转发头文件。 |
+| 实机运行失败 | `cdpSimpleQuicksort`, `warpAggregatedAtomicsCG` | 前者的排序结果出现逆序，后者报告设备内存读取越界（355）。 |
+| 目标构建失败 | `cudaCompressibleMemory`, `reductionMultiBlockCG`, `simpleOccupancy` | 协同发射或占用率查询中的核函数指针被改写为 Graph 适配符号。 |
+| 目标构建失败 | `simpleAWBarrier` | 固定架构宏时改写重叠，其他配置生成的代码缺少样例辅助函数。 |
+| 目标构建失败 | `simpleCooperativeGroups`, `streamOrderedAllocationP2P` | 前者的设备端 `printf` 被改写为未声明的占位函数，后者的主机 lambda 中出现了设备端占位调用。 |
+| 目标构建失败 | `vectorAddMMAP` | 目标编译器报告默认参数重复，以及对 `void*` 进行指针算术。 |
+
+复验使用的 v13.0 样例提交为 `3f1c5096`，安装版 `ascify-clang` 的 SHA-256 为
+`b24012d79874b79bd3d15821ffac0139ad6fd65a09e9dccc2fe73571dd91d0de`。
+清单外的 `cdpAdvancedQuicksort` 有两个 CUDA 源文件，均已生成目标代码，目标编译器因不支持的内联类型报错。
+
+| CUDA Samples v13.4（提交 `5443602d`） | 同一安装版的复验结果 |
+|---|---|
+| `localityDomains` | 构建成功并连续运行四次，流和分配地址均回查到域 0。程序打印每域 64 个 SM，拆分所得资源的 `smCount = 0`。 |
+| `localityDomainsDrv` | 主机 C++ 源码转换成功，目标编译时缺少兼容命名空间及 Driver 类型。 |
 
 ## 快速开始
 

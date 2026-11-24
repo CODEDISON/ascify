@@ -24,10 +24,42 @@ CUDA source  →  ascify-clang  →  Ascend-compatible source  →  CANN build a
 - **Conservative boundaries:** Unsupported patterns retain their original source
   or fail explicitly, according to the relevant conversion contract.
 
-Generated source is one migration stage. It does not establish target compilation,
-linking, numerical correctness, or performance. Full CUDA Samples application
-coverage is ongoing work; see the [compatibility reference](docs/compatibility.md)
-for supported operations and known limitations.
+See the [compatibility reference](docs/compatibility.md) for supported CUDA APIs and device constructs.
+
+## CUDA Samples on Ascend950DT
+
+On 24 November 2026 (UTC), one Ascify installation translated **38/38** unmodified
+CUDA Samples v13.0 vector samples (20 compute, 18 runtime). **31/38** compiled and
+linked with CANN 9.1.0. **29/38** met their recorded criteria in four consecutive
+device runs, including the `clock` demonstration. Five of those 29 used an
+adjusted build or link step, and two required a project-specific Driver adapter.
+
+| v13.0 result | CUDA Samples | Build or device check |
+|---|---|---|
+| 4/4 · compute | `binaryPartitionCG`, `fp16ScalarProduct`, `scalarProd`, `simpleTemplates`, `simpleVoteIntrinsics`, `template`, `threadFenceReduction`, `vectorAdd` | Compiled and linked the translated sample. |
+| 4/4 · runtime | `graphMemoryNodes`, `simpleCallback`, `simpleCudaGraphs`, `simpleMultiCopy`, `simpleMultiGPU`, `simpleP2P`, `simpleStreams`, `simpleZeroCopy`, `streamOrderedAllocation` | Compiled and linked the translated sample. Graph replay was sequential. |
+| 4/4 · runtime | `asyncAPI`, `cudaOpenMP`, `simpleMPI` | `asyncAPI` used the profiling library and a writable `ASCIFY_PROFILE_DIR`. OpenMP used one visible device. MPI used two processes on one host. |
+| 4/4 · standalone build | `shfl_scan` | Used `--standalone-device-executable` for the scan and integral-image checks. |
+| 4/4 · demonstration | `clock` | The program ran and reported zero cycles. It has no numerical assertion. |
+| 4/4 · adjusted build | `scan`, `sortingNetworks` | Compiled the translated files together as one translation unit. |
+| 4/4 · adjusted link | `histogram`, `mergeSort`, `reduction` | Changed how host and device objects were linked into shared libraries. |
+| 4/4 · Driver adapter | `simpleDrvRuntime`, `vectorAddDrv` | Required project-specific typed kernel-launch code and a forwarding header. |
+| Failed on device | `cdpSimpleQuicksort`, `warpAggregatedAtomicsCG` | The sort produced an out-of-order pair. The atomic sample reported an out-of-bounds device read (355). |
+| Failed to build | `cudaCompressibleMemory`, `reductionMultiBlockCG`, `simpleOccupancy` | A kernel pointer in a cooperative launch or occupancy query was rewritten to a Graph adapter symbol. |
+| Failed to build | `simpleAWBarrier` | Pinning the architecture macro caused overlapping rewrites. Other profiles emitted code that lacked a sample helper. |
+| Failed to build | `simpleCooperativeGroups`, `streamOrderedAllocationP2P` | A device `printf` became an undeclared stub in the first sample. A host-lambda `printf` became a device stub in the second. |
+| Failed to build | `vectorAddMMAP` | The target compiler reported repeated default arguments and pointer arithmetic on `void*`. |
+
+The tested v13.0 CUDA Samples revision was `3f1c5096`. The installed
+`ascify-clang` SHA-256 was
+`b24012d79874b79bd3d15821ffac0139ad6fd65a09e9dccc2fe73571dd91d0de`.
+Outside this 38-sample set, both CUDA source files for `cdpAdvancedQuicksort`
+translated, and the target compiler rejected an inline type.
+
+| CUDA Samples v13.4 (revision `5443602d`) | Result on the same installation |
+|---|---|
+| `localityDomains` | Built and ran four times. The stream and allocation both reported domain 0. The program reported 64 SMs per domain and a split resource with `smCount = 0`. |
+| `localityDomainsDrv` | Host C++ translation succeeded. Undeclared Driver types and a missing compatibility namespace stopped target compilation. |
 
 ## Quick start
 

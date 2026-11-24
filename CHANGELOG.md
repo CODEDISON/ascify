@@ -6,8 +6,9 @@ for supported domains and experimental paths.
 
 ## Unreleased
 
-- Validate the complete original CUDA Samples v13.0 vector set (38/38) on
-  950DT, closing the collection with five full-chain acceptances:
+- Complete the historical v13.0 vector-sample campaign on 950DT across
+  multiple Ascify revisions. The [single-installation validation record](docs/validation-matrix.md)
+  gives the later per-sample results. The final five historical acceptances were:
   `simpleCallback` (per-device stream-callback workers; the historical
   "SVM populate" hang was a non-recursive-lock self-deadlock, per-device
   report-subscription keys and last-error pollution), `streamOrderedAllocationP2P`
@@ -25,8 +26,9 @@ for supported domains and experimental paths.
 - Add the block-scope `cuda::barrier` admission surface: a parse-provider
   overlay keeps `__shared__` barriers trivially constructible, the compat
   implementation is a sense-reversing rendezvous on the admitted pure-SIMT
-  atomics, and `simpleAWBarrier` validates end to end under retained-blocks
-  preprocessing with the exact `__CUDA_ARCH__` witness pin.
+  atomics. An earlier build ran `simpleAWBarrier` with retained-blocks
+  preprocessing and a pinned `__CUDA_ARCH__`. The November single-installation
+  recheck stopped before device execution.
 - Admit the retained-excluded-block preprocessing mode across the scalar64,
   occupancy, dynamic-warp-group, compiler-default, witness and verified-entry
   boundaries so `__CUDA_ARCH__`-guarded device code converts with in-guard

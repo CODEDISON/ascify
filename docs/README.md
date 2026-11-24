@@ -13,6 +13,7 @@ to prepare dependencies, build Ascify, and convert your first CUDA source.
 |---|---|
 | Look up command-line and build options | [Conversion reference](conversion-reference.md) |
 | Check supported APIs and known limitations | [CUDA compatibility](compatibility.md) |
+| Check which CUDA Samples built and ran on 950DT | [Target validation](validation-matrix.md) |
 | Convert dependencies included by your source | [Local headers](local-header-closure.md) |
 | Work with NVIDIA CUDA Samples helpers | [Sample helpers](sample-helpers.md) |
 | Build and use row-wise acceleration | [SIMD+SIMT Hybrid conversion](rowwise-simd-conversion.md) |
