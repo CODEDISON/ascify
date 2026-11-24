@@ -92,11 +92,9 @@ CMake 配置。安装后的程序会从 `libexec/ascify/clang/<major>/` 查找�
 支持的 shape、ABI 和验证方法见 [逐行算子转换说明](docs/rowwise-simd-conversion.md)。
 源码中的 `CUDA2DPP` 名称与 `.dpp` 输出后缀是保留的 Ascend 兼容命名。
 
-从公开提交 `610b517` 重新生成 OneFlow FP16 目标代码后，在 950PR 上以九月留存的 A800
-计时为基准复测。RMSNorm plain 和 affine 分别达到 81.53% 和 80.86%，均超过原定的 80%
-门槛。Softmax 正确性检查全部通过，两次完整计时分别为 44.40% 和 45.13%，九月为 92.17%。
-使用 11 月版转换器 `e199603` 处理相同输入时，Softmax 和 RMSNorm 均在占用率分析阶段停止。各组判据见
-[950PR 性能与转换记录](docs/validation-matrix.md#oneflow-fp16-hybrid-on-950pr)。
+950PR 上，更新后的 OneFlow FP16 Softmax（`392330b`）通过冻结清单全部 1,000 个精度用例。以留存的 A800 计时为基准，两轮完整的 1,000 项计时分别达到 **47.86% 和 47.70%**，低于本次原版对照的 56.04% 和原定的 80% 门槛。每项用例在均分中权重相同。按实际开销累计，20,000 次调度的 ACL 事件计时由原版的 567.56 秒降至 316.01 秒和 346.30 秒。原版在九月测得 92.17%，十一月最初两次复测为 44.40% 和 45.13%。
+
+十一月复测中，RMSNorm plain 和 affine 分别达到 81.53% 和 80.86%。上述测试使用公开提交 `610b517` 重新生成的 OneFlow 目标头文件。同一输入交给十一月版转换器 `e199603` 时，Softmax 和 RMSNorm 均在核函数占用率分析阶段停止。分组结果和数值边界见 [950PR 性能与转换记录](docs/validation-matrix.md#oneflow-fp16-hybrid-on-950pr)。
 
 ## 参与开发
 

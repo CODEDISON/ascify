@@ -188,6 +188,14 @@ for supported domains and experimental paths.
 
 ### Changed
 
+- Update the 950PR FP16 forward Softmax runtime behind the existing v1 ABI.
+  Admitted short rows use batched on-chip reductions, medium rows stay in
+  on-chip memory through normalization, and wide rows use two global-memory
+  passes. Short-row dispatch negotiates support with the loaded library.
+  The [validation matrix](docs/validation-matrix.md#softmax-performance-by-workload)
+  records full-list timing, in-place accuracy, and the FP16 row-sum limit on
+  an additional 256,000-column case.
+
 - Private texture descriptor ABI v2 rejects incompatible channel/filter/version
   tags before texel reads. Rebuild all texture-using TUs, libraries and probes
   with one complete helper installation and recreate handles, including existing

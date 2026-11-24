@@ -282,7 +282,10 @@ FP32 reductions exclude padded lanes. These widths also require 32-byte
 aligned pointers. The caller queries the loaded library's optional
 `ascify950_softmax_supports_short_v1` capability before using this route.
 A caller paired with an older v1 library uses the generated SIMT fallback
-for short rows. A launch error on a selected route is returned to the caller.
+for short rows. Recompile the generated target against the updated Ascify
+headers and link the updated Softmax library to enable batching. An executable
+built with the original headers keeps its original selector when the library
+is replaced. A launch error on a selected route is returned to the caller.
 
 The short-row kernel copies a batch into UB and reuses its FP32
 exponentials. The 4,096–32,768-column kernel keeps each row in UB through

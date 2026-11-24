@@ -114,13 +114,18 @@ Hybrid output needs the separately built runtime in
 [row-wise conversion guide](docs/rowwise-simd-conversion.md) for supported
 shapes, ABI requirements, and target validation.
 
-On 950PR, a rebuild of OneFlow FP16 targets from revision `610b517` reached
-81.53% of the frozen A800 baseline for RMSNorm plain and 80.86% for affine,
-both above the original 80% target. Softmax passed its correctness suite
-and measured 44.40% and 45.13% in two full runs, down from 92.17% in
-September. With the November translator `e199603`, both operators stopped
-at kernel occupancy analysis.
-See the [950PR performance and conversion results](docs/validation-matrix.md#oneflow-fp16-hybrid-on-950pr).
+On 950PR, the updated OneFlow FP16 Softmax build (`392330b`) passed all
+1,000 frozen accuracy cases. Against the frozen A800 reference, its two full
+1,000-case timing runs scored **47.86% and 47.70%**, below the original
+build's 56.04% in the same November campaign and the 80% target. Summed ACL
+event time over 20,000 dispatches fell from 567.56 s to 316.01 s and 346.30 s.
+The score weights each case equally. The original build scored 92.17% in
+September and 44.40% and 45.13% in the initial November rechecks.
+
+RMSNorm plain and affine reached 81.53% and 80.86% in the November
+reproduction. These benchmarks used OneFlow target headers regenerated with
+`610b517`. The November frontend `e199603` stopped at kernel occupancy
+analysis on the same inputs. See the [conversion and performance results](docs/validation-matrix.md#oneflow-fp16-hybrid-on-950pr).
 
 ## Documentation
 
